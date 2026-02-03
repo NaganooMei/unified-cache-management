@@ -52,6 +52,8 @@ def _apply_load_failure_patches() -> None:
     _patch_attention_layer()
     if _is_ascend():
         _patch_ascend_attention_layer()
+        _patch_ascend_npu_model_runner()
+        _patch_ascend_npu_worker()
     logger.info("UCM load-failure patches applied successfully for vLLM 0.11.0")
 
 
@@ -89,8 +91,7 @@ def _patch_kv_connector_base_v1() -> None:
 def _patch_kv_connector_output() -> None:
     """Add invalid_block_ids to KVConnectorOutput and update is_empty()."""
     try:
-        from dataclasses import dataclass, field
-        from typing import Optional
+        import functools
 
         from vllm.v1 import outputs as outputs_mod
 
@@ -98,30 +99,32 @@ def _patch_kv_connector_output() -> None:
         if getattr(KVConnectorOutput, "__ucm_load_failure_patched__", False):
             return
 
-        try:
-            from vllm.v1.outputs import KVConnectorStats
-        except Exception:
-            KVConnectorStats = None  # type: ignore[misc, assignment]
+        # 1. Wrap original __init__ to add invalid_block_ids parameter
+        original_init = KVConnectorOutput.__init__
 
-        @dataclass
-        class KVConnectorOutputPatched:
-            finished_sending: Optional[set[str]] = None
-            finished_recving: Optional[set[str]] = None
-            kv_connector_stats: Optional["KVConnectorStats"] = None
-            invalid_block_ids: set[int] = field(default_factory=set)
+        @functools.wraps(original_init)
+        def patched_init(self, *args, invalid_block_ids=None, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
 
-            def is_empty(self):
-                return (
-                    not self.finished_sending
-                    and not self.finished_recving
-                    and not self.kv_connector_stats
-                    and not self.invalid_block_ids
-                )
+        KVConnectorOutput.__init__ = patched_init
 
-        KVConnectorOutputPatched.__qualname__ = "KVConnectorOutput"
-        KVConnectorOutputPatched.__module__ = outputs_mod.__name__
-        outputs_mod.KVConnectorOutput = KVConnectorOutputPatched
-        KVConnectorOutputPatched.__ucm_load_failure_patched__ = True  # type: ignore[attr-defined]
+        # 2. Replace is_empty method to include invalid_block_ids check
+        def patched_is_empty(self):
+            return (
+                not self.finished_sending
+                and not self.finished_recving
+                and not self.kv_connector_stats
+                and not getattr(self, "invalid_block_ids", None)
+            )
+
+        KVConnectorOutput.is_empty = patched_is_empty
+
+        # 3. Update __annotations__ for type hints
+        if hasattr(KVConnectorOutput, "__annotations__"):
+            KVConnectorOutput.__annotations__["invalid_block_ids"] = set[int]
+
+        KVConnectorOutput.__ucm_load_failure_patched__ = True  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning("Could not patch KVConnectorOutput: %s", e)
 
@@ -958,6 +961,203 @@ def _patch_gpu_model_runner() -> None:
         logger.warning("Could not patch GPUModelRunner: %s", e)
 
 
+
+def _patch_ascend_npu_model_runner() -> None:
+    """Patch _update_states method in NPUModelRunner."""
+    try:
+        from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+        if getattr(NPUModelRunner, "__ucm_load_failure_patched__", False):
+            return
+            
+        def patched_update_states(self, scheduler_output: "SchedulerOutput") -> None:
+            # Remove finished requests from the cached states.
+            import torch
+            from vllm.sampling_params import SamplingType
+            from vllm.v1.worker.gpu_input_batch import CachedRequestState
+            from vllm.v1.worker.gpu_model_runner import VllmModelForPooling
+            from vllm.distributed.parallel_state import get_pp_group
+            from typing import cast
+            for req_id in scheduler_output.finished_req_ids:
+                self.requests.pop(req_id, None)
+
+            # Remove the finished requests from the persistent batch.
+            # NOTE(woosuk): There could be an edge case where finished_req_ids and
+            # scheduled_req_ids overlap. This happens when a request is aborted and
+            # then resubmitted with the same ID. In this case, we treat them as two
+            # distinct requests - clearing the cached states for the first request
+            # and handling the second as a new request.
+            for req_id in scheduler_output.finished_req_ids:
+                self.input_batch.remove_request(req_id)
+            for mm_hash in scheduler_output.free_encoder_mm_hashes:
+                self.encoder_cache.pop(mm_hash, None)
+            # Remove the unscheduled requests from the persistent batch.
+            # NOTE(woosuk): The unscheduled requests are either preempted requests
+            # or running requests that are not scheduled in this step. We remove
+            # them from the persistent batch but keep their cached states since
+            # they will be scheduled again sometime in the future.
+            scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
+            cached_req_ids = self.input_batch.req_id_to_index.keys()
+            unscheduled_req_ids = cached_req_ids - scheduled_req_ids
+            # NOTE(woosuk): The persistent batch optimization assumes that
+            # consecutive batches contain mostly the same requests. If batches
+            # have low request overlap (e.g., alternating between two distinct
+            # sets of requests), this optimization becomes very inefficient.
+            for req_id in unscheduled_req_ids:
+                self.input_batch.remove_request(req_id)
+
+            req_ids_to_add: list[str] = []
+            # Add new requests to the cached states.
+            for new_req_data in scheduler_output.scheduled_new_reqs:
+                req_id = new_req_data.req_id
+                sampling_params = new_req_data.sampling_params
+                pooling_params = new_req_data.pooling_params
+
+                if sampling_params and \
+                    sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+                    generator = torch.Generator(device=self.device)
+                    generator.manual_seed(sampling_params.seed)
+                else:
+                    generator = None
+
+                if pooling_params:
+                    assert (task := pooling_params.task) is not None, (
+                        "You did not set `task` in the API")
+                    model = cast(VllmModelForPooling, self.get_model())
+                    to_update = model.pooler.get_pooling_updates(task)
+                    to_update.apply(pooling_params)
+
+                backward_kwargs = {}
+                backward_kwargs["mm_features"] = new_req_data.mm_features
+
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    sampling_params=sampling_params,
+                    pooling_params=pooling_params,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                    **backward_kwargs,
+                )
+
+                # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+                if self.uses_mrope:
+                    self._init_mrope_positions(self.requests[req_id])
+
+                req_ids_to_add.append(req_id)
+
+            # Update the states of the running/resumed requests.
+            is_last_rank = get_pp_group().is_last_rank
+            req_data = scheduler_output.scheduled_cached_reqs
+            for i, req_id in enumerate(req_data.req_ids):
+                req_state = self.requests[req_id]
+                num_computed_tokens = req_data.num_computed_tokens[i]
+                new_block_ids = req_data.new_block_ids[i]
+                resumed_from_preemption = req_data.resumed_from_preemption[i]
+                num_output_tokens = req_data.num_output_tokens[i]
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+
+                # Update the cached states.
+                req_state.num_computed_tokens = num_computed_tokens
+
+                if not is_last_rank:
+                    # When using PP, the scheduler sends the sampled tokens back,
+                    # because there's no direct communication between the first-
+                    # stage worker and the last-stage worker.
+                    new_token_ids = req_data.new_token_ids[i]
+                    # Add the sampled token(s) from the previous step (if any).
+                    # This doesn't include "unverified" tokens like spec tokens.
+                    num_new_tokens = (num_computed_tokens + len(new_token_ids) -
+                                    req_state.num_tokens)
+                    if num_new_tokens == 1:
+                        # Avoid slicing list in most common case.
+                        req_state.output_token_ids.append(new_token_ids[-1])
+                    elif num_new_tokens > 0:
+                        req_state.output_token_ids.extend(
+                            new_token_ids[-num_new_tokens:])
+                elif num_output_tokens < len(req_state.output_token_ids):
+                    # Some output tokens were discarded due to a sync-KV-load
+                    # failure. Align the cached state.
+                    del req_state.output_token_ids[num_output_tokens:]
+                    if req_index is not None:
+                        end_idx = (
+                            self.input_batch.num_prompt_tokens[req_index]
+                            + num_output_tokens
+                        )
+                        self.input_batch.num_tokens[req_index] = end_idx
+                        self.input_batch.num_tokens_no_spec[req_index] = end_idx
+
+                # Update the block IDs.
+                if not resumed_from_preemption:
+                    if new_block_ids is not None:
+                        # Append the new blocks to the existing block IDs.
+                        for block_ids, new_ids in zip(req_state.block_ids,
+                                                    new_block_ids):
+                            block_ids.extend(new_ids)
+                else:
+                    assert new_block_ids is not None
+                    # The request is resumed from preemption.
+                    # Replace the existing block IDs with the new ones.
+                    req_state.block_ids = new_block_ids
+
+                if req_index is None:
+                    # The request is not in the persistent batch.
+                    # The request was either preempted and resumed later, or was not
+                    # scheduled in the previous step and needs to be added again.
+                    req_ids_to_add.append(req_id)
+                    continue
+
+                # Update the persistent batch.
+                self.input_batch.num_computed_tokens_cpu[req_index] = (
+                    num_computed_tokens)
+                if new_block_ids is not None:
+                    self.input_batch.block_table.append_row(
+                        new_block_ids, req_index)
+
+                # For the last rank, we don't need to update the token_ids_cpu
+                # because the sampled tokens are already cached.
+                if not is_last_rank:
+                    # Add new_token_ids to token_ids_cpu.
+                    start_token_index = num_computed_tokens
+                    end_token_index = num_computed_tokens + len(new_token_ids)
+                    self.input_batch.token_ids_cpu[
+                        req_index,
+                        start_token_index:end_token_index] = new_token_ids
+                    self.input_batch.num_tokens_no_spec[
+                        req_index] = end_token_index
+                    self.input_batch.num_tokens[req_index] = end_token_index
+
+                # Add spec_token_ids to token_ids_cpu.
+                spec_token_ids = (
+                    scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+                if spec_token_ids:
+                    num_spec_tokens = len(spec_token_ids)
+                    start_index = self.input_batch.num_tokens_no_spec[req_index]
+                    end_token_index = start_index + num_spec_tokens
+                    self.input_batch.token_ids_cpu[
+                        req_index, start_index:end_token_index] = spec_token_ids
+                    # NOTE(woosuk): `num_tokens` here may include spec tokens.
+                    self.input_batch.num_tokens[req_index] += num_spec_tokens
+
+            # Add the new or resumed requests to the persistent batch.
+            # The smaller empty indices are filled first.
+            for req_id in req_ids_to_add:
+                req_state = self.requests[req_id]
+                self.input_batch.add_request(req_state)
+
+            # Condense the batched states if there are gaps left by removed requests
+            self.input_batch.condense()
+            # Allow attention backend to reorder the batch, potentially
+            self._may_reorder_batch(scheduler_output)
+            # Refresh batch metadata with any pending updates.
+            self.input_batch.refresh_metadata()
+        NPUModelRunner._update_states = patched_update_states
+        NPUModelRunner.__ucm_load_failure_patched__ = True  # type: ignore[attr-defined]
+    except Exception as e:
+        logger.warning("Could not patch NPUModelRunner._update_states: %s", e)
+
 def _patch_gpu_worker() -> None:
     """Patch Worker to use kv_connector_output.is_empty()."""
     try:
@@ -1041,6 +1241,69 @@ def _patch_gpu_worker() -> None:
     except Exception as e:
         logger.warning("Could not patch Worker: %s", e)
 
+def _patch_ascend_npu_worker() -> None:
+    """Patch Worker to use kv_connector_output.is_empty()."""
+    try:
+        from typing import Optional, Union
+        from vllm_ascend.worker.worker_v1 import NPUWorker
+        if getattr(NPUWorker, "__ucm_load_failure_patched__", False):
+            return
+            
+        def patched_execute_model(
+            self,
+            scheduler_output: "SchedulerOutput",
+        ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+            # enable msMonitor to monitor the performance of vllm-ascend
+            import vllm_ascend.envs as envs_ascend
+            from torch_npu.profiler import dynamic_profile as dp
+            from vllm.distributed.parallel_state import (
+                get_pp_group,
+                get_tp_group,
+            )
+            from vllm.sequence import IntermediateTensors
+            from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                              ModelRunnerOutput)
+            import copy
+            if envs_ascend.MSMONITOR_USE_DAEMON:
+                dp.step()
+
+            intermediate_tensors = None
+            forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+            if forward_pass and not get_pp_group().is_first_rank:
+                intermediate_tensors = IntermediateTensors(
+                    get_pp_group().recv_tensor_dict(
+                        all_gather_group=get_tp_group()))
+
+            output = self.model_runner.execute_model(scheduler_output,
+                                                    intermediate_tensors)
+            if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
+                return output
+
+            assert isinstance(output, IntermediateTensors)
+            parallel_config = self.vllm_config.parallel_config
+            assert parallel_config.distributed_executor_backend != (
+                "external_launcher") and not get_pp_group().is_last_rank
+
+            get_pp_group().send_tensor_dict(output.tensors,
+                                            all_gather_group=get_tp_group())
+
+            kv_connector_output = output.kv_connector_output
+            if not kv_connector_output:
+                return None
+
+            # In case of PP with kv transfer, we need to pass through the
+            # kv_connector_output
+            if kv_connector_output.is_empty():
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
+            return output
+
+        NPUWorker.execute_model = patched_execute_model
+        NPUWorker.__ucm_load_failure_patched__ = True  # type: ignore[attr-defined]
+    except Exception as e:
+        logger.warning("Could not patch NPUWorker: %s", e)
 
 def _patch_kv_connector_model_runner_mixin() -> None:
     """Set output.invalid_block_ids in KVConnectorModelRunnerMixin."""
