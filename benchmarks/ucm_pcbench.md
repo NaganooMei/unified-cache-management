@@ -8,6 +8,63 @@ Prefix Caching（前缀缓存） 是当下大模型推理优化的核心技术�
 
 正是这些痛点催生了多层级KV-Cache卸载的架构革命——将缓存从昂贵的GPU显存（L1）扩展至CPU内存（L2）、本地SSD（L3）乃至远端存储（L4），实现存储与计算的解耦。本文将通过三大实测场景，系统对比原生HBM、KV Cache Pool与UCM/LMCache中心化架构在容量、性能、扩展性与成本维度的优劣，揭示为何UCM是当前唯一能同时满足CUDA/昇腾双平台、本地/分布式双场景的统一缓存管理方案。
 
+## 0. 复现实验脚本用法
+
+本文中的长文档 Prefix Caching 测试使用脚本 `benchmarks/long_doc_pc_completion.py` 完成。脚本通过 OpenAI-compatible `completions` 接口向推理服务发起请求，自动执行两轮 warmup、写入阶段、等待缓存持久化以及命中查询阶段，并将结果写入 CSV 文件。
+
+### 0.1 前置条件
+
+- 先启动待测推理服务，并确认服务暴露 `http://localhost:<port>/v1/completions` 接口。
+- `--model` 需要与服务端可识别的模型名或模型路径一致。
+- 建议在 `benchmarks` 目录下执行脚本，便于统一收集输出文件。
+- 依赖安装：
+
+```bash
+python3 -m pip install openai
+```
+
+### 0.2 基线测试：完全重算
+
+`no-pc` 模式用于获取裸推基线 TTFT：
+
+```bash
+cd benchmarks
+python3 long_doc_pc_completion.py \
+  --test-mode no-pc \
+  --doc-len-list 4000 8000 16000 32000 \
+  --concurrency-list 1 2 4 8 \
+  --port 18081 \
+  --model /home/models/QwQ-32B \
+  --repeat 1
+```
+
+### 0.3 Prefix Caching 测试
+
+`pc` 模式会先写入缓存，再按指定命中率发起查询请求。以下命令给出 50% 命中率示例：
+
+```bash
+cd benchmarks
+python3 long_doc_pc_completion.py \
+  --test-mode pc \
+  --doc-len-list 4000 8000 16000 32000 \
+  --concurrency-list 1 2 4 8 \
+  --hit-ratio 0.5 \
+  --port 18082 \
+  --model /home/models/QwQ-32B \
+  --repeat 1
+```
+
+如果需要复现文中的多组命中率对比，可分别将 `--hit-ratio` 设为 `1.0`、`0.5`、`0.3` 和 `0.0`。
+
+### 0.4 输出结果
+
+- `benchmark.log`：记录每轮 warmup 和每组参数组合的执行日志。
+- `prefix_cache_benchmark.csv`：记录每组参数的平均 TTFT。
+- `no-pc` 模式输出完全重算 TTFT。
+- `pc` 模式输出写入阶段 TTFT 和命中查询阶段 TTFT。
+
+快速上手命令与参数说明也可参考同目录下的 `README.md`。
+
 ## 1. 场景1：原生HBM Prefix Caching的容量陷阱
 
 ### 1.1 测试环境
