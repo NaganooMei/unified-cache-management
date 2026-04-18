@@ -83,14 +83,13 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
         logger.info(
             f"Mooncake setup success: role={'scheduler' if is_scheduler else 'worker'}, "
             f"protocol={self.protocol}, global_segment_size={global_segment_size}, "
-            f"local_buffer_size={local_buffer_size}, unique_id={self.unique_id}"
+            f"local_buffer_size={local_buffer_size}"
         )
         self._register_buffers()
 
     def _load_config(self, config: Dict[str, object]) -> bool:
         self.device_id = config.get("device_id", None)
         is_scheduler = self.device_id is None
-        self.unique_id = str(config.get("unique_id") or "ucm-dev")
         self.protocol = str(config.get("protocol") or DEFAULT_PROTOCOL)
 
         self.tensor_size_list = tuple(
@@ -204,26 +203,24 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
         return self.dump_data(block_ids, shard_index, addrs)
 
     def load_data(self, block_ids, shard_index, dst_addr) -> Task:
-        self._ensure_available()
-        if not block_ids:
-            return self._completed_task("load_data")
-
-        addrs = self._normalize_addr_matrix(dst_addr)
-        keys, sizes = self._prepare_task_payload(block_ids, shard_index, addrs)
-        future = self._executor.submit(self._execute_load, keys, addrs, sizes)
+        if isinstance(dst_addr, np.ndarray):
+            addrs = dst_addr
+        else:
+            addrs = np.array(dst_addr, dtype=np.uint64)
+        keys = self._build_task_keys(block_ids, shard_index)
+        future = self._executor.submit(self._execute_load, keys, addrs)
         return MooncakeTaskV1(future=future, operation="load_data", key_count=len(keys))
 
     def dump_data(
         self, block_ids, shard_index, src_addr, prerequisite_handle=0
     ) -> Task:
-        self._ensure_available()
-        if not block_ids:
-            return self._completed_task("dump_data")
-
-        addrs = self._normalize_addr_matrix(src_addr)
-        keys, sizes = self._prepare_task_payload(block_ids, shard_index, addrs)
+        if isinstance(src_addr, np.ndarray):
+            addrs = src_addr
+        else:
+            addrs = np.array(src_addr, dtype=np.uint64)
+        keys = self._build_task_keys(block_ids, shard_index)
         future = self._executor.submit(
-            self._execute_dump, keys, addrs, sizes, prerequisite_handle
+            self._execute_dump, keys, addrs, prerequisite_handle
         )
         return MooncakeTaskV1(future=future, operation="dump_data", key_count=len(keys))
 
@@ -261,78 +258,28 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
         keys = []
         for block_id in block_ids:
             block_hex = bytes(block_id).hex()
-            keys.append(f"{self.unique_id}:{block_hex}:0")
+            keys.append(f"{block_hex}:0")
         return keys
 
     def _build_task_keys(
         self, block_ids: List[bytes], shard_index: List[int]
     ) -> List[str]:
         return [
-            f"{self.unique_id}:{bytes(block_id).hex()}:{int(shard)}"
+            f"{bytes(block_id).hex()}:{int(shard)}"
             for block_id, shard in zip(block_ids, shard_index)
         ]
 
-    def _normalize_addr_matrix(
-        self, addr_matrix: List[List[int]] | np.ndarray
-    ) -> List[List[int]]:
-        np_addr = np.asarray(addr_matrix, dtype=np.uint64)
-        if np_addr.ndim != 2:
-            raise RuntimeError(
-                f"Mooncake address matrix must be 2-D, but got shape {np_addr.shape}."
-            )
-        return [[int(item) for item in row] for row in np_addr.tolist()]
-
-    def _build_sizes_matrix(self, addrs: List[List[int]]) -> List[List[int]]:
-        if not self.tensor_size_list:
-            raise RuntimeError(
-                "Mooncake dump_data requires tensor_size_list in worker config."
-            )
-
-        expected_cols = len(self.tensor_size_list)
-        first_row = addrs[0] if addrs else []
-        if len(first_row) != expected_cols:
-            raise RuntimeError(
-                f"Mooncake address width {len(first_row)} does not match tensor_size_list width {expected_cols}."
-            )
-        return [list(self.tensor_size_list) for _ in range(len(addrs))]
+    def _build_sizes_matrix(self, n_rows: int) -> List[List[int]]:
+        return [list(self.tensor_size_list) for _ in range(n_rows)]
 
     def _tensor_normalize(self, tensors: List[List[torch.Tensor]]) -> np.ndarray:
         if not tensors:
             return np.empty((0, 0), dtype=np.uint64)
 
-        width = len(tensors[0])
-        for row in tensors:
-            if len(row) != width:
-                raise RuntimeError("Mooncake tensor rows must have consistent width.")
-
         return np.asarray(
             [[tensor.data_ptr() for tensor in row] for row in tensors],
             dtype=np.uint64,
         )
-
-    def _ensure_available(self) -> None:
-        if self._shutdown.is_set():
-            raise RuntimeError("UcmMooncakeStoreV1 is shutting down.")
-
-    def _prepare_task_payload(
-        self,
-        block_ids: List[bytes],
-        shard_index: List[int],
-        addrs: List[List[int]],
-    ) -> tuple[List[str], List[List[int]]]:
-        if len(block_ids) != len(shard_index) or len(block_ids) != len(addrs):
-            raise RuntimeError(
-                "Mooncake task payload size mismatch: "
-                f"block_ids={len(block_ids)}, shard_index={len(shard_index)}, addrs={len(addrs)}."
-            )
-        keys = self._build_task_keys(block_ids, shard_index)
-        sizes = self._build_sizes_matrix(addrs)
-        return keys, sizes
-
-    def _completed_task(self, operation: str) -> MooncakeTaskV1:
-        future: Future = Future()
-        future.set_result(None)
-        return MooncakeTaskV1(future=future, operation=operation, key_count=0)
 
     def _set_device_context(self) -> None:
         if self.protocol == "ascend" and hasattr(torch, "npu"):
@@ -342,29 +289,15 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
         # Set thread-local device context once when worker starts.
         self._set_device_context()
 
-    def _execute_load(
-        self, keys: List[str], addrs: List[List[int]], sizes: List[List[int]]
-    ) -> None:
-        results = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
-        if len(results) != len(keys):
-            raise RuntimeError(
-                f"Mooncake load returned {len(results)} results for {len(keys)} keys."
-            )
-        for idx, (key, ret) in enumerate(zip(keys, results)):
-            ret_code = int(ret)
-            expected_size = sum(sizes[idx])
-            if ret_code < 0:
-                raise RuntimeError(f"load_data failed for key='{key}', ret={ret_code}.")
-            if ret_code != expected_size:
-                raise RuntimeError(
-                    f"load_data returned {ret_code} bytes for key='{key}', expected {expected_size}."
-                )
+    def _execute_load(self, keys: List[str], addrs: np.ndarray) -> None:
+        addrs_list = addrs.tolist()
+        sizes = self._build_sizes_matrix(len(addrs))
+        self.store.batch_get_into_multi_buffers(keys, addrs_list, sizes)
 
     def _execute_dump(
         self,
         keys: List[str],
-        addrs: List[List[int]],
-        sizes: List[List[int]],
+        addrs: np.ndarray,
         prerequisite_handle: int,
     ) -> None:
         if (
@@ -373,14 +306,9 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
             and hasattr(torch, "npu")
         ):
             torch.npu.synchronize()
-        results = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
-        if len(results) != len(keys):
-            raise RuntimeError(
-                f"Mooncake dump returned {len(results)} results for {len(keys)} keys."
-            )
-        for key, ret in zip(keys, results):
-            if int(ret) != 0:
-                raise RuntimeError(f"dump_data failed for key='{key}', ret={int(ret)}.")
+        addrs_list = addrs.tolist()
+        sizes = self._build_sizes_matrix(len(addrs))
+        self.store.batch_put_from_multi_buffers(keys, addrs_list, sizes)
 
     def _set_device_if_needed(self, config: Dict[str, object]) -> None:
         if not hasattr(torch, "npu"):
