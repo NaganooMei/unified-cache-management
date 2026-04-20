@@ -33,12 +33,122 @@ class MooncakeTaskV1(Task):
     key_count: int
 
 
+class _GlobalTransferEngine:
+    """Process-level singleton wrapper for ``mooncake.engine.TransferEngine``.
+
+    Aligns with the reference implementation in
+    ``vllm_ascend/distributed/kv_transfer/utils/mooncake_transfer_engine.py``:
+    every Mooncake ``store`` in the same Python process shares ONE
+    ``TransferEngine`` (so at most one ADXL engine per process), and buffer
+    registration is de-duplicated across store instances.
+    """
+
+    def __init__(self) -> None:
+        self._engine = None
+        self._engine_lock = threading.Lock()
+        self._register_lock = threading.Lock()
+        self._registered_ptrs: set[int] = set()
+        self._hostname: str | None = None
+        self._metadata_server: str | None = None
+        self._protocol: str | None = None
+        self._device_name: str | None = None
+
+    def get_engine(
+        self,
+        hostname: str,
+        metadata_server: str,
+        protocol: str,
+        device_name: str,
+    ):
+        if self._engine is not None:
+            return self._engine
+        with self._engine_lock:
+            if self._engine is not None:
+                return self._engine
+            try:
+                from mooncake.engine import TransferEngine  # type: ignore
+            except ImportError as exc:
+                raise ImportError(
+                    "Please install mooncake (https://github.com/kvcache-ai/Mooncake) "
+                    "to run UcmMooncakeStoreV1."
+                ) from exc
+
+            engine = TransferEngine()
+            ret = engine.initialize(
+                hostname,
+                metadata_server,
+                protocol,
+                device_name or "",
+            )
+            if ret != 0:
+                raise RuntimeError(
+                    f"TransferEngine.initialize failed: ret={ret}, "
+                    f"hostname={hostname}, protocol={protocol}, "
+                    f"metadata_server={metadata_server}."
+                )
+            self._engine = engine
+            self._hostname = hostname
+            self._metadata_server = metadata_server
+            self._protocol = protocol
+            self._device_name = device_name or ""
+            logger.info(
+                "Mooncake global TransferEngine initialized (host=%s, protocol=%s, "
+                "rpc_port=%s).",
+                hostname,
+                protocol,
+                self.rpc_port(),
+            )
+        return self._engine
+
+    def rpc_port(self) -> int:
+        assert self._engine is not None, "TransferEngine not initialized yet."
+        return int(self._engine.get_rpc_port())
+
+    def raw_engine(self):
+        assert self._engine is not None, "TransferEngine not initialized yet."
+        return self._engine.get_engine()
+
+    def register_buffers(
+        self,
+        ptrs: list[int],
+        sizes: list[int],
+    ) -> list[int]:
+        """Register each (ptr, size) via ``transfer_engine.register_memory``.
+
+        Duplicates (same ptr already registered in this process) are skipped.
+        Returns the list of ptrs actually registered by THIS call (callers can
+        track them if they want to deregister later).
+        """
+        if self._engine is None:
+            raise RuntimeError("TransferEngine not initialized; call get_engine first.")
+        if len(ptrs) != len(sizes):
+            raise ValueError("ptrs and sizes must have equal length.")
+
+        newly_registered: list[int] = []
+        with self._register_lock:
+            for ptr, size in zip(ptrs, sizes):
+                if ptr in self._registered_ptrs:
+                    continue
+                ret = self._engine.register_memory(ptr, size)
+                if ret != 0:
+                    raise RuntimeError(
+                        "TransferEngine.register_memory failed for "
+                        f"ptr={ptr}, size={size}, ret={ret}."
+                    )
+                self._registered_ptrs.add(ptr)
+                newly_registered.append(ptr)
+        return newly_registered
+
+
+_GLOBAL_TE = _GlobalTransferEngine()
+
+
 class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
 
     def __init__(self, config: Dict[str, object]) -> None:
         super().__init__(config)
         try:
-            from mooncake.store import MooncakeDistributedStore
+            from mooncake.store import MooncakeDistributedStore  # type: ignore
         except ImportError as exc:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
@@ -69,20 +179,35 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
         global_segment_size, local_buffer_size = self._build_segment_sizes(
             config, is_scheduler
         )
+
+        # Align with the vllm-ascend reference: share ONE TransferEngine per
+        # process, and pass it (plus a unique "host:port" local segment name)
+        # into store.setup().
+        transfer_engine = _GLOBAL_TE.get_engine(
+            hostname=self.local_hostname,
+            metadata_server=self.metadata_server,
+            protocol=self.protocol,
+            device_name=self.device_name,
+        )
+        self._transfer_engine = transfer_engine
+        self.local_seg = f"{self.local_hostname}:{_GLOBAL_TE.rpc_port()}"
+
         ret = self.store.setup(
-            self.local_hostname,
+            self.local_seg,
             self.metadata_server,
             global_segment_size,
             local_buffer_size,
             self.protocol,
             self.device_name,
             self.master_server_address,
+            _GLOBAL_TE.raw_engine(),
         )
         if ret != 0:
             raise RuntimeError(f"Initialize mooncake failed with ret={ret}.")
         logger.info(
             f"Mooncake setup success: role={'scheduler' if is_scheduler else 'worker'}, "
-            f"protocol={self.protocol}, global_segment_size={global_segment_size}, "
+            f"protocol={self.protocol}, local_seg={self.local_seg}, "
+            f"global_segment_size={global_segment_size}, "
             f"local_buffer_size={local_buffer_size}"
         )
         self._register_buffers()
@@ -249,16 +374,23 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
         if self._shutdown.is_set():
             return
         self._shutdown.set()
-        self._executor.shutdown(wait=True, cancel_futures=False)
-        for buffer_ptr in self._registered_buffers:
-            try:
-                self.store.unregister_buffer(buffer_ptr)
-            except Exception as exc:
-                logger.warning(
-                    f"Mooncake unregister_buffer failed for ptr={buffer_ptr}: {exc}"
-                )
+        # cancel_futures=True avoids wedging on queued work (Py 3.9+).
+        _kw: dict = {"wait": True}
+        import sys as _sys
+
+        if _sys.version_info >= (3, 9):
+            _kw["cancel_futures"] = True
+        self._executor.shutdown(**_kw)
+        # NOTE: Buffers are registered via the process-level shared
+        # TransferEngine (_GLOBAL_TE.register_buffers). We do NOT deregister
+        # them here because the engine is shared by sibling stores in the same
+        # process (mirrors the vllm-ascend reference behavior). The OS will
+        # release everything at process exit.
         self._registered_buffers.clear()
-        self.store.close()
+        try:
+            self.store.close()
+        except Exception as exc:
+            logger.warning(f"Mooncake store.close() raised: {exc}")
 
     def _build_lookup_keys(self, block_ids: List[bytes]) -> List[str]:
         keys = []
@@ -298,7 +430,8 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
     def _execute_load(self, keys: List[str], addrs: np.ndarray) -> None:
         addrs_list = addrs.tolist()
         sizes = self._build_sizes_matrix(len(addrs))
-        self.store.batch_get_into_multi_buffers(keys, addrs_list, sizes)
+        res = self.store.batch_get_into_multi_buffers(keys, addrs_list, sizes)
+        self._raise_if_batch_failed("batch_get_into_multi_buffers", keys, res)
 
     def _execute_dump(
         self,
@@ -314,7 +447,41 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
             torch.npu.synchronize()
         addrs_list = addrs.tolist()
         sizes = self._build_sizes_matrix(len(addrs))
-        self.store.batch_put_from_multi_buffers(keys, addrs_list, sizes)
+        res = self.store.batch_put_from_multi_buffers(keys, addrs_list, sizes)
+        self._raise_if_batch_failed("batch_put_from_multi_buffers", keys, res)
+
+    def _raise_if_batch_failed(self, op: str, keys: List[str], res) -> None:
+        """Surface Mooncake batch errors as Python exceptions.
+
+        Historically these C++ return codes were silently ignored, so a failed
+        dump/load looked like a successful ``store.wait()`` but the destination
+        tensor was all zeros. Mirrors the error handling in the vllm-ascend
+        reference (``MooncakeBackend.put``/``.get``), but escalated to raise so
+        that ``task.future.result()`` actually fails.
+        """
+        if res is None:
+            return
+        try:
+            values = list(res)
+        except TypeError:
+            if isinstance(res, int) and res != 0:
+                raise RuntimeError(f"Mooncake {op} failed with ret={res}.")
+            return
+
+        failures: list[tuple[str, int]] = []
+        for key, value in zip(keys, values):
+            try:
+                code = int(value)
+            except (TypeError, ValueError):
+                continue
+            if code < 0:
+                failures.append((key, code))
+        if failures:
+            preview = ", ".join(f"{k}={c}" for k, c in failures[:3])
+            raise RuntimeError(
+                f"Mooncake {op} failed for {len(failures)}/{len(values)} key(s): "
+                f"{preview}{' ...' if len(failures) > 3 else ''}"
+            )
 
     def _set_device_if_needed(self, config: Dict[str, object]) -> None:
         if not hasattr(torch, "npu"):
@@ -330,22 +497,24 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
         if not self.register_buffer_ptrs:
             return
 
-        seen_ptrs: set[int] = set()
-        for buffer_ptr, buffer_size in zip(
-            self.register_buffer_ptrs,
-            self.register_buffer_sizes,
-        ):
-            if buffer_ptr in seen_ptrs:
+        # De-duplicate (ptr, size) inside this store first.
+        seen: set[int] = set()
+        ptrs: list[int] = []
+        sizes: list[int] = []
+        for ptr, size in zip(self.register_buffer_ptrs, self.register_buffer_sizes):
+            if ptr in seen:
                 continue
-            seen_ptrs.add(buffer_ptr)
-            ret = self.store.register_buffer(buffer_ptr, buffer_size)
-            if ret != 0:
-                raise RuntimeError(
-                    "Mooncake buffer registration failed for "
-                    f"ptr={buffer_ptr}, size={buffer_size}, ret={ret}."
-                )
-            self._registered_buffers.append(buffer_ptr)
+            seen.add(ptr)
+            ptrs.append(int(ptr))
+            sizes.append(int(size))
+
+        newly = _GLOBAL_TE.register_buffers(ptrs, sizes)
+        self._registered_buffers.extend(newly)
 
         logger.info(
-            f"Mooncake registered worker buffers: count={len(self._registered_buffers)}"
+            "Mooncake registered worker buffers via shared TransferEngine: "
+            "new=%d, total_in_process_engine=%d (this store requested %d).",
+            len(newly),
+            len(_GLOBAL_TE._registered_ptrs),  # type: ignore[attr-defined]
+            len(ptrs),
         )
