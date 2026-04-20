@@ -55,6 +55,11 @@ Optional environment overrides:
 This test targets the UCM store layer only (not vLLM). Worker0 uses ``npu:0`` and
 worker1 uses ``npu:1`` (at least two NPUs required). Workers exercise the low-level
 ``dump_data`` / ``load_data`` APIs (device pointer matrices), not ``dump`` / ``load``.
+
+Run directly (no pytest required) from the repo root with ``PYTHONPATH`` set so
+that ``ucm`` is importable, for example::
+
+    PYTHONPATH=. python ucm/store/test/e2e/mooncake_scheduler_two_workers_test.py
 """
 from __future__ import annotations
 
@@ -66,7 +71,6 @@ import time
 from typing import Any
 
 import numpy as np
-import pytest
 import torch
 
 from ucm.store.factory_v1 import UcmConnectorFactoryV1
@@ -250,16 +254,6 @@ def run_mooncake_scheduler_two_workers_main() -> None:
             file=sys.stderr,
         )
         sys.exit(0)
-    time.sleep(0.5)
-    _run_multiprocess_e2e()
-
-
-@pytest.mark.integration
-def test_mooncake_scheduler_two_workers() -> None:
-    if not hasattr(torch, "npu"):
-        pytest.skip("torch.npu not available")
-    if not _ascend_two_npu_available():
-        pytest.skip("need at least 2 NPUs for Mooncake two-worker e2e")
     time.sleep(0.5)
     _run_multiprocess_e2e()
 
