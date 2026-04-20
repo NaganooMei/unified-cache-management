@@ -8,6 +8,7 @@ from typing import Dict, List
 
 import numpy as np
 import torch
+from vllm.utils.network_utils import get_ip
 
 from ucm.logger import init_logger
 from ucm.store.ucmstore_v1 import Task, UcmKVStoreBaseV1
@@ -21,7 +22,6 @@ DEFAULT_PROTOCOL = "ascend"
 DEFAULT_SCHEDULER_PROTOCOL = "rpc_only"
 DEFAULT_DEVICE_NAME = ""
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824 * 5
-DEFAULT_LOCAL_HOSTNAME = "127.0.0.1"
 DEFAULT_LOOKUP_SHARD_INDICES = 0
 DEFAULT_MOONCAKE_V1_WORKERS = 4
 
@@ -106,9 +106,15 @@ class UcmMooncakeStoreV1(UcmKVStoreBaseV1):
                 "register_buffer_ptrs and register_buffer_sizes must have the same length."
             )
 
-        self.local_hostname = str(
-            config.get("local_hostname") or DEFAULT_LOCAL_HOSTNAME
-        )
+        configured_local = config.get("local_hostname")
+        if configured_local is not None and str(configured_local).strip():
+            self.local_hostname = str(configured_local).strip()
+        else:
+            self.local_hostname = get_ip()
+            logger.info(
+                "Mooncake local_hostname not set in config; using vllm get_ip() -> %s",
+                self.local_hostname,
+            )
         self.metadata_server = str(
             config.get("metadata_server") or DEFAULT_METADATA_SERVER
         )
