@@ -22,53 +22,47 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
-"""Mooncake ``UcmMooncakeStoreV1`` multi-process smoke test: one scheduler + two workers.
+"""Mooncake ``UcmMooncakeStoreV1`` e2e: 1 scheduler + 2 workers.
 
-Prerequisites (Linux + Ascend):
+Key reliability behaviors:
 
-- Python package ``mooncake`` (see Mooncake build docs).
-- Start Mooncake master before running, for example::
+- If **any one child fails / exits non-zero**, the parent IMMEDIATELY terminates
+  the remaining children (no 5-min barrier wait).
+- Parent installs signal (SIGINT/SIGTERM) + ``atexit`` handlers so Ctrl+C reaps
+  every child; still-alive children get ``SIGKILL``.
+- Parent is set as a process group leader (``os.setpgrp``) on Linux, so a single
+  ``kill -TERM -<PGID>`` can take everything down.
+- Child wraps ``store.shutdown()`` in a timeout-guarded thread and exits via
+  ``os._exit`` to avoid hanging in Mooncake / Ascend native teardown.
 
-    mooncake_master \\
-      --port 50088 \\
-      --eviction_high_watermark_ratio 0.9 \\
-      --eviction_ratio 0.1 \\
-      --default_kv_lease_ttl 11000
-
-- Recommended environment (from UCM prefix-cache docs; adjust paths as needed)::
-
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-    export PYTHONHASHSEED=0
-    export HCCL_INTRA_ROCE_ENABLE=1
-    export HCCL_RDMA_TIMEOUT=17
-    export ASCEND_CONNECT_TIMEOUT=10000
-
-Optional environment overrides:
-
-- ``UCM_MOONCAKE_MASTER`` (default ``127.0.0.1:50088``)
-- ``UCM_MOONCAKE_METADATA`` (default ``P2PHANDSHAKE``)
-- ``UCM_MOONCAKE_LOCAL_HOSTNAME`` (default ``127.0.0.1``)
-- ``UCM_MOONCAKE_GLOBAL_SEGMENT`` (default ``256MB``)
-- ``UCM_MOONCAKE_LOCAL_BUFFER`` (default ``256MB``)
-- ``UCM_MOONCAKE_UNIQUE_ID`` (optional cluster id string)
-
-This test targets the UCM store layer only (not vLLM). Worker0 uses ``npu:0`` and
-worker1 uses ``npu:1`` (at least two NPUs required). Workers exercise the low-level
-``dump_data`` / ``load_data`` APIs (device pointer matrices), not ``dump`` / ``load``.
-
-Run directly (no pytest required) from the repo root with ``PYTHONPATH`` set so
-that ``ucm`` is importable, for example::
+Run (no pytest)::
 
     PYTHONPATH=. python ucm/store/test/e2e/mooncake_scheduler_two_workers_test.py
+
+Env (all optional):
+
+- ``UCM_MOONCAKE_MASTER``             default 127.0.0.1:50088
+- ``UCM_MOONCAKE_METADATA``           default P2PHANDSHAKE
+- ``UCM_MOONCAKE_LOCAL_HOSTNAME``     default 127.0.0.1
+- ``UCM_MOONCAKE_GLOBAL_SEGMENT``     default 256MB
+- ``UCM_MOONCAKE_LOCAL_BUFFER``       default 256MB
+- ``UCM_MOONCAKE_TEST_BARRIER_TIMEOUT`` default 300  (seconds)
+- ``UCM_MOONCAKE_TEST_JOIN_TIMEOUT``    default 600  (seconds, per child)
+- ``UCM_MOONCAKE_TEST_SHUTDOWN_TIMEOUT`` default 60  (seconds, child-side)
 """
 from __future__ import annotations
 
+import atexit
 import multiprocessing
 import os
 import secrets
+import signal
 import sys
+import threading
 import time
-from typing import Any
+import traceback
+from threading import BrokenBarrierError
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -78,7 +72,16 @@ from ucm.store.factory_v1 import UcmConnectorFactoryV1
 ROLE_SCHEDULER = 0
 ROLE_WORKER0 = 1
 ROLE_WORKER1 = 2
+ROLE_NAMES = {ROLE_SCHEDULER: "scheduler", ROLE_WORKER0: "worker0", ROLE_WORKER1: "worker1"}
 _NUM_PARTIES = 3
+
+# Parent-only bookkeeping so signal handlers / atexit can reap children.
+_CHILD_PROCS: list[multiprocessing.Process] = []
+
+
+# ---------------------------------------------------------------------------
+# Configs + helpers (shared by child roles)
+# ---------------------------------------------------------------------------
 
 
 def _mooncake_base_config() -> dict[str, Any]:
@@ -92,7 +95,7 @@ def _mooncake_base_config() -> dict[str, Any]:
         "device_name": "",
         "global_segment_size": os.environ.get("UCM_MOONCAKE_GLOBAL_SEGMENT", "256MB"),
         "local_buffer_size": os.environ.get("UCM_MOONCAKE_LOCAL_BUFFER", "256MB"),
-        "executor_workers": 2,
+        "executor_workers": 1,
         "unique_id": os.environ.get("UCM_MOONCAKE_UNIQUE_ID", "mooncake_e2e_test"),
     }
 
@@ -113,7 +116,6 @@ def _make_block_tensor(row_idx: int, numel: int, device_id: int) -> torch.Tensor
 
 
 def _tensor_rows_to_addr_array(tensors: list[list[torch.Tensor]]) -> np.ndarray:
-    """Build a pointer matrix for ``load_data`` / ``dump_data`` (same layout as connector)."""
     return np.asarray(
         [[int(t.data_ptr()) for t in row] for row in tensors],
         dtype=np.uint64,
@@ -139,6 +141,48 @@ def _worker_config(
     return cfg
 
 
+# ---------------------------------------------------------------------------
+# Child side
+# ---------------------------------------------------------------------------
+
+
+def _barrier_wait(barrier: multiprocessing.Barrier, label: str) -> None:
+    timeout = float(os.environ.get("UCM_MOONCAKE_TEST_BARRIER_TIMEOUT", "300"))
+    try:
+        barrier.wait(timeout=timeout)
+    except BrokenBarrierError as exc:
+        raise RuntimeError(
+            f"barrier '{label}' broken/timeout ({timeout}s): a peer likely crashed."
+        ) from exc
+
+
+def _shutdown_store_best_effort(store: Any, role: int) -> None:
+    timeout = float(os.environ.get("UCM_MOONCAKE_TEST_SHUTDOWN_TIMEOUT", "60"))
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            if hasattr(torch, "npu"):
+                try:
+                    torch.npu.synchronize()
+                except Exception:
+                    pass
+            store.shutdown()
+        except BaseException as exc:  # noqa: BLE001
+            print(f"[{ROLE_NAMES.get(role, role)}] shutdown error: {exc}", file=sys.stderr)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    if not done.wait(timeout=timeout):
+        print(
+            f"[{ROLE_NAMES.get(role, role)}] store.shutdown() exceeded {timeout}s; "
+            "forcing child exit.",
+            file=sys.stderr,
+        )
+
+
 def _mooncake_party(
     role: int,
     barrier: multiprocessing.Barrier,
@@ -146,6 +190,8 @@ def _mooncake_party(
     tensor_numel: int,
 ) -> None:
     store = None
+    exit_code = 0
+    label = ROLE_NAMES.get(role, str(role))
     try:
         base = _mooncake_base_config()
         if role == ROLE_SCHEDULER:
@@ -168,28 +214,24 @@ def _mooncake_party(
             cfg = _worker_config(base, 1, dst_tensors)
             store = UcmConnectorFactoryV1.create_connector("UcmMooncakeStoreV1", cfg)
 
-        barrier.wait()
+        _barrier_wait(barrier, "after_setup")
 
         if role == ROLE_WORKER0:
-            assert store is not None
             shard_indexes = [0] * len(block_ids)
             src_addrs = _tensor_rows_to_addr_array(src_tensors)
             task = store.dump_data(block_ids, shard_indexes, src_addrs)
             store.wait(task)
 
-        barrier.wait()
+        _barrier_wait(barrier, "after_worker0_dump")
 
         if role == ROLE_WORKER1:
-            assert store is not None
             shard_indexes = [0] * len(block_ids)
             dst_addrs = _tensor_rows_to_addr_array(dst_tensors)
             task = store.load_data(block_ids, shard_indexes, dst_addrs)
             store.wait(task)
             for i, row in enumerate(dst_tensors):
                 expected = torch.full(
-                    (tensor_numel,),
-                    float(i + 1),
-                    dtype=torch.bfloat16,
+                    (tensor_numel,), float(i + 1), dtype=torch.bfloat16
                 )
                 if not torch.allclose(row[0].cpu(), expected):
                     raise AssertionError(
@@ -197,10 +239,9 @@ def _mooncake_party(
                         f"expected {expected[:8]}"
                     )
 
-        barrier.wait()
+        _barrier_wait(barrier, "after_worker1_load")
 
         if role == ROLE_SCHEDULER:
-            assert store is not None
             hits = store.lookup(block_ids)
             if not all(hits):
                 raise AssertionError(f"scheduler lookup expected all True, got {hits}")
@@ -210,29 +251,166 @@ def _mooncake_party(
                     f"lookup_on_prefix expected {len(block_ids) - 1}, got {prefix_idx}"
                 )
 
-        barrier.wait()
+        _barrier_wait(barrier, "after_scheduler_lookup")
+        print(f"[{label}] OK", file=sys.stderr)
+    except BaseException:
+        exit_code = 1
+        print(f"[{label}] FAILED:", file=sys.stderr)
+        traceback.print_exc()
     finally:
         if store is not None:
-            store.shutdown()
+            _shutdown_store_best_effort(store, role)
+        # Bypass interpreter cleanup to guarantee the process dies promptly even
+        # if Mooncake / Ascend native state is still fussy.
+        os._exit(exit_code)
+
+
+# ---------------------------------------------------------------------------
+# Parent side: supervisor with fail-fast
+# ---------------------------------------------------------------------------
+
+
+def _kill_one(p: multiprocessing.Process, hard: bool = False) -> None:
+    if not p.is_alive():
+        return
+    if hard and sys.platform != "win32":
+        try:
+            os.kill(p.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+        except (ProcessLookupError, PermissionError):
+            pass
+    else:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
+def _terminate_all_children(reason: Optional[str] = None) -> None:
+    if reason:
+        print(f"[mooncake_e2e] terminating children: {reason}", file=sys.stderr)
+
+    alive = [p for p in _CHILD_PROCS if p is not None and p.is_alive()]
+    for p in alive:
+        _kill_one(p, hard=False)
+    deadline = time.monotonic() + 5.0
+    for p in alive:
+        remaining = max(0.0, deadline - time.monotonic())
+        p.join(timeout=remaining)
+
+    still = [p for p in _CHILD_PROCS if p is not None and p.is_alive()]
+    for p in still:
+        _kill_one(p, hard=True)
+    for p in still:
+        p.join(timeout=3)
+
+
+def _signal_exit(signum: int, _frame: Any) -> None:
+    _terminate_all_children(f"received signal {signum}")
+    os._exit(128 + signum)
+
+
+def _install_parent_cleanup() -> None:
+    atexit.register(lambda: _terminate_all_children("parent atexit"))
+    sigs = [signal.SIGINT]
+    if sys.platform != "win32":
+        sigs.append(signal.SIGTERM)
+    for sig in sigs:
+        try:
+            signal.signal(sig, _signal_exit)
+        except (OSError, ValueError):
+            pass
+
+
+def _become_process_group_leader() -> None:
+    if sys.platform == "win32":
+        return
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+
+
+def _supervise(workers: list[multiprocessing.Process]) -> list[tuple[str, int]]:
+    """Wait for all children.
+
+    Return list of (role_name, exitcode) for failed children. If any child
+    exits with non-zero code while others are still running, terminate the rest
+    **immediately** (no barrier wait).
+    """
+    join_timeout = float(os.environ.get("UCM_MOONCAKE_TEST_JOIN_TIMEOUT", "600"))
+    poll_interval = 0.5
+    deadline = time.monotonic() + join_timeout
+
+    failed: list[tuple[str, int]] = []
+    aborted = False
+
+    while True:
+        alive_any = False
+        for p in workers:
+            if p.exitcode is None and p.is_alive():
+                alive_any = True
+                continue
+            # Process has exited -> record if failure
+            if getattr(p, "_ucm_reaped", False):
+                continue
+            p._ucm_reaped = True  # type: ignore[attr-defined]
+            role_name = p.name or "unknown"
+            if p.exitcode not in (0, None):
+                failed.append((role_name, int(p.exitcode)))
+                if not aborted:
+                    aborted = True
+                    _terminate_all_children(
+                        f"{role_name} exited with code {p.exitcode}; aborting peers"
+                    )
+
+        if not alive_any:
+            break
+
+        if time.monotonic() > deadline:
+            _terminate_all_children(f"join timeout ({join_timeout}s)")
+            # give SIGKILL a moment, then still loop to mark remaining as failed
+            deadline = time.monotonic() + 10.0  # grace period
+            for p in workers:
+                if p.exitcode is None and p.is_alive():
+                    _kill_one(p, hard=True)
+
+        time.sleep(poll_interval)
+
+    for p in workers:
+        if not getattr(p, "_ucm_reaped", False):
+            role_name = p.name or "unknown"
+            if p.exitcode not in (0, None):
+                failed.append((role_name, int(p.exitcode or -1)))
+
+    return failed
 
 
 def _run_multiprocess_e2e(block_count: int = 6, tensor_numel: int = 256) -> None:
-    multiprocessing.set_start_method("spawn", force=True)
+    ctx = multiprocessing.get_context("spawn")
     block_ids = [secrets.token_bytes(16) for _ in range(block_count)]
-    barrier = multiprocessing.Barrier(_NUM_PARTIES)
+    barrier = ctx.Barrier(_NUM_PARTIES)
+
+    _CHILD_PROCS.clear()
     workers: list[multiprocessing.Process] = []
     for role in (ROLE_SCHEDULER, ROLE_WORKER0, ROLE_WORKER1):
-        p = multiprocessing.Process(
+        p = ctx.Process(
             target=_mooncake_party,
             args=(role, barrier, block_ids, tensor_numel),
+            name=ROLE_NAMES[role],
         )
         workers.append(p)
         p.start()
-    for p in workers:
-        p.join()
-    for p in workers:
-        if p.exitcode != 0:
-            raise RuntimeError(f"mooncake e2e child exit code {p.exitcode}")
+    _CHILD_PROCS.extend(workers)
+
+    try:
+        failed = _supervise(workers)
+    finally:
+        _terminate_all_children("final cleanup")
+        _CHILD_PROCS.clear()
+
+    if failed:
+        details = ", ".join(f"{name}(code={code})" for name, code in failed)
+        raise RuntimeError(f"mooncake e2e failed: {details}")
 
 
 def _ascend_two_npu_available() -> bool:
@@ -246,17 +424,37 @@ def _ascend_two_npu_available() -> bool:
 
 def run_mooncake_scheduler_two_workers_main() -> None:
     if not hasattr(torch, "npu"):
-        print("SKIP: torch.npu is not available (need Ascend environment).", file=sys.stderr)
-        sys.exit(0)
-    if not _ascend_two_npu_available():
         print(
-            "SKIP: need at least 2 NPUs (set CUDA/NPU devices for worker0 and worker1).",
+            "SKIP: torch.npu not available (need Ascend environment).",
             file=sys.stderr,
         )
         sys.exit(0)
-    time.sleep(0.5)
+    if not _ascend_two_npu_available():
+        print(
+            "SKIP: need at least 2 NPUs (worker0=npu:0, worker1=npu:1).",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
+    _become_process_group_leader()
+    _install_parent_cleanup()
+
+    if sys.platform != "win32":
+        pgid = os.getpgrp()
+        print(
+            f"[mooncake_e2e] parent pid={os.getpid()} pgrp={pgid} "
+            f"(group kill: kill -TERM -{pgid})",
+            file=sys.stderr,
+        )
+
+    time.sleep(0.3)
     _run_multiprocess_e2e()
 
 
 if __name__ == "__main__":
-    run_mooncake_scheduler_two_workers_main()
+    multiprocessing.freeze_support()
+    try:
+        run_mooncake_scheduler_two_workers_main()
+    except BaseException:
+        _terminate_all_children("parent exception")
+        raise
