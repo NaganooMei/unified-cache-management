@@ -72,7 +72,11 @@ from ucm.store.factory_v1 import UcmConnectorFactoryV1
 ROLE_SCHEDULER = 0
 ROLE_WORKER0 = 1
 ROLE_WORKER1 = 2
-ROLE_NAMES = {ROLE_SCHEDULER: "scheduler", ROLE_WORKER0: "worker0", ROLE_WORKER1: "worker1"}
+ROLE_NAMES = {
+    ROLE_SCHEDULER: "scheduler",
+    ROLE_WORKER0: "worker0",
+    ROLE_WORKER1: "worker1",
+}
 _NUM_PARTIES = 3
 
 # Parent-only bookkeeping so signal handlers / atexit can reap children.
@@ -169,7 +173,9 @@ def _shutdown_store_best_effort(store: Any, role: int) -> None:
                     pass
             store.shutdown()
         except BaseException as exc:  # noqa: BLE001
-            print(f"[{ROLE_NAMES.get(role, role)}] shutdown error: {exc}", file=sys.stderr)
+            print(
+                f"[{ROLE_NAMES.get(role, role)}] shutdown error: {exc}", file=sys.stderr
+            )
         finally:
             done.set()
 
