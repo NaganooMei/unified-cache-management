@@ -359,10 +359,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
             for tensor in self._iter_register_buffer_tensors(kv_layer):
                 ptrs.append(int(tensor.data_ptr()))
                 sizes.append(int(tensor.numel() * tensor.element_size()))
-        logger.info(
-            "Mooncake worker register buffers prepared: regions=%s",
-            len(ptrs),
-        )
         return ptrs, sizes
 
     def _iter_register_buffer_tensors(
