@@ -28,6 +28,10 @@
 #include "trans/cuda/gdr/gdr_config.h"
 #include "trans_manager.h"
 
+#ifndef UCM_ENABLE_ASCEND_FFTS_PIPELINE
+#define UCM_ENABLE_ASCEND_FFTS_PIPELINE 0
+#endif
+
 namespace UC::CacheStore {
 
 class CacheStore : public StoreV1 {
@@ -145,6 +149,10 @@ private:
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
+        config.Get("cache_h2d_transport", param.h2dTransport);
+        config.GetNumber("cache_h2d_ffts_pipeline_depth", param.h2dFftsPipelineDepth);
+        config.GetNumber("cache_h2d_ffts_max_ready_lanes", param.h2dFftsMaxReadyLanes);
+        config.GetNumber("cache_h2d_ffts_min_fragments", param.h2dFftsMinFragments);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -168,6 +176,9 @@ private:
             return Status::InvalidParam("invalid device({})", config.deviceId);
         }
         if (config.uniqueId.empty()) { return Status::InvalidParam("invalid unique id"); }
+        if (config.h2dTransport != "ce" && config.h2dTransport != "ffts_pipeline") {
+            return Status::InvalidParam("invalid H2D transport({})", config.h2dTransport);
+        }
         auto s =
             Trans::GdrKVBufferConfig::Validate(config.gpuKvBufferAddrs, config.gpuKvBufferSizes);
         if (s.Failure()) { return s; }
@@ -179,6 +190,16 @@ private:
         if (config.deviceId == -1) { return Status::OK(); }
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
+#if !UCM_ENABLE_ASCEND_FFTS_PIPELINE
+        if (config.h2dTransport == "ffts_pipeline") {
+            return Status::InvalidParam("H2D FFTS pipeline is not compiled");
+        }
+#endif
+        if (config.h2dTransport == "ffts_pipeline" &&
+            (config.h2dFftsPipelineDepth == 0 || config.h2dFftsMaxReadyLanes == 0 ||
+             config.h2dFftsMinFragments == 0)) {
+            return Status::InvalidParam("invalid H2D FFTS pipeline config");
+        }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
         if (bufferNumber < 1024 || bufferNumber < config.loadExclusiveBufferNumber * 2) {
             return Status::InvalidParam("too small buffer({}) on shard({})", config.bufferCapacity,
@@ -221,6 +242,10 @@ private:
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, config.runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
+        UC_INFO("Set {}::H2DTransport to {}.", ns, config.h2dTransport);
+        UC_INFO("Set {}::H2DFftsPipelineDepth to {}.", ns, config.h2dFftsPipelineDepth);
+        UC_INFO("Set {}::H2DFftsMaxReadyLanes to {}.", ns, config.h2dFftsMaxReadyLanes);
+        UC_INFO("Set {}::H2DFftsMinFragments to {}.", ns, config.h2dFftsMinFragments);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

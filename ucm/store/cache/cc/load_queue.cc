@@ -22,10 +22,108 @@
  * SOFTWARE.
  * */
 #include "load_queue.h"
+#include <limits>
+#include <memory>
+#include <numeric>
 #include "logger/logger.h"
 #include "thread/cpu_affinity.h"
 
+#ifndef UCM_ENABLE_ASCEND_FFTS_PIPELINE
+#define UCM_ENABLE_ASCEND_FFTS_PIPELINE 0
+#endif
+
+#if UCM_ENABLE_ASCEND_FFTS_PIPELINE
+#include "trans/ascend/ascend_h2d_ffts_pipeline.h"
+#endif
+
 namespace UC::CacheStore {
+
+class H2DTransferExecutor {
+public:
+    virtual ~H2DTransferExecutor() = default;
+    virtual Status Setup(const Config& config) = 0;
+    virtual Status Submit(void* host, void** device) = 0;
+    virtual Status Synchronize() = 0;
+};
+
+class CeH2DTransferExecutor : public H2DTransferExecutor {
+    CopyStream stream_;
+    std::vector<size_t> tensorSizes_{};
+
+public:
+    Status Setup(const Config& config) override
+    {
+        tensorSizes_ = config.tensorSizes;
+        return stream_.Setup(config.deviceId, config.streamNumber, config.useGdr);
+    }
+    Status Submit(void* host, void** device) override
+    {
+        const auto number = tensorSizes_.size();
+        for (size_t i = 0, offset = 0; i < number; i++) {
+            auto pHost = (void*)(((int8_t*)host) + offset);
+            auto pDevice = device[i];
+            auto size = tensorSizes_[i];
+            auto s = stream_.NextStream()->HostToDeviceAsync(pHost, pDevice, size);
+            if (s.Failure()) [[unlikely]] {
+                UC_ERROR("Failed({}) to do H2D({}) batch({}/{}) async.", s, size, i, number);
+                return s;
+            }
+            offset += size;
+        }
+        return Status::OK();
+    }
+    Status Synchronize() override { return stream_.Synchronize(); }
+};
+
+#if UCM_ENABLE_ASCEND_FFTS_PIPELINE
+class FftsPipelineH2DTransferExecutor : public H2DTransferExecutor {
+    Trans::AscendH2DFftsPipeline pipeline_;
+
+public:
+    Status Setup(const Config& config) override
+    {
+        tensorSizes_ = config.tensorSizes;
+        const auto objectBytes =
+            std::accumulate(config.tensorSizes.begin(), config.tensorSizes.end(), size_t(0));
+        if (config.h2dFftsMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
+            return Status::InvalidParam("too many FFTS ready lanes({})",
+                                        config.h2dFftsMaxReadyLanes);
+        }
+        Trans::AscendH2DFftsPipelineConfig pipelineConfig;
+        pipelineConfig.deviceId = config.deviceId;
+        pipelineConfig.pipelineDepth = config.h2dFftsPipelineDepth;
+        pipelineConfig.maxReadyLanes = static_cast<uint16_t>(config.h2dFftsMaxReadyLanes);
+        pipelineConfig.objectBytes = objectBytes;
+        pipelineConfig.maxFragments = config.tensorSizes.size();
+        auto s = pipeline_.Setup(pipelineConfig);
+        if (s.Failure()) [[unlikely]] {
+            UC_ERROR("Failed({}) to setup H2D FFTS pipeline.", s);
+        }
+        return s;
+    }
+    Status Submit(void* host, void** device) override
+    {
+        return pipeline_.SubmitObject(host, device, tensorSizes_);
+    }
+    Status Synchronize() override { return pipeline_.Synchronize(); }
+
+private:
+    std::vector<size_t> tensorSizes_{};
+};
+#endif
+
+std::unique_ptr<H2DTransferExecutor> MakeH2DTransferExecutor(const Config& config)
+{
+#if UCM_ENABLE_ASCEND_FFTS_PIPELINE
+    if (config.h2dTransport == "ffts_pipeline" &&
+        config.tensorSizes.size() >= config.h2dFftsMinFragments) {
+        return std::make_unique<FftsPipelineH2DTransferExecutor>();
+    }
+#else
+    (void)config;
+#endif
+    return std::make_unique<CeH2DTransferExecutor>();
+}
 
 LoadQueue::~LoadQueue()
 {
@@ -43,6 +141,10 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     tensorSizes_ = config.tensorSizes;
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
+    h2dTransport_ = config.h2dTransport;
+    h2dFftsPipelineDepth_ = config.h2dFftsPipelineDepth;
+    h2dFftsMaxReadyLanes_ = config.h2dFftsMaxReadyLanes;
+    h2dFftsMinFragments_ = config.h2dFftsMinFragments;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
@@ -115,18 +217,28 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
 
 void LoadQueue::TransferStage(std::promise<Status>& started)
 {
-    CopyStream stream;
-    auto s = stream.Setup(deviceId_, streamNumber_, useGdr_);
+    Config transferConfig;
+    transferConfig.deviceId = deviceId_;
+    transferConfig.tensorSizes = tensorSizes_;
+    transferConfig.streamNumber = streamNumber_;
+    transferConfig.useGdr = useGdr_;
+    transferConfig.h2dTransport = h2dTransport_;
+    transferConfig.h2dFftsPipelineDepth = h2dFftsPipelineDepth_;
+    transferConfig.h2dFftsMaxReadyLanes = h2dFftsMaxReadyLanes_;
+    transferConfig.h2dFftsMinFragments = h2dFftsMinFragments_;
+
+    auto executor = MakeH2DTransferExecutor(transferConfig);
+    auto s = executor->Setup(transferConfig);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {
         s = CpuAffinity::SetCpuAffinity4CurrentThread(cpuAffinityCores_);
         if (s.Failure()) { UC_WARN("Failed({}) to set affinity.", s); }
     }
-    running_.ConsumerLoop(stop_, &LoadQueue::TransferOneTask, this, stream);
+    running_.ConsumerLoop(stop_, &LoadQueue::TransferOneTask, this, *executor);
 }
 
-void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
+void LoadQueue::TransferOneTask(H2DTransferExecutor& executor, ShardTask&& task)
 {
     if (failureSet_->Contains(task.taskHandle)) {
         if (task.waiter) { task.waiter->Done(); }
@@ -136,8 +248,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
     do {
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
-        s = HostToDeviceScatterAsync(stream.NextStream(), task.bufferHandle.Data(),
-                                     task.shard.addrs.data());
+        s = executor.Submit(task.bufferHandle.Data(), task.shard.addrs.data());
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to do H2D batch async for task({}).", s, task.taskHandle);
             break;
@@ -146,7 +257,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             holder_.push_back(std::move(task));
             return;
         }
-        s = stream.Synchronize();
+        s = executor.Synchronize();
         holder_.clear();
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);
@@ -172,24 +283,6 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
     while (!task.bufferHandle.Ready()) {
         if (failureSet_->Contains(task.taskHandle)) { return Status::Error(); }
         std::this_thread::yield();
-    }
-    return Status::OK();
-}
-
-Status LoadQueue::HostToDeviceScatterAsync(std::shared_ptr<Trans::Stream> stream, void* host,
-                                           void** device)
-{
-    const auto number = tensorSizes_.size();
-    for (size_t i = 0, offset = 0; i < number; i++) {
-        auto pHost = (void*)(((int8_t*)host) + offset);
-        auto pDevice = device[i];
-        auto size = tensorSizes_[i];
-        auto s = stream->HostToDeviceAsync(pHost, pDevice, size);
-        if (s.Failure()) [[unlikely]] {
-            UC_ERROR("Failed({}) to do H2D({}) batch({}/{}) async.", s, size, i, number);
-            return s;
-        }
-        offset += size;
     }
     return Status::OK();
 }
