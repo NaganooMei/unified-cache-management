@@ -1,393 +1,131 @@
-# CacheStore H2D FFTS Pipeline 对接方案
+# CacheStore H2D FFTS Pipeline 设计文档
 
-## 目标
+## 文档范围
 
-本文给出一个更干净的 CacheStore 对接 H2D FFTS pipeline 方案。
-
-核心目标不是把 sandbox 的 benchmark 代码搬进 UCM，而是把 FFTS pipeline 的核心能力抽成 CacheStore Load 阶段可选的 H2D transport：
+本文基于当前默认分支最新提交整理：
 
 ```text
-CacheStore Load shard
+commit: afc9d34ca4593d1654571a739db8f532fef5cd13
+title:  feat: add CacheStore H2D FFTS pipeline
+date:   2026-05-28T21:04:24+08:00
+author: naganomei <naganomei@noreply.gitcode.com>
+```
+
+该提交为 CacheStore Load 阶段增加 Ascend H2D FFTS pipeline 能力。文档描述的是已落地实现，不再是预研草稿。
+
+主要代码入口：
+
+- `@CMakeLists.txt:16`
+- `@ucm/shared/trans/ascend/CMakeLists.txt:15`
+- `@ucm/store/cache/cc/cache_store.cc:152`
+- `@ucm/store/cache/cc/load_queue.cc:41`
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.h:18`
+- `@ucm/shared/trans/ascend/ffts_d2d_dispatcher.h:24`
+
+## 背景与目标
+
+CacheStore Load 的输入语义已经完整表达了 H2D 拷贝所需信息：
+
+- `TransBuffer::Handle::Data()` 提供连续 host cache buffer。
+- `Detail::Shard.addrs` 提供最终写入的 HBM KV cache device pointer 列表。
+- `Config::tensorSizes` 提供每个 device pointer 对应的 tensor slice 大小。
+
+原有路径使用 CE scatter：对每个 tensor slice 发起一次 host-to-device 异步拷贝。
+
+新路径引入 Ascend FFTS pipeline：先用 CE 把一个 shard 对应的连续 host object 拷贝到 device staging buffer，再用 FFTS SDMA 在 device 侧拆分到多个最终 device pointer。这样把多段 H2D scatter 变成“一次 H2D staging + 一组 device-to-device split”。
+
+第一版目标：
+
+- 只覆盖 CacheStore Load 的 host-to-device 阶段。
+- 保持默认 CE 路径不变。
+- 通过显式编译开关和运行时配置启用 FFTS pipeline。
+- 不修改 `TaskDesc`、`Shard`、Python `load_data` 和 pybind 入参语义。
+
+非目标：
+
+- 不改造 Dump 的 device-to-host gather。
+- 不把 FFTS pipeline 塞进通用 `Trans::Stream::HostToDeviceAsync`。
+- 不引入 sandbox benchmark 的 case 注册、统计、validation、runner 等外围逻辑。
+
+## 总体架构
+
+```text
+CacheStore::Load
+  -> TransManager
+    -> LoadQueue::DispatchStage
+      -> 取/填充 host cache buffer
+      -> 生成 ShardTask
+    -> LoadQueue::TransferStage
+      -> H2DTransferExecutor
+        -> CeH2DTransferExecutor
+        -> FftsPipelineH2DTransferExecutor
+          -> AscendH2DFftsPipeline
+            -> FftsD2DDispatcher
+```
+
+LoadQueue 只依赖窄接口 `H2DTransferExecutor`。底层选择 CE 还是 FFTS pipeline，由配置和编译开关决定。
+
+```text
+默认路径:
   host cache buffer
-  final device pointer list
-  tensor size list
+    -> CE H2D slice 0 -> final device[0]
+    -> CE H2D slice 1 -> final device[1]
+    -> CE H2D slice N -> final device[N]
 
-H2D FFTS pipeline transport
-  H2D CE: host cache buffer -> device staging buffer
-  FFTS SDMA: device staging buffer -> final device pointer list
+FFTS pipeline:
+  host cache buffer
+    -> CE H2D object -> device staging slot
+    -> FFTS SDMA slice 0 -> final device[0]
+    -> FFTS SDMA slice 1 -> final device[1]
+    -> FFTS SDMA slice N -> final device[N]
 ```
 
-第一版只接 CacheStore Load，也就是 host cache buffer 到 HBM KV cache 的 H2D。Dump 仍然走现有 CE gather。
+## 编译开关与依赖
 
-## 非目标
-
-不要照搬 sandbox 这些部分：
-
-- benchmark case 注册、命令行参数、结果统计。
-- `CopyBuffer` / `FragmentedDeviceCopyBuffer` 抽象。
-- 多卡 fork runner。
-- benchmark validation 和 sweep 脚本。
-- host-direct FFTS 实验路径。
-- Dump 的 D2H 反向 pipeline。
-
-sandbox 在这里仅作为核心接口参考：怎样用两个 stream、slot event、device staging buffer 和 FFTS dispatcher 完成 H2D staging + D2D split。
-
-## 当前 CacheStore 可以复用的语义
-
-CacheStore 的 Load 已经把业务语义表达完整：
+顶层新增 CMake 开关，默认关闭：
 
 ```text
-Detail::Shard.owner
-  block id，用来定位 cache/backend 中的 block
-
-Detail::Shard.index
-  shard index，direct 模式通常是 0，layerwise 模式是 layer id
-
-Detail::Shard.addrs
-  这个 shard 要写入的最终 HBM device pointer 列表
-
-LoadQueue::tensorSizes_
-  每个 device pointer 对应的 tensor slice 大小
-
-TransBuffer::Handle::Data()
-  这个 shard 的连续 host cache buffer 起始地址
+UCM_ENABLE_ASCEND_FFTS_PIPELINE=OFF
 ```
 
-当前 CE 路径是：
+对应实现：
+
+- `@CMakeLists.txt:16`
+- `@ucm/shared/trans/ascend/CMakeLists.txt:15`
+
+开启后，Ascend trans 组件会：
+
+- 查找 `libruntime`。
+- 查找 `runtime/rt_ffts_plus.h` 或 `rt_external_ffts.h`。
+- 编译 `ascend_h2d_ffts_pipeline.cc` 和 `ffts_d2d_dispatcher.cc`。
+- 向依赖方公开 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=1`。
+
+如果开启编译开关但找不到 FFTS header 或 runtime library，CMake 直接失败：
 
 ```text
-host = bufferHandle.Data()
-device = shard.addrs.data()
-
-for i in tensorSizes_:
-  pHost = host + offset
-  pDevice = device[i]
-  aclrtMemcpyAsync(pDevice, pHost, tensorSizes_[i], H2D)
-  offset += tensorSizes_[i]
+UCM_ENABLE_ASCEND_FFTS_PIPELINE requires FFTS headers and libruntime.
 ```
 
-FFTS pipeline 不需要改 `TaskDesc`、`Shard`、Python `load_data`、pybind `MakeTaskDesc`。要改的是 LoadQueue 的 H2D 执行方式。
+默认关闭时不会编译 FFTS 相关源码，并公开 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=0`，确保 CE 路径不依赖 FFTS。
 
-相关 CacheStore 文件：
+## 运行时配置
 
-- `@unified-cache-management/ucm/store/cache/cc/load_queue.h`
-- `@unified-cache-management/ucm/store/cache/cc/load_queue.cc`
-- `@unified-cache-management/ucm/store/cache/cc/trans_buffer.h`
-- `@unified-cache-management/ucm/store/cache/cc/trans_buffer.cc`
-- `@unified-cache-management/ucm/store/cache/cc/global_config.h`
-- `@unified-cache-management/ucm/shared/trans/stream.h`
-- `@unified-cache-management/ucm/shared/trans/ascend/ascend_stream.cc`
-
-## sandbox 只参考哪些核心接口
-
-参考 sandbox 的 H2D FFTS pipeline 只看这两层。
-
-第一层是 pipeline 编排：
-
-- `@dev-sandbox-upstream-yuanrong/module/copy/ascend/h2d_ffts_pipeline/copy_instance_h2d_ffts_pipeline_ascend.h`
-
-核心调用关系是：
+CacheStore `Config` 新增 H2D transport 配置：
 
 ```text
-SubmitObject
-  slot = objectIndex % pipelineDepth
-  h2dStream waits slotFree[slot]
-  aclrtMemcpyAsync(host object -> device staging slot, H2D, h2dStream)
-  record slotReady[slot] on h2dStream
-  fftsStream waits slotReady[slot]
-  BuildObjectCopies(staging slot -> final fragments)
-  dispatcher.BuildCopies(copySpecs)
-  dispatcher.Launch(fftsStream, readyCount)
-  record slotFree[slot] on fftsStream
+h2dTransport            default: "ce"
+h2dFftsPipelineDepth    default: 2
+h2dFftsMaxReadyLanes    default: 8
+h2dFftsMinFragments     default: 2
 ```
 
-第二层是 FFTS dispatcher：
+对应代码：
 
-- `@dev-sandbox-upstream-yuanrong/module/copy/ascend/h2d_ffts_pipeline/ffts_d2d_dispatcher_ascend.h`
+- `@ucm/store/cache/cc/global_config.h:43`
+- `@ucm/store/cache/cc/cache_store.cc:152`
+- `@ucm/store/cache/cc/cache_store.cc:172`
 
-核心接口是：
-
-```text
-AscendFftsCopySpec {
-  dst
-  src
-  size
-}
-
-FftsD2DDispatcher::BuildCopies(copySpecs)
-  -> 为每个 copy spec 构造 128-byte FFTS SDMA context
-  -> 按 ready lanes 建 dependency
-  -> 返回 readyContextNum
-
-FftsD2DDispatcher::Launch(stream, readyContextNum)
-  -> rtFftsPlusTaskLaunchWithFlag(task, stream, 0)
-```
-
-UCM 里应该复用这个“接口形状”，但要重写成 UCM 风格：
-
-- 返回 `Status`，不要 `ASSERT` / `exit`。
-- 配置来自 CacheStore config，不依赖 benchmark env。
-- descriptor 和 staging buffer 生命周期由 transport 对象管理。
-- 不依赖 sandbox `CopyBuffer`。
-
-## 推荐总体设计
-
-新增一个 Ascend 专用 H2D pipeline transport，放在 UCM 的 trans/ascend 层：
-
-```text
-@unified-cache-management/ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.h
-@unified-cache-management/ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.cc
-@unified-cache-management/ucm/shared/trans/ascend/ffts_d2d_dispatcher.h
-@unified-cache-management/ucm/shared/trans/ascend/ffts_d2d_dispatcher.cc
-```
-
-然后在 CacheStore LoadQueue 的 H2D 阶段按配置选择：
-
-```text
-默认:
-  CE scatter
-
-配置启用:
-  H2D FFTS pipeline scatter
-```
-
-不要把 FFTS pipeline 做成 `Trans::Stream::HostToDeviceAsync` 的隐藏实现。原因是 `HostToDeviceAsync` 的粒度是一段 host 到一个 device pointer，而 FFTS pipeline 的收益来自“一段 host object 先 H2D 到 staging，再一次性 FFTS split 到多个 device fragments”。它需要 object、slot、event、staging buffer、dispatcher descriptor 这些概念，超出了普通 stream copy 抽象。
-
-## 新接口建议
-
-### H2D transport 抽象
-
-可以先在 CacheStore 内部定义一个很窄的 H2D executor，而不是改全局 `Trans::Stream`：
-
-```cpp
-class H2DTransferExecutor {
-public:
-    virtual ~H2DTransferExecutor() = default;
-    virtual Status Submit(void* host, void** devices,
-                          const std::vector<size_t>& sizes) = 0;
-    virtual Status Synchronize() = 0;
-};
-```
-
-CE 实现：
-
-```text
-CeScatterExecutor
-  owns CopyStream
-  Submit(host, devices, sizes)
-    for each size:
-      stream.NextStream()->HostToDeviceAsync(host + offset, devices[i], size)
-  Synchronize()
-    CopyStream::Synchronize()
-```
-
-FFTS 实现：
-
-```text
-FftsPipelineExecutor
-  owns AscendH2DFftsPipeline
-  Submit(host, devices, sizes)
-    pipeline.SubmitObject(host, devices, sizes)
-  Synchronize()
-    pipeline.Synchronize()
-```
-
-这样 `LoadQueue::TransferOneTask` 的主体逻辑不用关心底层是 CE 还是 FFTS：
-
-```text
-WaitBackendTaskReady(task)
-executor.Submit(task.bufferHandle.Data(), task.shard.addrs.data(), tensorSizes_)
-
-if not last shard:
-  holder_.push_back(task)
-  return
-
-executor.Synchronize()
-holder_.clear()
-waiter->Done()
-```
-
-### AscendH2DFftsPipeline 接口
-
-建议核心接口：
-
-```cpp
-struct H2DFftsPipelineConfig {
-    int32_t deviceId;
-    size_t pipelineDepth;
-    size_t maxReadyLanes;
-    size_t objectBytes;
-    size_t maxFragments;
-};
-
-class AscendH2DFftsPipeline {
-public:
-    Status Setup(const H2DFftsPipelineConfig& config);
-    Status SubmitObject(void* host, void** devices,
-                        const std::vector<size_t>& sizes);
-    Status Synchronize();
-};
-```
-
-其中：
-
-```text
-objectBytes = sum(tensorSizes_)
-maxFragments = tensorSizes_.size()
-```
-
-这里不要用 `shardSize` 直接当 H2D staging size。当前 CE scatter 只拷贝 `tensorSizes_` 累加出来的有效 tensor bytes。FFTS staging 也应该拷贝 `sum(tensorSizes_)`，避免把 shard padding 也搬到 staging buffer。
-
-## FFTS pipeline 内部流程
-
-### Setup
-
-`AscendH2DFftsPipeline::Setup` 做这些事：
-
-```text
-aclrtSetDevice(deviceId)
-aclrtCreateStream(h2dStream)
-aclrtCreateStream(fftsStream)
-
-for slot in pipelineDepth:
-  aclrtMalloc staging device buffer，大小 objectBytes
-  aclrtCreateEvent(slotReady[slot])
-  aclrtCreateEvent(slotFree[slot])
-  aclrtRecordEvent(slotFree[slot], h2dStream)
-```
-
-`slotFree` 初始化为已完成，这样前几个 object 可以直接使用空 slot。
-
-### SubmitObject
-
-一个 CacheStore `ShardTask` 就是第一版的一个 pipeline object。
-
-输入：
-
-```text
-host
-  task.bufferHandle.Data()
-
-devices
-  task.shard.addrs.data()
-
-sizes
-  tensorSizes_
-```
-
-提交流程：
-
-```text
-slot = nextObjectIndex % pipelineDepth
-staging = stagingBuffers[slot]
-
-h2dStream waits slotFree[slot]
-
-aclrtMemcpyAsync(
-  staging,
-  objectBytes,
-  host,
-  objectBytes,
-  ACL_MEMCPY_HOST_TO_DEVICE,
-  h2dStream
-)
-
-record slotReady[slot] on h2dStream
-fftsStream waits slotReady[slot]
-
-offset = 0
-for each i in sizes:
-  copySpec.src = staging + offset
-  copySpec.dst = devices[i]
-  copySpec.size = sizes[i]
-  offset += sizes[i]
-
-readyCount = dispatcher.BuildCopies(copySpecs)
-dispatcher.Launch(fftsStream, readyCount)
-
-record slotFree[slot] on fftsStream
-```
-
-这相当于把当前 CE scatter：
-
-```text
-host + offset -> device[i]
-```
-
-替换为：
-
-```text
-host -> staging
-staging + offset -> device[i] by FFTS SDMA
-```
-
-### Synchronize
-
-`Synchronize` 要保证两件事：
-
-```text
-所有 H2D staging 完成
-所有 FFTS D2D split 完成
-```
-
-可以让 `h2dStream` wait 所有 `slotFree`，再 synchronize `h2dStream`：
-
-```text
-for slot:
-  aclrtStreamWaitEvent(h2dStream, slotFree[slot])
-aclrtSynchronizeStream(h2dStream)
-```
-
-也可以直接同步 `h2dStream` 和 `fftsStream`。第一版建议保守一些，同步两个 stream 或者用一个明确的 end event，避免误判完成边界。
-
-同步完成后再清理 in-flight descriptor holder。
-
-## descriptor 生命周期要单独处理
-
-FFTS dispatcher 的 `Launch` 会把 `contexts_.data()` 作为 `descBuf` 传给 runtime。不要把 dispatcher 做成 `SubmitObject` 里的栈对象。
-
-建议每次 submit 创建一个 in-flight 记录：
-
-```cpp
-struct InFlightObject {
-    size_t slot;
-    std::vector<AscendFftsCopySpec> specs;
-    FftsD2DDispatcher dispatcher;
-};
-```
-
-这些 in-flight objects 保存在 `AscendH2DFftsPipeline` 内部，直到 `Synchronize()` 完成后统一清理。
-
-这样可以保证：
-
-```text
-FFTS descriptor buffer 在 device/runtime 可能读取期间仍然活着
-```
-
-staging slot 的复用由 `slotFree` event 保证；descriptor 内存的复用由 in-flight holder 保证。两者不要混在一起。
-
-## LoadQueue 改造点
-
-### Config
-
-在 CacheStore `Config` 增加：
-
-```text
-h2dTransport
-  默认 "ce"
-  可选 "ffts_pipeline"
-
-h2dFftsPipelineDepth
-  默认 2
-
-h2dFftsMaxReadyLanes
-  默认 8
-
-h2dFftsMinFragments
-  默认 2，可选；fragment 太少时回退 CE
-```
-
-对应 Python 配置可以是：
+外部配置 key：
 
 ```yaml
 cache_h2d_transport: "ffts_pipeline"
@@ -396,217 +134,300 @@ cache_h2d_ffts_max_ready_lanes: 8
 cache_h2d_ffts_min_fragments: 2
 ```
 
-如果显式启用 `ffts_pipeline` 但编译时没有 FFTS runtime/header，应在 `Setup` 返回错误，不要静默降级。默认 `ce` 则不依赖 FFTS。
+校验规则：
 
-### LoadQueue::TransferStage
+- `cache_h2d_transport` 只能是 `"ce"` 或 `"ffts_pipeline"`。
+- 如果运行时配置为 `"ffts_pipeline"`，但编译时未启用 `UCM_ENABLE_ASCEND_FFTS_PIPELINE`，`CacheStore::Setup` 返回错误。
+- 如果启用 FFTS pipeline，`depth`、`max_ready_lanes`、`min_fragments` 都必须大于 0。
+- 当编译支持 FFTS 且配置为 `"ffts_pipeline"`，但 `tensorSizes.size() < h2dFftsMinFragments` 时，LoadQueue 会回退到 CE executor。
 
-当前 `TransferStage` 创建 `CopyStream`。
+## LoadQueue 改造
 
-建议改成：
+LoadQueue 新增内部抽象 `H2DTransferExecutor`：
 
-```text
-CreateH2DTransferExecutor(config)
-  if config.h2dTransport == ce:
-    CeScatterExecutor
-  if config.h2dTransport == ffts_pipeline:
-    FftsPipelineExecutor
-
-running_.ConsumerLoop(stop_, &LoadQueue::TransferOneTask, this, executor)
+```cpp
+class H2DTransferExecutor {
+public:
+    virtual ~H2DTransferExecutor() = default;
+    virtual Status Setup(const Config& config) = 0;
+    virtual Status Submit(void* host, void** device) = 0;
+    virtual Status Synchronize() = 0;
+};
 ```
 
-### LoadQueue::TransferOneTask
+对应代码：
 
-当前核心逻辑保留：
+- `@ucm/store/cache/cc/load_queue.cc:41`
+- `@ucm/store/cache/cc/load_queue.h:40`
 
-```text
-failureSet_ 检查
-WaitBackendTaskReady
-提交 H2D
-非最后 shard 放入 holder_
-最后 shard synchronize
-失败写 failureSet_
-最后 shard waiter->Done()
-```
+### CE executor
 
-只把：
+`CeH2DTransferExecutor` 保留原有行为：
 
-```text
-HostToDeviceScatterAsync(...)
-stream.Synchronize()
-```
+- `Setup` 创建 `CopyStream`。
+- `Submit` 遍历 `tensorSizes`，按 offset 切分 host buffer。
+- 每段调用 `HostToDeviceAsync` 拷贝到对应 device pointer。
+- `Synchronize` 调用 `CopyStream::Synchronize()`。
 
-替换成：
+对应代码：
 
-```text
-executor.Submit(...)
-executor.Synchronize()
-```
+- `@ucm/store/cache/cc/load_queue.cc:49`
 
-`holder_` 继续保留，FFTS pipeline 同样需要它。原因是 H2D staging 是异步的，`bufferHandle.Data()` 在 pipeline 完成前不能释放引用。
+### FFTS executor
 
-## 和现有 CE 路径的对应关系
+`FftsPipelineH2DTransferExecutor` 只在 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=1` 时编译：
 
-```text
-现有 CE:
-  host cache buffer
-    -> H2D slice 0 -> device[0]
-    -> H2D slice 1 -> device[1]
-    -> H2D slice 2 -> device[2]
+- 计算 `objectBytes = sum(tensorSizes)`。
+- 检查 `h2dFftsMaxReadyLanes` 是否能放入 `uint16_t`。
+- 用 `deviceId`、`pipelineDepth`、`maxReadyLanes`、`objectBytes`、`maxFragments` 初始化 `AscendH2DFftsPipeline`。
+- `Submit` 调用 `pipeline_.SubmitObject(host, device, tensorSizes_)`。
+- `Synchronize` 调用 `pipeline_.Synchronize()`。
 
-FFTS pipeline:
-  host cache buffer
-    -> one H2D object -> staging buffer
-    -> FFTS slice 0 -> device[0]
-    -> FFTS slice 1 -> device[1]
-    -> FFTS slice 2 -> device[2]
-```
+对应代码：
 
-第一版 object 粒度：
+- `@ucm/store/cache/cc/load_queue.cc:79`
+- `@ucm/store/cache/cc/load_queue.cc:115`
 
-```text
-一个 ShardTask = 一个 pipeline object
-```
+### TransferStage 与 TransferOneTask
 
-后续如果要提高吞吐，可以再考虑把多个 shard 合并成一个更大的 pipeline object，但这会改变 holder、失败边界和 task wait 语义，不建议第一版做。
+`TransferStage` 不再直接持有 `CopyStream`，而是根据配置创建 executor：
 
-## 编译和依赖
+- `@ucm/store/cache/cc/load_queue.cc:216`
+- `@ucm/store/cache/cc/load_queue.cc:230`
 
-FFTS 支持应保持可选：
+`TransferOneTask` 的业务边界保持不变：
 
-```text
-默认构建:
-  不要求 FFTS headers
-  CE 路径正常编译
+1. 如果 task 已失败，直接结束最后一个 waiter。
+2. 等待 backend task 完成，确保 host cache buffer ready。
+3. 调用 `executor.Submit(...)` 提交 H2D。
+4. 如果不是最后一个 shard，把 `ShardTask` 放入 `holder_`，延长 host buffer 引用生命周期。
+5. 如果是最后一个 shard，调用 `executor.Synchronize()`。
+6. 同步完成后清理 `holder_`，并调用 waiter `Done()`。
+7. 任一步失败都写入 `failureSet_`。
 
-启用 FFTS pipeline 构建:
-  检测 runtime/rt_ffts_plus.h 或对应外部头
-  检测 libruntime
-  编译 ascend_h2d_ffts_pipeline 和 ffts_d2d_dispatcher
-```
+对应代码：
 
-如果没有 FFTS 能力：
+- `@ucm/store/cache/cc/load_queue.cc:241`
+
+## AscendH2DFftsPipeline 设计
+
+`AscendH2DFftsPipeline` 是 Ascend 专用 H2D pipeline transport，负责 stream、event、staging buffer 和 in-flight descriptor 生命周期。
+
+接口定义：
+
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.h:18`
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.h:26`
+
+核心配置：
 
 ```text
-cache_h2d_transport 未配置或为 ce:
-  正常运行
-
-cache_h2d_transport = ffts_pipeline:
-  CacheStore::Setup 返回 InvalidParam 或 NotSupported
+deviceId        Ascend device id
+pipelineDepth   staging slot 数量
+maxReadyLanes   FFTS ready context lane 上限
+objectBytes     每个 shard object 的有效字节数
+maxFragments    每个 shard 最多拆分的 tensor fragment 数
 ```
 
-## 错误处理要求
+### Setup
 
-sandbox 的 `ASSERT` / `ASCEND_ASSERT` 适合 benchmark，不适合 CacheStore。
+`Setup` 做初始化：
 
-UCM 实现要改成：
+1. 清理旧状态。
+2. 校验配置。
+3. `aclrtSetDevice(deviceId)`。
+4. 创建 `h2dStream_` 和 `fftsStream_`。
+5. 为每个 pipeline slot 分配 device staging buffer。
+6. 为每个 slot 创建 `slotReady` 和 `slotFree` event。
+7. 初始 record `slotFree`，表示所有 slot 可用。
+
+对应代码：
+
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.cc:23`
+
+### SubmitObject
+
+一个 `ShardTask` 对应一个 pipeline object。
+
+输入：
 
 ```text
-acl/rt 调用失败 -> Status{ret, ...}
-FFTS BuildCopies 失败 -> Status::InvalidParam 或 Status::Error
-Launch 失败 -> Status
-SubmitObject 失败 -> Status
-Synchronize 失败 -> Status
+host     = task.bufferHandle.Data()
+devices  = task.shard.addrs.data()
+sizes    = tensorSizes_
 ```
 
-LoadQueue 收到失败后：
+提交流程：
 
 ```text
-failureSet_->Insert(taskHandle)
-如果当前 shard 挂 waiter，则 waiter->Done()
+slot = nextObjectIndex % pipelineDepth
+staging = stagingBuffers[slot]
+
+BuildCopySpecs(staging, devices, sizes)
+dispatcher.BuildCopies(specs, maxReadyLanes, readyCount)
+
+h2dStream waits slotFree[slot]
+aclrtMemcpyAsync(host -> staging, sum(sizes), h2dStream)
+record slotReady[slot] on h2dStream
+
+fftsStream waits slotReady[slot]
+dispatcher.Launch(fftsStream, readyCount)
+record slotFree[slot] on fftsStream
+
+inFlight_.push_back(object)
+nextObjectIndex++
 ```
 
-保持和当前 CE 路径一致。
+对应代码：
 
-## 验证计划
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.cc:85`
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.cc:117`
 
-第一阶段只验证功能等价：
+`BuildCopySpecs` 将 staging buffer 按 `tensorSizes` 切分成 FFTS copy spec：
 
 ```text
-CE 默认路径不变
-未启用 FFTS 时不引入新依赖
-启用 FFTS 但缺少 runtime 时 Setup 明确失败
-Cache|Fake 或 Cache|Empty 下做小尺寸 load
-对比 HBM 目标 KV block 内容
-覆盖 tensorSizes_ 不等长场景
-覆盖多 shard task，确认最后一个 shard 才 Done
-覆盖 timeout/failureSet 路径
+src = staging + offset
+dst = devices[i]
+size = sizes[i]
 ```
 
-第二阶段再验证性能：
+这里使用 `sum(tensorSizes)` 作为 H2D 有效 object 大小，不默认搬运完整 `shardSize`。这和原 CE scatter 的有效字节语义一致。
 
-```text
-记录 CE scatter 的 load H2D 时间
-记录 FFTS pipeline 的 load H2D 时间
-区分 submit time、stream synchronize time、业务 load_data 到 wait time
-扫描 maxReadyLanes
-扫描 tensor fragment 数
-扫描 block/shard 大小
-```
+### Synchronize
 
-性能验证不要放进第一版功能 patch。
+`Synchronize` 保证所有 H2D staging 和 FFTS D2D split 完成：
 
-## 主要风险
+1. `aclrtSetDevice(deviceId)`。
+2. 让 `h2dStream_` wait 所有 `slotFree` event。
+3. 同步 `h2dStream_`。
+4. 同步 `fftsStream_`。
+5. 清理 `inFlight_`。
 
-### 1. objectBytes 和 shardSize 混淆
+对应代码：
 
-CE 路径按 `tensorSizes_` 累加拷贝。FFTS staging 也应该按 `sum(tensorSizes_)` 拷贝。不要默认搬完整 `shardSize`，除非确认 `shardSize == sum(tensorSizes_)`。
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.cc:166`
 
-### 2. descriptor 生命周期
+### 生命周期管理
 
-FFTS `descBuf` 不能指向短生命周期栈内存。每个 in-flight object 的 dispatcher/context buffer 要活到 synchronize 之后。
+实现里有两个独立生命周期：
 
-### 3. staging slot 复用
+- staging slot 生命周期由 `slotFree` event 控制，防止 slot 被覆盖。
+- FFTS descriptor 生命周期由 `inFlight_` 控制，防止 runtime 仍可能读取 descriptor 时内存被释放。
 
-slot 复用只能由 `slotFree` 保证。不要在 host 侧仅凭 objectIndex 轮转就覆盖 staging buffer。
+`InFlightObject` 保存 copy specs 和 dispatcher：
 
-### 4. raw stream 抽象
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.h:27`
 
-现有 `Trans::Stream` 不暴露 raw `aclrtStream`，也没有 grouped object copy 语义。第一版不要强行塞进 `HostToDeviceAsync`。
+## FftsD2DDispatcher 设计
 
-### 5. Dump 不对称
+`FftsD2DDispatcher` 将一组 device-to-device copy spec 编译成 FFTS Plus context，并提交给 runtime。
 
-Load 是 host -> device，适合 H2D staging + FFTS D2D split。Dump 是 device -> host gather，方向不同，第一版保持 CE。
+接口定义：
 
-## 推荐落地步骤
+- `@ucm/shared/trans/ascend/ffts_d2d_dispatcher.h:24`
+- `@ucm/shared/trans/ascend/ffts_d2d_dispatcher.h:30`
 
-第一步：增加配置和编译开关，但默认 CE。
+### BuildCopies
 
-第二步：新增 UCM 风格 `FftsD2DDispatcher`，接口返回 `Status`。
+`BuildCopies(copies, maxReadyLanes, readyContextNum)`：
 
-第三步：新增 `AscendH2DFftsPipeline`，完成 stream、event、staging buffer、SubmitObject、Synchronize。
+1. 清空旧 context。
+2. 校验 copy spec 和 ready lane。
+3. `laneCount = min(copies.size(), maxReadyLanes)`。
+4. 为每个 copy 创建一个 SDMA context。
+5. 按 `i % laneCount` 把同一 lane 上的 context 串成 dependency chain。
+6. 返回 `readyContextNum = laneCount`。
 
-第四步：给 LoadQueue 增加 `H2DTransferExecutor`，先实现 CE executor，确保重构后 CE 行为不变。
+对应代码：
 
-第五步：接入 FFTS executor，并只在 `cache_h2d_transport=ffts_pipeline` 时启用。
+- `@ucm/shared/trans/ascend/ffts_d2d_dispatcher.cc:72`
 
-第六步：做小尺寸正确性验证，再做性能验证。
+这种设计让前 `readyContextNum` 个 context 作为初始 ready context，其余 context 由 dependency 驱动。
 
-## 最小代码改动范围
+### Launch
 
-预计新增：
+`Launch(stream, readyContextNum)`：
 
-- `@unified-cache-management/ucm/shared/trans/ascend/ffts_d2d_dispatcher.h`
-- `@unified-cache-management/ucm/shared/trans/ascend/ffts_d2d_dispatcher.cc`
-- `@unified-cache-management/ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.h`
-- `@unified-cache-management/ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.cc`
+1. 构造 `rtFftsPlusSqe_t`。
+2. 设置 `totalContextNum`、`readyContextNum`、`preloadContextNum`。
+3. 将 `contexts_.data()` 作为 host descriptor buffer。
+4. 调用 `rtFftsPlusTaskLaunchWithFlag` 提交到 `fftsStream_`。
 
-预计修改：
+对应代码：
 
-- `@unified-cache-management/ucm/store/cache/cc/global_config.h`
-- `@unified-cache-management/ucm/store/cache/cc/cache_store.cc`
-- `@unified-cache-management/ucm/store/cache/cc/load_queue.h`
-- `@unified-cache-management/ucm/store/cache/cc/load_queue.cc`
-- `@unified-cache-management/ucm/store/cache/CMakeLists.txt`
-- `@unified-cache-management/ucm/shared/trans/ascend/CMakeLists.txt`
+- `@ucm/shared/trans/ascend/ffts_d2d_dispatcher.cc:102`
 
-不建议修改：
+### SDMA context
 
-- `@unified-cache-management/ucm/store/detail/type/types.h`
-- `@unified-cache-management/ucm/store/pipeline/cpy/pipeline_store.py.cc`
-- `@unified-cache-management/ucm/integration/vllm/ucm_connector.py`
+`BuildSdmaCtx` 把 `dst`、`src` 和 `size` 写入 128-byte `rtFftsPlusSdmaCtx_t`：
 
-因为现有 `TaskDesc`、`Shard.addrs` 和 `tensor_size_list` 已经足够表达 FFTS pipeline 需要的输入。
+- `@ucm/shared/trans/ascend/ffts_d2d_dispatcher.cc:133`
 
-## 一句话方案
+提交前通过 `static_assert` 确认 FFTS context 结构大小为 128 字节，避免 ABI 假设漂移。
 
-把 FFTS pipeline 做成 CacheStore Load 阶段的 Ascend 专用 H2D transport：输入仍然是 `handle.Data() + shard.addrs + tensorSizes_`，内部先用 CE 把一个 shard 搬到 device staging buffer，再用 FFTS SDMA split 到最终 KV cache device pointers；LoadQueue 的任务、wait、failure、holder 生命周期保持不变。
+## 错误处理
+
+本实现不沿用 sandbox 式 `ASSERT` 或进程退出，而是统一返回 `Status`：
+
+- ACL 调用失败通过 `AclStatus` 转为 `Status`。
+- FFTS copy spec、dependency、ready context 参数不合法返回 `InvalidParam`。
+- FFTS launch 失败返回 runtime error code。
+- LoadQueue 的 submit/synchronize 失败会写入 `failureSet_`，最后唤醒 waiter。
+
+相关代码：
+
+- `@ucm/shared/trans/ascend/ascend_h2d_ffts_pipeline.cc:12`
+- `@ucm/shared/trans/ascend/ffts_d2d_dispatcher.cc:33`
+- `@ucm/store/cache/cc/load_queue.cc:254`
+
+## 兼容性与行为边界
+
+默认行为：
+
+- 不打开 CMake 开关时，仍然只编译 CE 路径。
+- 不配置 `cache_h2d_transport` 时，默认值是 `"ce"`。
+- Dump 路径不变。
+- CacheStore 对外 task 语义不变。
+
+显式启用 FFTS pipeline：
+
+- 编译时必须提供 FFTS header 和 `libruntime`。
+- 运行时必须设置 `cache_h2d_transport: "ffts_pipeline"`。
+- tensor fragment 数小于 `cache_h2d_ffts_min_fragments` 时回退 CE。
+
+保留不变的模块：
+
+- `@ucm/store/detail/type/types.h`
+- `@ucm/store/pipeline/cpy/pipeline_store.py.cc`
+- `@ucm/integration/vllm/ucm_connector.py`
+
+## 验证建议
+
+功能验证：
+
+- 默认 CE 构建可以正常编译，不要求 FFTS 头文件。
+- `UCM_ENABLE_ASCEND_FFTS_PIPELINE=OFF` 且配置 `"ffts_pipeline"` 时，`CacheStore::Setup` 明确失败。
+- `UCM_ENABLE_ASCEND_FFTS_PIPELINE=ON` 时，缺少 FFTS header 或 `libruntime` 的构建明确失败。
+- 对比 CE 与 FFTS pipeline 的 load 后 HBM KV cache 内容。
+- 覆盖不等长 `tensor_size_list`。
+- 覆盖多 shard task，确认只有最后一个 shard 同步后才 `Done()`。
+- 覆盖 backend load 失败、H2D submit 失败、synchronize 失败后的 `failureSet_` 传播。
+
+性能验证：
+
+- 对比 CE scatter 与 FFTS pipeline 的 load H2D 耗时。
+- 分别记录 submit 耗时、stream synchronize 耗时、整体 task wait 耗时。
+- 扫描 `cache_h2d_ffts_max_ready_lanes`。
+- 扫描 fragment 数和 shard 大小。
+- 观察 `cache_h2d_ffts_pipeline_depth` 对重叠度和内存占用的影响。
+
+## 风险与关注点
+
+1. `objectBytes` 必须等于有效 tensor 字节数，而不是默认使用 `shardSize`。否则 staging 会搬运 padding，甚至可能破坏后续 offset 语义。
+2. FFTS descriptor buffer 必须活到 stream 任务完成之后。当前通过 `inFlight_` 在 `Synchronize()` 后统一清理。
+3. staging slot 复用必须依赖 `slotFree` event。不能仅依赖 host 侧 `nextObjectIndex` 轮转。
+4. `h2dFftsMaxReadyLanes` 需要控制在 runtime 支持和 `uint16_t` 表达范围内。
+5. 当配置 `"ffts_pipeline"` 但 fragment 数小于 `h2dFftsMinFragments` 时，实际会走 CE，这一点需要在日志或调试文档中明确，避免误判性能结果。
+
+## 一句话总结
+
+最新提交把 FFTS pipeline 落成了 CacheStore Load 阶段的可选 Ascend H2D transport：LoadQueue 仍按 shard 组织任务和生命周期，默认 CE 行为不变；启用后每个 shard 先 H2D 到 device staging buffer，再由 FFTS SDMA 按 `tensorSizes` 拆分到最终 KV cache device pointer。
