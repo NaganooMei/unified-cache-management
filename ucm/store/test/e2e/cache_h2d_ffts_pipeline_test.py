@@ -147,6 +147,9 @@ def build_config(
         "block_size": shard_size,
         "share_buffer_enable": True,
         "cache_buffer_capacity_gb": cache_buffer_capacity_gb,
+        "cache_load_exclusive_buffer_number": env_int(
+            "UCM_FFTS_LOAD_EXCLUSIVE_BUFFER_NUMBER", 64
+        ),
         "waiting_queue_depth": env_int("UCM_FFTS_WAITING_QUEUE_DEPTH", 64),
         "running_queue_depth": env_int("UCM_FFTS_RUNNING_QUEUE_DEPTH", 4096),
         "cache_stream_number": env_int("UCM_FFTS_CACHE_STREAM_NUMBER", 4),

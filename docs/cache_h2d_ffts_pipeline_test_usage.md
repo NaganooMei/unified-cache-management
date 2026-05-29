@@ -258,10 +258,19 @@ UCM_FFTS_MAX_READY_LANES=8
 ```bash
 UCM_FFTS_CACHE_STREAM_NUMBER=4
 UCM_FFTS_CACHE_BUFFER_CAPACITY_GB=4
+UCM_FFTS_LOAD_EXCLUSIVE_BUFFER_NUMBER=64
 UCM_FFTS_WAITING_QUEUE_DEPTH=64
 UCM_FFTS_RUNNING_QUEUE_DEPTH=4096
 UCM_FFTS_TIMEOUT_MS=30000
 ```
+
+如果遇到类似错误：
+
+```text
+too small buffer(4294967296) on shard(4194304)
+```
+
+含义是 `cache_buffer_capacity_gb` 能容纳的 shard 数不满足 CacheStore 校验。脚本默认 shard 大小是 4MB，4GB cache buffer 只能容纳 1024 个 shard；如果 `cache_load_exclusive_buffer_number` 使用 CacheStore 默认值 1024，校验会要求至少 2048 个 shard。测试脚本默认把 `UCM_FFTS_LOAD_EXCLUSIVE_BUFFER_NUMBER` 设为 64，所以 4GB buffer 可以通过校验。也可以选择增大 `UCM_FFTS_CACHE_BUFFER_CAPACITY_GB`。
 
 关闭 CE 对比，只测 FFTS pipeline：
 

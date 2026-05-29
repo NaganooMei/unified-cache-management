@@ -141,6 +141,9 @@ def main():
     config["block_size"] = shard_size
     config["share_buffer_enable"] = True
     config["cache_buffer_capacity_gb"] = env_int("UCM_FFTS_CACHE_BUFFER_CAPACITY_GB", 4)
+    config["cache_load_exclusive_buffer_number"] = env_int(
+        "UCM_FFTS_LOAD_EXCLUSIVE_BUFFER_NUMBER", 64
+    )
     config["waiting_queue_depth"] = env_int("UCM_FFTS_WAITING_QUEUE_DEPTH", 64)
     config["running_queue_depth"] = env_int("UCM_FFTS_RUNNING_QUEUE_DEPTH", 4096)
     config["cache_stream_number"] = env_int("UCM_FFTS_CACHE_STREAM_NUMBER", 4)
