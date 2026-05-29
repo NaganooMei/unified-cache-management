@@ -66,7 +66,60 @@ max_ready_lanes = 8
 block_num * fragment_count * fragment_bytes
 ```
 
-## 基本运行
+## pip install 安装方式
+
+如果希望用 `pip install` 的方式安装 CacheStore 和 PipelineStore，并同时打开 FFTS pipeline 编译能力，可以在 Ascend 环境中执行：
+
+```bash
+cd unified-cache-management
+
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+PLATFORM=ascend \
+ENABLE_SPARSE=false \
+UCM_ENABLE_ASCEND_FFTS_PIPELINE=1 \
+ASCEND_ROOT=/usr/local/Ascend/ascend-toolkit/latest \
+pip install -v -e . --no-build-isolation
+```
+
+这里 `PLATFORM=ascend` 会让 `setup.py` 传入：
+
+```text
+RUNTIME_ENVIRONMENT=ascend
+```
+
+这里 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=1` 会让 `setup.py` 传入：
+
+```text
+UCM_ENABLE_ASCEND_FFTS_PIPELINE=ON
+```
+
+安装完成后，`PipelineStore`、`CacheStore`、`EmptyStore` 等组件会随 Python 包一起可用，测试脚本可以直接 import `UcmPipelineStore`。
+
+## 先验功能
+
+先跑功能脚本，确认 `ffts_pipeline` 路径能正确 load：
+
+```bash
+UC_LOGGER_LEVEL=debug \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+python ucm/store/test/e2e/cache_h2d_ffts_pipeline_function_test.py
+```
+
+这个脚本风格和 `cache_on_empty_test.py` 接近：在 `main()` 中显式创建 `worker` 和 `scheduler`，然后把它们传给 `e2e_test()`。
+
+功能脚本只做正确性验证：
+
+1. `scheduler.lookup` 确认初始 cache miss。
+2. `worker.dump` 把源 tensor 写入 CacheStore。
+3. `scheduler.lookup` 确认 cache hit。
+4. `worker.load` 通过 `ffts_pipeline` 加载到目标 tensor。
+5. `torch.allclose` 对比源 tensor 和目标 tensor。
+
+如果这个脚本失败，先不要看性能，优先修正编译、运行时配置或数据正确性问题。
+
+## 再比性能
 
 在仓库根目录执行：
 
