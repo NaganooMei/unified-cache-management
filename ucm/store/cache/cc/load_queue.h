@@ -64,7 +64,6 @@ private:
     std::string h2dTransport_{"ce"};
     size_t h2dFftsPipelineDepth_{2};
     size_t h2dFftsMaxReadyLanes_{8};
-    size_t h2dFftsMinFragments_{2};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;

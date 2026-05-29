@@ -115,8 +115,7 @@ private:
 std::unique_ptr<H2DTransferExecutor> MakeH2DTransferExecutor(const Config& config)
 {
 #if UCM_ENABLE_ASCEND_FFTS_PIPELINE
-    if (config.h2dTransport == "ffts_pipeline" &&
-        config.tensorSizes.size() >= config.h2dFftsMinFragments) {
+    if (config.h2dTransport == "ffts_pipeline") {
         return std::make_unique<FftsPipelineH2DTransferExecutor>();
     }
 #else
@@ -144,7 +143,6 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     h2dTransport_ = config.h2dTransport;
     h2dFftsPipelineDepth_ = config.h2dFftsPipelineDepth;
     h2dFftsMaxReadyLanes_ = config.h2dFftsMaxReadyLanes;
-    h2dFftsMinFragments_ = config.h2dFftsMinFragments;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
@@ -225,7 +223,6 @@ void LoadQueue::TransferStage(std::promise<Status>& started)
     transferConfig.h2dTransport = h2dTransport_;
     transferConfig.h2dFftsPipelineDepth = h2dFftsPipelineDepth_;
     transferConfig.h2dFftsMaxReadyLanes = h2dFftsMaxReadyLanes_;
-    transferConfig.h2dFftsMinFragments = h2dFftsMinFragments_;
 
     auto executor = MakeH2DTransferExecutor(transferConfig);
     auto s = executor->Setup(transferConfig);

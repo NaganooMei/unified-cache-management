@@ -152,7 +152,6 @@ private:
         config.Get("cache_h2d_transport", param.h2dTransport);
         config.GetNumber("cache_h2d_ffts_pipeline_depth", param.h2dFftsPipelineDepth);
         config.GetNumber("cache_h2d_ffts_max_ready_lanes", param.h2dFftsMaxReadyLanes);
-        config.GetNumber("cache_h2d_ffts_min_fragments", param.h2dFftsMinFragments);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -196,8 +195,7 @@ private:
         }
 #endif
         if (config.h2dTransport == "ffts_pipeline" &&
-            (config.h2dFftsPipelineDepth == 0 || config.h2dFftsMaxReadyLanes == 0 ||
-             config.h2dFftsMinFragments == 0)) {
+            (config.h2dFftsPipelineDepth == 0 || config.h2dFftsMaxReadyLanes == 0)) {
             return Status::InvalidParam("invalid H2D FFTS pipeline config");
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
@@ -245,7 +243,6 @@ private:
         UC_INFO("Set {}::H2DTransport to {}.", ns, config.h2dTransport);
         UC_INFO("Set {}::H2DFftsPipelineDepth to {}.", ns, config.h2dFftsPipelineDepth);
         UC_INFO("Set {}::H2DFftsMaxReadyLanes to {}.", ns, config.h2dFftsMaxReadyLanes);
-        UC_INFO("Set {}::H2DFftsMinFragments to {}.", ns, config.h2dFftsMinFragments);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

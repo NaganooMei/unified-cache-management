@@ -116,7 +116,6 @@ CacheStore `Config` 新增 H2D transport 配置：
 h2dTransport            default: "ce"
 h2dFftsPipelineDepth    default: 2
 h2dFftsMaxReadyLanes    default: 8
-h2dFftsMinFragments     default: 2
 ```
 
 对应代码：
@@ -131,15 +130,14 @@ h2dFftsMinFragments     default: 2
 cache_h2d_transport: "ffts_pipeline"
 cache_h2d_ffts_pipeline_depth: 2
 cache_h2d_ffts_max_ready_lanes: 8
-cache_h2d_ffts_min_fragments: 2
 ```
 
 校验规则：
 
 - `cache_h2d_transport` 只能是 `"ce"` 或 `"ffts_pipeline"`。
 - 如果运行时配置为 `"ffts_pipeline"`，但编译时未启用 `UCM_ENABLE_ASCEND_FFTS_PIPELINE`，`CacheStore::Setup` 返回错误。
-- 如果启用 FFTS pipeline，`depth`、`max_ready_lanes`、`min_fragments` 都必须大于 0。
-- 当编译支持 FFTS 且配置为 `"ffts_pipeline"`，但 `tensorSizes.size() < h2dFftsMinFragments` 时，LoadQueue 会回退到 CE executor。
+- 如果启用 FFTS pipeline，`depth` 和 `max_ready_lanes` 都必须大于 0。
+- 当编译支持 FFTS 且配置为 `"ffts_pipeline"` 时，LoadQueue 会直接选择 FFTS executor，不再按 fragment 数自动回退 CE。
 
 ## LoadQueue 改造
 
@@ -392,7 +390,7 @@ size = sizes[i]
 
 - 编译时必须提供 FFTS header 和 `libruntime`。
 - 运行时必须设置 `cache_h2d_transport: "ffts_pipeline"`。
-- tensor fragment 数小于 `cache_h2d_ffts_min_fragments` 时回退 CE。
+- 配置为 `"ffts_pipeline"` 后直接走 FFTS executor，不再按 tensor fragment 数回退 CE。
 
 保留不变的模块：
 
@@ -426,7 +424,6 @@ size = sizes[i]
 2. FFTS descriptor buffer 必须活到 stream 任务完成之后。当前通过 `inFlight_` 在 `Synchronize()` 后统一清理。
 3. staging slot 复用必须依赖 `slotFree` event。不能仅依赖 host 侧 `nextObjectIndex` 轮转。
 4. `h2dFftsMaxReadyLanes` 需要控制在 runtime 支持和 `uint16_t` 表达范围内。
-5. 当配置 `"ffts_pipeline"` 但 fragment 数小于 `h2dFftsMinFragments` 时，实际会走 CE，这一点需要在日志或调试文档中明确，避免误判性能结果。
 
 ## 一句话总结
 
