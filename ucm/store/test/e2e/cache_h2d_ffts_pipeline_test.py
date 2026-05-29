@@ -112,6 +112,18 @@ def make_empty_like(tensors: list[list[torch.Tensor]]) -> list[list[torch.Tensor
     return [[torch.empty_like(tensor) for tensor in row] for row in tensors]
 
 
+def poison_tensors(
+    tensors: list[list[torch.Tensor]],
+    device_type: str,
+    device_id: int,
+) -> None:
+    with torch.no_grad():
+        for row in tensors:
+            for tensor in row:
+                tensor.fill_(-1)
+    synchronize_device(device_type, device_id)
+
+
 def tensor_ptrs(tensors: list[list[torch.Tensor]]) -> np.ndarray:
     return np.asarray(
         [[tensor.data_ptr() for tensor in row] for row in tensors], dtype=np.uint64
@@ -186,6 +198,21 @@ def time_load(
     return time.perf_counter() - start
 
 
+def validate_load(
+    worker: UcmPipelineStore,
+    block_ids: list[bytes],
+    shard_indexes: list[int],
+    src_tensors: list[list[torch.Tensor]],
+    dst_tensors: list[list[torch.Tensor]],
+    dst_ptrs: np.ndarray,
+    device_type: str,
+    device_id: int,
+) -> None:
+    poison_tensors(dst_tensors, device_type, device_id)
+    time_load(worker, block_ids, shard_indexes, dst_ptrs)
+    cmp_and_print_diff(src_tensors, dst_tensors)
+
+
 def run_transport(
     transport: str,
     tensor_sizes: list[int],
@@ -212,14 +239,33 @@ def run_transport(
     dst_ptrs = tensor_ptrs(dst_tensors)
     prepare_cache(worker, scheduler, block_ids, shard_indexes, src_ptrs)
 
+    validate_load(
+        worker,
+        block_ids,
+        shard_indexes,
+        src_tensors,
+        dst_tensors,
+        dst_ptrs,
+        device_type,
+        device_id,
+    )
+
     for _ in range(warmup):
         time_load(worker, block_ids, shard_indexes, dst_ptrs)
-    cmp_and_print_diff(src_tensors, dst_tensors)
 
     samples = [
         time_load(worker, block_ids, shard_indexes, dst_ptrs) for _ in range(repeat)
     ]
-    cmp_and_print_diff(src_tensors, dst_tensors)
+    validate_load(
+        worker,
+        block_ids,
+        shard_indexes,
+        src_tensors,
+        dst_tensors,
+        dst_ptrs,
+        device_type,
+        device_id,
+    )
 
     bytes_per_load = block_num * sum(tensor_sizes)
     avg_seconds = sum(samples) / len(samples)
