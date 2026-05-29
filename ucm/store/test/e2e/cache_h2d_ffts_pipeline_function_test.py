@@ -58,6 +58,17 @@ def make_device(device_type: str, device_id: int) -> str:
     return f"{device_type}:{device_id}"
 
 
+def synchronize_device(device_type: str, device_id: int) -> None:
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device_id)
+        return
+    if device_type == "npu" and hasattr(torch, "npu"):
+        try:
+            torch.npu.synchronize(device_id)
+        except TypeError:
+            torch.npu.synchronize()
+
+
 def cmp_and_print_diff(a, b, rtol=0.0, atol=0.0):
     for r, (row_a, row_b) in enumerate(zip(a, b)):
         for c, (ta, tb) in enumerate(zip(row_a, row_b)):
@@ -98,6 +109,8 @@ def e2e_test(
     tensor_sizes: list[int],
     request_size: int,
     device: str,
+    device_type: str,
+    device_id: int,
 ):
     block_ids = [secrets.token_bytes(16) for _ in range(request_size)]
     founds = scheduler.lookup(block_ids)
@@ -106,6 +119,7 @@ def e2e_test(
 
     shard_indexes = [0 for _ in range(request_size)]
     src_tensors = make_tensors(request_size, tensor_sizes, device)
+    synchronize_device(device_type, device_id)
     task = worker.dump(block_ids, shard_indexes, src_tensors)
     worker.wait(task)
 
@@ -155,7 +169,7 @@ def main():
     scheduler = UcmPipelineStore(config)
 
     for _ in range(test_batch_number):
-        e2e_test(worker, scheduler, tensor_sizes, request_size, device)
+        e2e_test(worker, scheduler, tensor_sizes, request_size, device, device_type, device_id)
 
 
 if __name__ == "__main__":
