@@ -52,6 +52,13 @@ def env_float(name: str, default: float) -> float:
     return float(os.getenv(name, str(default)))
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 def parse_tensor_sizes() -> list[int]:
     sizes = os.getenv("UCM_FFTS_TENSOR_SIZES")
     if sizes:
@@ -157,7 +164,7 @@ def build_config(
         "tensor_size_list": tensor_sizes,
         "shard_size": shard_size,
         "block_size": shard_size,
-        "share_buffer_enable": True,
+        "share_buffer_enable": env_bool("UCM_FFTS_SHARE_BUFFER_ENABLE", True),
         "cache_buffer_capacity_gb": cache_buffer_capacity_gb,
         "cache_load_exclusive_buffer_number": env_int(
             "UCM_FFTS_LOAD_EXCLUSIVE_BUFFER_NUMBER", 64
@@ -173,17 +180,17 @@ def build_config(
 
 def prepare_cache(
     worker: UcmPipelineStore,
-    scheduler: UcmPipelineStore,
+    lookup_store: UcmPipelineStore,
     block_ids: list[bytes],
     shard_indexes: list[int],
     src_ptrs: np.ndarray,
 ) -> None:
-    assert not any(scheduler.lookup(block_ids))
-    assert scheduler.lookup_on_prefix(block_ids) == -1
+    assert not any(lookup_store.lookup(block_ids))
+    assert lookup_store.lookup_on_prefix(block_ids) == -1
     task = worker.dump_data(block_ids, shard_indexes, src_ptrs)
     worker.wait(task)
-    assert all(scheduler.lookup(block_ids))
-    assert scheduler.lookup_on_prefix(block_ids) + 1 == len(block_ids)
+    assert all(lookup_store.lookup(block_ids))
+    assert lookup_store.lookup_on_prefix(block_ids) + 1 == len(block_ids)
 
 
 def time_load(
@@ -227,7 +234,8 @@ def run_transport(
     unique_id = f"h2d-ffts-{transport}-{secrets.token_hex(8)}"
     config = build_config(unique_id, transport, tensor_sizes, cache_buffer_capacity_gb)
     worker = UcmPipelineStore(config | {"device_id": device_id})
-    scheduler = UcmPipelineStore(config)
+    share_buffer_enable = bool(config["share_buffer_enable"])
+    lookup_store = UcmPipelineStore(config) if share_buffer_enable else worker
 
     block_ids = [secrets.token_bytes(16) for _ in range(block_num)]
     shard_indexes = [0 for _ in range(block_num)]
@@ -237,7 +245,7 @@ def run_transport(
 
     src_ptrs = tensor_ptrs(src_tensors)
     dst_ptrs = tensor_ptrs(dst_tensors)
-    prepare_cache(worker, scheduler, block_ids, shard_indexes, src_ptrs)
+    prepare_cache(worker, lookup_store, block_ids, shard_indexes, src_ptrs)
 
     validate_load(
         worker,
