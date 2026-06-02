@@ -14,6 +14,7 @@
 - Ascend DSV4 的 UCM canonical hash block 是 512 original tokens。命中统计里的 block 指这个 512-token canonical block。
 - `token_block_size` 不是 CacheStore 的字节 block，也不是一次命中的 token 数。它表示某个 KV cache group 的一个 logical block 在 original-token 坐标上覆盖的跨度。
 - 对压缩 KV group，`token_block_size = kv_cache_spec.block_size * compress_ratio`。它必须和 tensor layout 里的 `tensor_block_size` 一起看，才能知道实际要从 KV tensor 里取多少物理槽位。
+- CacheStore 视角下，单请求外部命中 `N` 个 blocks 时，会提交 1 个 FA load task 和 1 个 WA load task；当前 CE H2D 路径下，实际 async copy 数是 `83N + 127`。
 - 当前日志下单请求外部命中 `N` 个 512-token canonical blocks 时，H2D load 公式是：
 
 ```text
@@ -39,9 +40,13 @@ H2D bytes = N * FA_row_h2d_bytes + WA_row_h2d_bytes
 
 `@ucm/store/cache/cc/cache_store.cc`
 
+`@ucm/store/cache/cc/trans_manager.h`
+
 `@ucm/store/cache/cc/load_queue.cc`
 
 `@ucm/store/pipeline/connector.py`
+
+`@ucm/store/pipeline/cpy/pipeline_store.py.cc`
 
 ## DeepSeek-V4 论文里的 KV Cache 结构
 
@@ -139,9 +144,9 @@ if not meta.tail_tokens:
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:614`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:980`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## token_block_size 到底是什么
 
@@ -165,7 +170,7 @@ token_block_size = kv_cache_spec.block_size * compress_ratio
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:398`
+`@ucm/integration/vllm/hma_connector.py`
 
 ### token_block_size 必须和 tensor_block_size 一起看
 
@@ -189,9 +194,9 @@ tensor_tokens_to_copy =
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:164`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:191`
+`@ucm/integration/vllm/hma_connector.py`
 
 ### 用 FA group 0/3/8 举例
 
@@ -252,7 +257,7 @@ canonical block 7: token_start=3584  -> physical_offset=896
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:967`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## UCM FAWA Connector 如何识别 DSV4
 
@@ -283,11 +288,11 @@ hash_block_size = 512
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:342`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:353`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:380`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## UCM 如何把 Groups 分成 FA 和 WA
 
@@ -331,11 +336,11 @@ tail_blocks = max(tail_tokens // token_block_size, 1)
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:392`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:405`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:414`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## Store 创建模式
 
@@ -376,13 +381,13 @@ fawa_wa
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:432`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:454`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:481`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:528`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## tensor_size_list 如何生成
 
@@ -419,9 +424,9 @@ fragment_bytes = tensor_sizes_per_token * tensor_tokens
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:614`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:191`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## 命中判断模式
 
@@ -469,9 +474,9 @@ DSV4 FAWA 路径中的命中单位是 512-token canonical hash block。
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:648`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:675`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## Load 模式
 
@@ -508,7 +513,7 @@ FA load 是逐 external-hit canonical block 加载；WA load 只加载最后一�
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:1012`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## Dump/Save 模式
 
@@ -533,7 +538,7 @@ WA: 一个请求只 dump 最终 boundary 的一行。
 
 相关代码：
 
-`@ucm/integration/vllm/hma_connector.py:1080`
+`@ucm/integration/vllm/hma_connector.py`
 
 ## 当前日志下的 Row Size 和 IO
 
@@ -625,6 +630,8 @@ WA = 6,496,256
 H2D bytes = N * FA + WA
 ```
 
+这里默认 `N > 0`。如果 `external_hit_blocks = 0`，说明外部缓存没有可复用 boundary，FA/WA load 都不会提交。
+
 如果看 CacheStore row 管理或 backend row IO：
 
 ```text
@@ -641,11 +648,92 @@ Cache row bytes = N * 3,186,688 + 6,496,256
 
 这里的 block 是 512-token canonical block，不是 vLLM 物理 KV block，也不是 CacheStore byte block。
 
+### CacheStore 一次 load 的 IO 形态
+
+当单个 request 外部命中 `N` 个 512-token canonical blocks 时，FAWA connector 会提交两个 CacheStore load task：
+
+| load task | key/row 数 | 每 row 的 device pointer 数 | 每 row 的有效 H2D bytes | 每 row 的 CacheStore shard bytes |
+| --- | --- | --- | --- | --- |
+| FA load | `N` | 83 | 3,183,872 | 3,186,688 |
+| WA load | 1 | 127 | 6,496,256 | 6,496,256 |
+
+这里的 `key/row 数` 到 CacheStore C++ 里就是 `TaskDesc` 里的 shard 数。一个 shard 对应一个 CacheStore row：它有一个 block key、一个 shard index，以及一组 device-side addresses。LoadQueue 会逐 shard 取 host-side row buffer，再把这个 row buffer 按 `tensor_size_list` scatter 到该 row 的 device addresses。
+
+所以命中 `N` 个 blocks 时，CacheStore 层面的 row 数是：
+
+```text
+FA rows = N
+WA rows = 1
+total rows = N + 1
+```
+
+当前日志是 `H2DTransport to ce`，所以真实 H2D 不是“一次 3MB/6MB 大 memcpy”，而是按 fragment 循环提交 async copy。每个 row 的 fragment 桶如下：
+
+| row 类型 | 128KB fragment | 16KB fragment | 4KB fragment | 256B fragment | 总 fragment/copy 数 |
+| --- | --- | --- | --- | --- | --- |
+| FA row | 21 | 21 | 20 | 21 | 83 |
+| WA row | 43 | 42 | 42 | 0 | 127 |
+
+因此命中 `N` 个 blocks 时，CE H2D copy 数为：
+
+```text
+128KB copy 数 = 21N + 43
+16KB copy 数  = 21N + 42
+4KB copy 数   = 20N + 42
+256B copy 数  = 21N
+
+总 async H2D copy 数 = 83N + 127
+```
+
+如果把 128KB fragment 叫“大 IO”，把 16KB、4KB、256B 都归为“小 IO”，则：
+
+```text
+大 IO 数 = 21N + 43
+小 IO 数 = 62N + 84
+```
+
+例子：
+
+| 外部命中 block 数 | CacheStore load task | row 数 | 128KB 大 IO | 小 IO | 总 async H2D copy | 总有效 H2D |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | FA 1 个 + WA 1 个 | 2 | 64 | 146 | 210 | 9,680,128 bytes |
+| 10 | FA 1 个 + WA 1 个 | 11 | 253 | 704 | 957 | 38,334,976 bytes |
+| 100 | FA 1 个 + WA 1 个 | 101 | 2,143 | 6,284 | 8,427 | 324,883,456 bytes |
+
+注意这里的“大 IO/小 IO”是 CE H2D fragment 口径；CacheStore row/backend 口径又是另一层：
+
+```text
+FA backend/cache row bytes = 3,186,688
+FA effective H2D bytes     = 3,183,872
+FA row padding             = 2,816
+
+WA backend/cache row bytes = 6,496,256
+WA effective H2D bytes     = 6,496,256
+```
+
+也就是说，CacheStore 管理 FA row 时按 4KB 对齐后的 `ShardSize` 走；但 CE H2D 真正 scatter 到 device 的只有 `tensor_size_list` 里列出的 tensor payload，不会把 FA row 的 padding 搬到 device。
+
+如果 CacheStore host buffer 中该 row 已经 ready，LoadQueue 直接从 cache buffer 做 H2D。若 row 不 ready 且有 backend，LoadQueue 会先按 row 向 backend 提交一次 load，把 backend 数据回填到 cache buffer，再做 H2D。当前日志的 `Cache|Empty` 配置下，EmptyStore 不提供持久化 payload；能命中的 external row 必须来自同一 `unique_id` 下已经可见的 CacheStore shared buffer。
+
+相关代码：
+
+`@ucm/integration/vllm/hma_connector.py`
+
+`@ucm/store/pipeline/connector.py`
+
+`@ucm/store/pipeline/cpy/pipeline_store.py.cc`
+
+`@ucm/store/cache/cc/cache_store.cc`
+
+`@ucm/store/cache/cc/trans_manager.h`
+
+`@ucm/store/cache/cc/load_queue.cc`
+
 ## H2D Transport 对 IO 的影响
 
 `tensor_size_list` 决定一个 row 会拆成多少 fragment。Ascend DSV4 的 FA/WA row 中会出现 128KB、16KB、4KB、256B 等混合 fragment。
 
-当 `H2DTransport=ce` 时，LoadQueue 按 fragment 循环提交普通 H2D async copy。
+当 `H2DTransport=ce` 时，LoadQueue 按 fragment 循环提交普通 H2D async copy。上面的 `83N + 127` 就是当前日志下的实际 CE async copy 数。
 
 当 `H2DTransport=ffts_pipeline` 时，LoadQueue 将整个 row 作为 object 提交给 FFTS pipeline：
 
@@ -654,7 +742,7 @@ objectBytes = sum(tensor_size_list)
 maxFragments = len(tensor_size_list)
 ```
 
-这样可以把 host 侧大 object staging 和 device 侧 fragment scatter 组织成 pipeline，目标是降低小 fragment 场景的下发开销。
+这时 CacheStore 的提交粒度变成 row object：命中 `N` 个 blocks 时是 `N` 个 FA objects 加 1 个 WA object。每个 FA object 的 `objectBytes=3,183,872`、`maxFragments=83`；WA object 的 `objectBytes=6,496,256`、`maxFragments=127`。这样可以把 host 侧大 object staging 和 device 侧 fragment scatter 组织成 pipeline，目标是降低小 fragment 场景的下发开销。
 
 需要注意：
 
@@ -681,11 +769,11 @@ H2DTransport to ce
 
 相关代码：
 
-`@ucm/store/cache/cc/cache_store.cc:152`
+`@ucm/store/cache/cc/cache_store.cc`
 
-`@ucm/store/cache/cc/cache_store.cc:178`
+`@ucm/store/cache/cc/trans_manager.h`
 
-`@ucm/store/cache/cc/load_queue.cc:118`
+`@ucm/store/cache/cc/load_queue.cc`
 
 ## 当前启动日志的几个判断点
 
@@ -710,7 +798,7 @@ use_layerwise: True
 
 相关代码：
 
-`@ucm/integration/vllm/ucm_connector.py:2653`
+`@ucm/integration/vllm/ucm_connector.py`
 
 ### 2. Cache|Empty 的含义
 
@@ -878,50 +966,52 @@ H2DTransport to ce
 
 FAWA connector 识别 DeepSeek-V4 / Ascend DSV4 layout：
 
-`@ucm/integration/vllm/hma_connector.py:342`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:353`
+`@ucm/integration/vllm/hma_connector.py`
 
 Group meta 初始化与 `token_block_size` 计算：
 
-`@ucm/integration/vllm/hma_connector.py:392`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:398`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:405`
+`@ucm/integration/vllm/hma_connector.py`
 
 FA/WA store 创建：
 
-`@ucm/integration/vllm/hma_connector.py:432`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:454`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:528`
+`@ucm/integration/vllm/hma_connector.py`
 
 tensor fragment size 计算：
 
-`@ucm/integration/vllm/hma_connector.py:164`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:191`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:614`
+`@ucm/integration/vllm/hma_connector.py`
 
 FA/WA 命中逻辑：
 
-`@ucm/integration/vllm/hma_connector.py:648`
+`@ucm/integration/vllm/hma_connector.py`
 
-`@ucm/integration/vllm/hma_connector.py:675`
+`@ucm/integration/vllm/hma_connector.py`
 
 FA/WA load：
 
-`@ucm/integration/vllm/hma_connector.py:1012`
+`@ucm/integration/vllm/hma_connector.py`
 
 FA/WA dump：
 
-`@ucm/integration/vllm/hma_connector.py:1080`
+`@ucm/integration/vllm/hma_connector.py`
 
 CacheStore H2D transport：
 
-`@ucm/store/cache/cc/cache_store.cc:152`
+`@ucm/store/cache/cc/cache_store.cc`
 
-`@ucm/store/cache/cc/load_queue.cc:118`
+`@ucm/store/cache/cc/trans_manager.h`
+
+`@ucm/store/cache/cc/load_queue.cc`
