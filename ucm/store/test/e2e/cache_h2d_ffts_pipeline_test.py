@@ -36,12 +36,42 @@ from ucm.store.pipeline.connector import UcmPipelineStore
 
 @dataclass
 class LoadPerfResult:
+    case_name: str
     transport: str
+    block_num: int
+    fragment_count: int
+    shard_bytes: int
     bytes_per_load: int
     avg_seconds: float
     median_seconds: float
     min_seconds: float
     gbps: float
+
+
+@dataclass(frozen=True)
+class ModelCase:
+    name: str
+    tensor_sizes: list[int]
+
+
+KIB = 1024
+MIB = 1024 * KIB
+GIB = 1024 * MIB
+QWEN32B_FRAGMENT_COUNT = 128
+MODEL_CASES = {
+    "qwen32b_tp8": ModelCase("qwen32b_tp8", [32 * KIB] * QWEN32B_FRAGMENT_COUNT),
+    "qwen32b_tp8_full": ModelCase(
+        "qwen32b_tp8_full", [32 * KIB] * QWEN32B_FRAGMENT_COUNT
+    ),
+    "qwen32b_tp4": ModelCase("qwen32b_tp4", [64 * KIB] * QWEN32B_FRAGMENT_COUNT),
+    "qwen32b_tp4_full": ModelCase(
+        "qwen32b_tp4_full", [64 * KIB] * QWEN32B_FRAGMENT_COUNT
+    ),
+}
+MODEL_CASE_GROUPS = {
+    "baseline": ["qwen32b_tp8_full", "qwen32b_tp4_full"],
+    "qwen32b_baseline": ["qwen32b_tp8_full", "qwen32b_tp4_full"],
+}
 
 
 def env_int(name: str, default: int) -> int:
@@ -66,6 +96,53 @@ def parse_tensor_sizes() -> list[int]:
     fragment_count = env_int("UCM_FFTS_FRAGMENT_COUNT", 128)
     fragment_bytes = env_int("UCM_FFTS_FRAGMENT_BYTES", 32768)
     return [fragment_bytes] * fragment_count
+
+
+def parse_model_cases() -> list[ModelCase]:
+    case_expr = os.getenv("UCM_FFTS_MODEL_CASES") or os.getenv("UCM_FFTS_MODEL_CASE")
+    if not case_expr:
+        return [ModelCase("custom", parse_tensor_sizes())]
+
+    cases: list[ModelCase] = []
+    for raw_name in case_expr.split(","):
+        name = raw_name.strip().lower()
+        if not name:
+            continue
+        names = MODEL_CASE_GROUPS.get(name, [name])
+        for case_name in names:
+            case = MODEL_CASES.get(case_name)
+            if case is None:
+                valid = sorted(set(MODEL_CASES) | set(MODEL_CASE_GROUPS))
+                raise ValueError(f"unknown UCM_FFTS_MODEL_CASE {case_name}; valid={valid}")
+            cases.append(case)
+    if not cases:
+        raise ValueError("empty UCM_FFTS_MODEL_CASES")
+    return cases
+
+
+def format_bytes(value: int) -> str:
+    if value % GIB == 0:
+        return f"{value // GIB}GiB"
+    if value % MIB == 0:
+        return f"{value // MIB}MiB"
+    if value % KIB == 0:
+        return f"{value // KIB}KiB"
+    return f"{value}B"
+
+
+def tensor_size_histogram(tensor_sizes: list[int]) -> str:
+    counts: dict[int, int] = {}
+    for size in tensor_sizes:
+        counts[size] = counts.get(size, 0) + 1
+    return ", ".join(f"{count}x{format_bytes(size)}" for size, count in sorted(counts.items()))
+
+
+def cache_buffer_capacity_gb_for_case(tensor_sizes: list[int]) -> int:
+    configured = os.getenv("UCM_FFTS_CACHE_BUFFER_CAPACITY_GB")
+    if configured is not None:
+        return int(configured)
+    min_bytes = sum(tensor_sizes) * 1024
+    return max(4, (min_bytes + GIB - 1) // GIB)
 
 
 def torch_device(device_type: str, device_id: int) -> str:
@@ -221,6 +298,7 @@ def validate_load(
 
 
 def run_transport(
+    case_name: str,
     transport: str,
     tensor_sizes: list[int],
     block_num: int,
@@ -231,7 +309,7 @@ def run_transport(
     cache_buffer_capacity_gb: int,
 ) -> LoadPerfResult:
     device = torch_device(device_type, device_id)
-    unique_id = f"h2d-ffts-{transport}-{secrets.token_hex(8)}"
+    unique_id = f"h2d-ffts-{case_name}-{transport}-{secrets.token_hex(8)}"
     config = build_config(unique_id, transport, tensor_sizes, cache_buffer_capacity_gb)
     worker = UcmPipelineStore(config | {"device_id": device_id})
     share_buffer_enable = bool(config["share_buffer_enable"])
@@ -278,7 +356,11 @@ def run_transport(
     bytes_per_load = block_num * sum(tensor_sizes)
     avg_seconds = sum(samples) / len(samples)
     return LoadPerfResult(
+        case_name=case_name,
         transport=transport,
+        block_num=block_num,
+        fragment_count=len(tensor_sizes),
+        shard_bytes=sum(tensor_sizes),
         bytes_per_load=bytes_per_load,
         avg_seconds=avg_seconds,
         median_seconds=statistics.median(samples),
@@ -289,7 +371,9 @@ def run_transport(
 
 def print_result(result: LoadPerfResult) -> None:
     print(
-        f"{result.transport}: bytes={result.bytes_per_load}, "
+        f"{result.case_name}/{result.transport}: "
+        f"blocks={result.block_num}, fragments={result.fragment_count}, "
+        f"shard={format_bytes(result.shard_bytes)}, bytes={result.bytes_per_load}, "
         f"avg={result.avg_seconds * 1e3:.3f}ms, "
         f"median={result.median_seconds * 1e3:.3f}ms, "
         f"min={result.min_seconds * 1e3:.3f}ms, "
@@ -297,10 +381,52 @@ def print_result(result: LoadPerfResult) -> None:
     )
 
 
+def print_case_config(
+    case: ModelCase,
+    block_num: int,
+    warmup: int,
+    repeat: int,
+    device_type: str,
+    device_id: int,
+    cache_buffer_capacity_gb: int,
+) -> None:
+    shard_bytes = sum(case.tensor_sizes)
+    print(
+        "case_config: "
+        f"case={case.name}, device={device_type}:{device_id}, blocks={block_num}, "
+        f"fragments={len(case.tensor_sizes)}, shard={format_bytes(shard_bytes)}, "
+        f"tensor_sizes=[{tensor_size_histogram(case.tensor_sizes)}], "
+        f"cache_buffer_capacity_gb={cache_buffer_capacity_gb}, "
+        f"warmup={warmup}, repeat={repeat}"
+    )
+
+
+def print_summary_table(results: list[LoadPerfResult]) -> None:
+    if not results:
+        return
+    ce_by_case = {r.case_name: r for r in results if r.transport == "ce"}
+    print(
+        "summary: "
+        "case,transport,blocks,fragments,shard,bytes,avg_ms,median_ms,min_ms,gbps,ffts_vs_ce"
+    )
+    for result in results:
+        ratio = ""
+        if result.transport == "ffts_pipeline" and result.case_name in ce_by_case:
+            ratio = f"{result.avg_seconds / ce_by_case[result.case_name].avg_seconds:.3f}x"
+        print(
+            "summary: "
+            f"{result.case_name},{result.transport},{result.block_num},"
+            f"{result.fragment_count},{format_bytes(result.shard_bytes)},"
+            f"{result.bytes_per_load},{result.avg_seconds * 1e3:.3f},"
+            f"{result.median_seconds * 1e3:.3f},{result.min_seconds * 1e3:.3f},"
+            f"{result.gbps:.3f},{ratio}"
+        )
+
+
 def main():
     os.environ.setdefault("UC_LOGGER_LEVEL", "info")
 
-    tensor_sizes = parse_tensor_sizes()
+    cases = parse_model_cases()
     block_num = env_int("UCM_FFTS_BLOCK_NUM", 16)
     warmup = env_int("UCM_FFTS_WARMUP", 2)
     repeat = env_int("UCM_FFTS_REPEAT", 10)
@@ -309,23 +435,42 @@ def main():
     device_type = os.getenv("UCM_FFTS_TORCH_DEVICE", "cuda")
     device_id = env_int("UCM_FFTS_DEVICE_ID", 0)
     prepare_torch_backend(device_type)
-    cache_buffer_capacity_gb = env_int("UCM_FFTS_CACHE_BUFFER_CAPACITY_GB", 4)
     max_slowdown = env_float("UCM_FFTS_MAX_SLOWDOWN", 5.0)
     min_gbps = env_float("UCM_FFTS_MIN_GBPS", 0.0)
     compare_ce = os.getenv("UCM_FFTS_COMPARE_CE", "1") == "1"
 
-    print(
-        "config: "
-        f"device={device_type}:{device_id}, blocks={block_num}, "
-        f"fragments={len(tensor_sizes)}, shard_bytes={sum(tensor_sizes)}, "
-        f"warmup={warmup}, repeat={repeat}"
-    )
+    all_results: list[LoadPerfResult] = []
+    for case in cases:
+        cache_buffer_capacity_gb = cache_buffer_capacity_gb_for_case(case.tensor_sizes)
+        print_case_config(
+            case,
+            block_num,
+            warmup,
+            repeat,
+            device_type,
+            device_id,
+            cache_buffer_capacity_gb,
+        )
+        ce_result = None
+        if compare_ce:
+            ce_result = run_transport(
+                case.name,
+                "ce",
+                case.tensor_sizes,
+                block_num,
+                device_type,
+                device_id,
+                warmup,
+                repeat,
+                cache_buffer_capacity_gb,
+            )
+            print_result(ce_result)
+            all_results.append(ce_result)
 
-    ce_result = None
-    if compare_ce:
-        ce_result = run_transport(
-            "ce",
-            tensor_sizes,
+        ffts_result = run_transport(
+            case.name,
+            "ffts_pipeline",
+            case.tensor_sizes,
             block_num,
             device_type,
             device_id,
@@ -333,32 +478,22 @@ def main():
             repeat,
             cache_buffer_capacity_gb,
         )
-        print_result(ce_result)
+        print_result(ffts_result)
+        all_results.append(ffts_result)
 
-    ffts_result = run_transport(
-        "ffts_pipeline",
-        tensor_sizes,
-        block_num,
-        device_type,
-        device_id,
-        warmup,
-        repeat,
-        cache_buffer_capacity_gb,
-    )
-    print_result(ffts_result)
-
-    if min_gbps > 0:
-        assert ffts_result.gbps >= min_gbps, (
-            f"FFTS pipeline bandwidth {ffts_result.gbps:.3f}GB/s is lower than "
-            f"UCM_FFTS_MIN_GBPS={min_gbps:.3f}GB/s"
-        )
-    if ce_result is not None:
-        slowdown = ffts_result.avg_seconds / ce_result.avg_seconds
-        print(f"ffts_vs_ce_slowdown={slowdown:.3f}x")
-        assert slowdown <= max_slowdown, (
-            f"FFTS pipeline load is {slowdown:.3f}x slower than CE, "
-            f"exceeding UCM_FFTS_MAX_SLOWDOWN={max_slowdown:.3f}"
-        )
+        if min_gbps > 0:
+            assert ffts_result.gbps >= min_gbps, (
+                f"FFTS pipeline bandwidth {ffts_result.gbps:.3f}GB/s is lower than "
+                f"UCM_FFTS_MIN_GBPS={min_gbps:.3f}GB/s"
+            )
+        if ce_result is not None:
+            slowdown = ffts_result.avg_seconds / ce_result.avg_seconds
+            print(f"{case.name}: ffts_vs_ce_slowdown={slowdown:.3f}x")
+            assert slowdown <= max_slowdown, (
+                f"FFTS pipeline load is {slowdown:.3f}x slower than CE, "
+                f"exceeding UCM_FFTS_MAX_SLOWDOWN={max_slowdown:.3f}"
+            )
+    print_summary_table(all_results)
 
 
 if __name__ == "__main__":

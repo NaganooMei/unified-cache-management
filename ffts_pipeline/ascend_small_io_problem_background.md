@@ -146,6 +146,265 @@ one load = N FA rows + 1 WA row
 
 因此，Qwen32B TP8/TP4 可以作为 32K/64K 小 IO 的稳定收益模型；DSV4 可以作为 128K、16K、4K、256B 混合 IO 和 FA/WA 双 store 的复杂收益模型。
 
+## 阶段性验证结论与当前矛盾
+
+前期 sandbox 里已经针对 GQA 场景做过更细的验证，包括单卡不同 IO 聚合力度下的带宽，以及多卡同时读时的带宽。当前比较明确的结论是：GQA 场景下，IO 聚合粒度在 1M 到 2M 区间效果比较好。
+
+这个结论和当前 CacheStore 的真实 row/object 形态之间存在几个矛盾。
+
+### GQA 整存整取 object 偏大但仍有收益
+
+在非 layerwise 的 GQA CacheStore 路径里，Qwen32B 的一个 row 通常是完整 64 层拍平后的 `tensor_size_list`：
+
+```text
+TP8: 32K * 128 = 4M
+TP4: 64K * 128 = 8M
+```
+
+这意味着当前 FFTS pipeline 的 object 粒度已经大于 sandbox 验证里效果较好的 1M 到 2M 区间。按直觉看，4M/8M object 可能不是最优聚合粒度，但测试结果仍然明显优于原生 CE copy。这说明收益的第一来源仍然成立：把 128 次小 H2D copy 合成一次大 H2D staging，能显著摊薄 per-copy 固定开销。
+
+但这也提示当前接口不够灵活：object 粒度被 CacheStore shard 绑定了，无法把一个 4M/8M shard 按 1M/2M 的目标粒度拆成多个 pipeline objects。
+
+### GQA layerwise object 太小导致劣化
+
+layerwise 场景的问题相反。layerwise 下一个 row 往往只包含单层的 2 个 KV tensor：
+
+```text
+TP8 layerwise: 32K * 2 = 64K
+TP4 layerwise: 64K * 2 = 128K
+```
+
+这个 object 又太小了。对 FFTS pipeline 来说，64K/128K object 需要先 H2D staging，再构建 FFTS descriptor，再做 D2D split；如果 object 本身太小，这些额外开销很容易超过聚合收益，表现为明显劣化。
+
+这说明 layerwise 路径如果仍然按“一层一个 shard/object”接入 FFTS pipeline，很难得到理想效果。它需要跨 layer、跨 row 或跨 task 做更高层的 object 聚合，否则聚合粒度永远达不到 1M 到 2M。
+
+### DSV4 object 大且收益不明显
+
+DSV4 的 FA/WA row 本身已经比较大：
+
+```text
+FA row effective payload: 3,183,872 bytes
+WA row effective payload: 6,496,256 bytes
+```
+
+这两个 object 都大于 1M 到 2M 的经验较优区间。并且 DSV4 的 fragment 里有不少 128K，相比 32K/64K GQA 小 IO，原生 CE 的 per-copy 固定开销占比没有那么极端。所以 DSV4 上 FFTS pipeline 的提升不明显，是比较符合当前观察的。
+
+另外，WA store 每次只 load 一个 boundary row。即使 WA row 内部很大，当前 pipeline 的 row object 数也只有 1 个，无法形成“前一个 object 的 FFTS split 和后一个 object 的 H2D staging 重叠”。这会让 pipeline depth 的价值很有限。
+
+### 当前核心问题
+
+当前实现把 CacheStore row/shard 直接映射成 FFTS pipeline object：
+
+```text
+one ShardTask = one FFTS pipeline object
+```
+
+这个映射简单、稳定、侵入小，但它把 object 粒度固定成了 CacheStore 的 row 粒度。实际收益模型却说明，最优 object 粒度可能应该是一个独立的 transport 参数，而不是直接等于 shard size。
+
+## 接口改造思考
+
+我的判断是，当前接口最大的问题不是 FFTS dispatcher，而是缺少一个“transport object builder”。这个 builder 应该负责把 CacheStore 输入的 row/shard 重新组织成适合 H2D staging + FFTS split 的 object。
+
+### 第一类改造：单 shard 内拆分 object
+
+对 GQA 整存整取和 DSV4 FA/WA 这种 shard 偏大的场景，可以先支持在单个 shard 内按目标字节数拆分 object。
+
+新增一个运行时配置，例如：
+
+```text
+cache_h2d_ffts_object_target_bytes = 1048576 or 2097152
+```
+
+LoadQueue 仍然接收一个 `ShardTask`，但 FFTS executor 不再把整个 shard 一次性提交给 `AscendH2DFftsPipeline::SubmitObject`，而是按 `tensorSizes_` 的累计字节切成多个 object：
+
+```text
+shard tensor sizes
+  -> object 0 around 1M/2M
+  -> object 1 around 1M/2M
+  -> object 2 around 1M/2M
+```
+
+每个 object 的 host source 是同一个 host shard 内的连续 offset，device pointers 是对应的一段 fragment 子列表。这样不需要改 Python connector、TaskDesc 或 TransBuffer 生命周期，改造边界相对收敛。
+
+这个方向可以验证：
+
+- GQA 4M/8M shard 拆成 1M/2M object 后是否优于当前整 shard object。
+- DSV4 FA 3M row 拆成 2 个左右 object 是否有收益。
+- DSV4 WA 6.5M row 拆成多个 object 后，是否能在同一个 row 内形成更有效的 pipeline。
+
+### 第二类改造：layerwise 多 shard 聚合暂不推进
+
+对 GQA layerwise 这种 shard 太小的场景，表面上看需要跨 shard 聚合到 1M/2M。但代码路径确认后，这个方向不适合作为当前主攻点。
+
+layerwise 的一个 load task 里，通常是同一层的多个 block：
+
+```text
+(block_id_0, layer_id)
+(block_id_1, layer_id)
+(block_id_2, layer_id)
+...
+```
+
+也就是说，一个 task 内的不同 shard 对应不同 block id。CacheStore 会按 `(block_id, shard_index)` 去 `TransBuffer` 查找或分配 host cache buffer。一个 block 内部的 shard 可以理解为同一个 block 的不同分片语义，但同一层的不同 block 是不同 cache entry，它们的 host buffer 没有连续性保证。
+
+底层 `TransBuffer` 的数据池本身是连续大 buffer，`DataAt(iNode)` 是按 `nodeSize * iNode` 计算地址；但不同 block id 拿到的 `iNode` 由 hash 查找、已有缓存状态、freeHead 分配、引用计数和 shared buffer 复用共同决定。task 中相邻的 block 不等于 buffer 中相邻的 node，这不是接口语义能保证的事情。
+
+因此，layerwise 不能在现有 CacheStore buffer 接口上直接做零拷贝跨 shard 聚合：
+
+- 不 pack 的情况下，多个 shard 的 host source 不保证连续，不能合成一次大 H2D。
+- 如果先在 host 侧新增 pack buffer，把多个 shard 拷到连续 host staging，再做大 H2D，会引入额外 CPU memcpy、host buffer 生命周期、异步 pack 调度和错误处理。
+- 如果不做 host pack，而是把多个 shard 多次 H2D 到同一个 device staging object，不会减少跨 PCIe 的小 H2D 次数，只是改变 D2D split 的组织方式，无法解决核心瓶颈。
+
+所以，layerwise 暂时不进行进一步优化。它可以保留为负向对照或边界 case，用来说明 object 太小时 FFTS pipeline 会劣化；但当前不建议为了 layerwise 去改主接口或引入 host pack 方案。
+
+当前主攻方向收敛为：整存整取场景下的单 shard 内拆分，也就是把 GQA full 的 4M/8M shard 或 DSV4 的大 row，按 1M/2M 目标粒度拆成多个 pipeline objects。这个方向不需要跨 shard 聚合，也不依赖不同 block 的 host buffer 连续性。
+
+### 第三类改造：保留 CE fallback 或阈值策略
+
+不是所有 object 都适合 FFTS pipeline。当前观察已经说明，过小 object 会劣化，过大 object 也未必是最优。因此后续接口最好保留阈值策略：
+
+```text
+if object bytes < min_pipeline_bytes:
+  use CE
+elif object bytes > target bytes:
+  split into target-sized pipeline objects
+else:
+  use one FFTS pipeline object
+```
+
+这个策略不能只看总 bytes，还要看 fragment 数和 fragment size 分布。比如一个 1M object 如果只有 8 个 128K fragment，收益可能和 128 个 8K fragment 完全不同。
+
+## 先在 e2e 脚本里验证
+
+我赞同先在单测脚本里验证，而不是马上改主接口。当前脚本已经能模拟很多 object 形态：
+
+`@ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py`
+
+现有能力包括：
+
+- `UCM_FFTS_FRAGMENT_COUNT`
+- `UCM_FFTS_FRAGMENT_BYTES`
+- `UCM_FFTS_TENSOR_SIZES`
+- `UCM_FFTS_BLOCK_NUM`
+- `UCM_FFTS_PIPELINE_DEPTH`
+- `UCM_FFTS_MAX_READY_LANES`
+- `UCM_FFTS_COMPARE_CE`
+
+### 不改脚本即可先跑的矩阵
+
+GQA 当前整存整取形态：
+
+```text
+qwen32b_tp8_full:  128 fragments * 32K = 4M
+qwen32b_tp4_full:  128 fragments * 64K = 8M
+```
+
+GQA 目标 object 粒度模拟：
+
+```text
+qwen32b_tp8_1m: 32 fragments * 32K = 1M
+qwen32b_tp8_2m: 64 fragments * 32K = 2M
+qwen32b_tp4_1m: 16 fragments * 64K = 1M
+qwen32b_tp4_2m: 32 fragments * 64K = 2M
+```
+
+GQA layerwise 当前形态：
+
+```text
+qwen32b_tp8_layerwise: 2 fragments * 32K = 64K
+qwen32b_tp4_layerwise: 2 fragments * 64K = 128K
+```
+
+这两个 layerwise case 当前只建议作为负向对照：验证 object 太小时 FFTS pipeline 的额外 staging、descriptor 和 D2D split 开销会压过收益，而不是作为下一步接口优化目标。
+
+DSV4 FA / WA 单 row 形态可以用 `UCM_FFTS_TENSOR_SIZES` 显式传入：
+
+```text
+dsv4_fa:
+  21 * 128K
+  21 * 16K
+  20 * 4K
+  21 * 256B
+
+dsv4_wa:
+  43 * 128K
+  42 * 16K
+  42 * 4K
+```
+
+这组矩阵可以先回答两个问题：
+
+- 1M/2M object 在 UCM e2e 业务路径里是否仍然是 GQA 最优区间。
+- DSV4 的 FA/WA row 如果按当前整 row object 跑，为什么收益不明显。
+
+### 建议对脚本做的最小增强
+
+为了让验证更稳定，建议先给脚本加几个轻量能力，而不是直接改 CacheStore 接口。
+
+第一，增加 model case preset：
+
+```text
+UCM_FFTS_MODEL_CASE=qwen32b_tp8_full
+UCM_FFTS_MODEL_CASE=qwen32b_tp4_full
+UCM_FFTS_MODEL_CASE=qwen32b_tp8_layerwise
+UCM_FFTS_MODEL_CASE=qwen32b_tp4_layerwise
+UCM_FFTS_MODEL_CASE=qwen32b_tp8_1m
+UCM_FFTS_MODEL_CASE=qwen32b_tp8_2m
+UCM_FFTS_MODEL_CASE=qwen32b_tp4_1m
+UCM_FFTS_MODEL_CASE=qwen32b_tp4_2m
+UCM_FFTS_MODEL_CASE=dsv4_fa
+UCM_FFTS_MODEL_CASE=dsv4_wa
+```
+
+这样可以避免每次手写很长的 `UCM_FFTS_TENSOR_SIZES`，也能减少实验矩阵出错。
+
+第二，增加 shard size override：
+
+```text
+UCM_FFTS_SHARD_SIZE
+```
+
+这个主要用于模拟 DSV4 FA row 的 CacheStore 4KB 对齐 padding。H2D effective payload 仍然来自 `tensor_size_list`，但 CacheStore row/backend 口径可以更贴近真实 DSV4。
+
+第三，输出更明确的 object 信息：
+
+```text
+case name
+fragment count
+fragment size histogram
+shard bytes
+effective tensor bytes
+pipeline object bytes
+pipeline depth
+max ready lanes
+```
+
+当前脚本只打印 fragments 和 shard bytes，不足以直接判断是不是跑到了预期 object 形态。
+
+第四，增加结果表模式。单次脚本现在只跑一个 tensor shape。后续可以让脚本按 preset list 连续跑多组 case，并打印一张终端表，字段包括：
+
+```text
+case
+transport
+bytes
+avg_ms
+median_ms
+min_ms
+gbps
+ffts_vs_ce
+```
+
+第五，多卡同时读建议先做 wrapper，而不是塞进单进程测试。每个 device 一个进程，更接近真实多 rank 行为；wrapper 负责同时启动多个 `cache_h2d_ffts_pipeline_test.py`，最后汇总每卡带宽和总带宽。
+
+### 单测验证后的接口决策
+
+如果单测确认 1M/2M 在 UCM e2e 路径里仍然明显更优，那么接口改造优先级可以是：
+
+1. 主攻单 shard 内 object splitting，解决 GQA full 和 DSV4 大 row 的 object 过大问题。
+2. 暂停 layerwise 多 shard 聚合方向，因为它需要 host source 连续性或 host-side packing，复杂度和额外开销都比较高。
+3. 保留 layerwise 小 object 作为负向对照，用来确认过小 object 不适合 FFTS pipeline。
+4. 最后再做自动阈值策略，让 CE、整 row FFTS、split FFTS 可以按 object size 和 fragment 分布选择。
+
 ## 解决思路：IO 聚合
 
 我们的核心办法是把“小 IO 批量 scatter”改写成“先聚合成一次较大的 H2D，再在 device 内部拆分”。
