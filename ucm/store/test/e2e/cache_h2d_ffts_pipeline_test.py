@@ -41,6 +41,10 @@ class LoadPerfResult:
     block_num: int
     fragment_count: int
     shard_bytes: int
+    object_target_bytes: int
+    objects_per_shard: int
+    max_object_bytes: int
+    max_object_fragments: int
     bytes_per_load: int
     avg_seconds: float
     median_seconds: float
@@ -63,14 +67,26 @@ MODEL_CASES = {
     "qwen32b_tp8_full": ModelCase(
         "qwen32b_tp8_full", [32 * KIB] * QWEN32B_FRAGMENT_COUNT
     ),
+    "qwen32b_tp8_2m": ModelCase("qwen32b_tp8_2m", [32 * KIB] * 64),
+    "qwen32b_tp8_1m": ModelCase("qwen32b_tp8_1m", [32 * KIB] * 32),
     "qwen32b_tp4": ModelCase("qwen32b_tp4", [64 * KIB] * QWEN32B_FRAGMENT_COUNT),
     "qwen32b_tp4_full": ModelCase(
         "qwen32b_tp4_full", [64 * KIB] * QWEN32B_FRAGMENT_COUNT
     ),
+    "qwen32b_tp4_2m": ModelCase("qwen32b_tp4_2m", [64 * KIB] * 32),
+    "qwen32b_tp4_1m": ModelCase("qwen32b_tp4_1m", [64 * KIB] * 16),
 }
 MODEL_CASE_GROUPS = {
     "baseline": ["qwen32b_tp8_full", "qwen32b_tp4_full"],
     "qwen32b_baseline": ["qwen32b_tp8_full", "qwen32b_tp4_full"],
+    "qwen32b_object_sweep": [
+        "qwen32b_tp8_1m",
+        "qwen32b_tp8_2m",
+        "qwen32b_tp8_full",
+        "qwen32b_tp4_1m",
+        "qwen32b_tp4_2m",
+        "qwen32b_tp4_full",
+    ],
 }
 
 
@@ -121,6 +137,8 @@ def parse_model_cases() -> list[ModelCase]:
 
 
 def format_bytes(value: int) -> str:
+    if value == 0:
+        return "0B"
     if value % GIB == 0:
         return f"{value // GIB}GiB"
     if value % MIB == 0:
@@ -135,6 +153,39 @@ def tensor_size_histogram(tensor_sizes: list[int]) -> str:
     for size in tensor_sizes:
         counts[size] = counts.get(size, 0) + 1
     return ", ".join(f"{count}x{format_bytes(size)}" for size, count in sorted(counts.items()))
+
+
+def build_object_plan(tensor_sizes: list[int], target_bytes: int) -> list[list[int]]:
+    if not tensor_sizes:
+        return []
+    if target_bytes <= 0:
+        return [tensor_sizes]
+
+    plan: list[list[int]] = []
+    current: list[int] = []
+    current_bytes = 0
+    for size in tensor_sizes:
+        exceeds_target = current_bytes >= target_bytes or size > target_bytes - current_bytes
+        if current and exceeds_target:
+            plan.append(current)
+            current = []
+            current_bytes = 0
+        current.append(size)
+        current_bytes += size
+    if current:
+        plan.append(current)
+    return plan
+
+
+def object_plan_stats(tensor_sizes: list[int], target_bytes: int) -> tuple[int, int, int]:
+    plan = build_object_plan(tensor_sizes, target_bytes)
+    if not plan:
+        return 0, 0, 0
+    return (
+        len(plan),
+        max(sum(item) for item in plan),
+        max(len(item) for item in plan),
+    )
 
 
 def cache_buffer_capacity_gb_for_case(tensor_sizes: list[int]) -> int:
@@ -232,6 +283,7 @@ def build_config(
     transport: str,
     tensor_sizes: list[int],
     cache_buffer_capacity_gb: int,
+    object_target_bytes: int,
 ) -> dict:
     shard_size = sum(tensor_sizes)
     return {
@@ -252,6 +304,7 @@ def build_config(
         "cache_h2d_transport": transport,
         "cache_h2d_ffts_pipeline_depth": env_int("UCM_FFTS_PIPELINE_DEPTH", 2),
         "cache_h2d_ffts_max_ready_lanes": env_int("UCM_FFTS_MAX_READY_LANES", 8),
+        "cache_h2d_ffts_object_target_bytes": object_target_bytes,
     }
 
 
@@ -307,10 +360,17 @@ def run_transport(
     warmup: int,
     repeat: int,
     cache_buffer_capacity_gb: int,
+    object_target_bytes: int,
 ) -> LoadPerfResult:
     device = torch_device(device_type, device_id)
     unique_id = f"h2d-ffts-{case_name}-{transport}-{secrets.token_hex(8)}"
-    config = build_config(unique_id, transport, tensor_sizes, cache_buffer_capacity_gb)
+    config = build_config(
+        unique_id,
+        transport,
+        tensor_sizes,
+        cache_buffer_capacity_gb,
+        object_target_bytes,
+    )
     worker = UcmPipelineStore(config | {"device_id": device_id})
     share_buffer_enable = bool(config["share_buffer_enable"])
     lookup_store = UcmPipelineStore(config) if share_buffer_enable else worker
@@ -355,12 +415,23 @@ def run_transport(
 
     bytes_per_load = block_num * sum(tensor_sizes)
     avg_seconds = sum(samples) / len(samples)
+    objects_per_shard, max_object_bytes, max_object_fragments = object_plan_stats(
+        tensor_sizes, object_target_bytes
+    )
+    if transport != "ffts_pipeline":
+        objects_per_shard = 0
+        max_object_bytes = 0
+        max_object_fragments = 0
     return LoadPerfResult(
         case_name=case_name,
         transport=transport,
         block_num=block_num,
         fragment_count=len(tensor_sizes),
         shard_bytes=sum(tensor_sizes),
+        object_target_bytes=object_target_bytes,
+        objects_per_shard=objects_per_shard,
+        max_object_bytes=max_object_bytes,
+        max_object_fragments=max_object_fragments,
         bytes_per_load=bytes_per_load,
         avg_seconds=avg_seconds,
         median_seconds=statistics.median(samples),
@@ -373,7 +444,12 @@ def print_result(result: LoadPerfResult) -> None:
     print(
         f"{result.case_name}/{result.transport}: "
         f"blocks={result.block_num}, fragments={result.fragment_count}, "
-        f"shard={format_bytes(result.shard_bytes)}, bytes={result.bytes_per_load}, "
+        f"shard={format_bytes(result.shard_bytes)}, "
+        f"object_target={format_bytes(result.object_target_bytes)}, "
+        f"objects_per_shard={result.objects_per_shard}, "
+        f"max_object={format_bytes(result.max_object_bytes)}, "
+        f"max_object_fragments={result.max_object_fragments}, "
+        f"bytes={result.bytes_per_load}, "
         f"avg={result.avg_seconds * 1e3:.3f}ms, "
         f"median={result.median_seconds * 1e3:.3f}ms, "
         f"min={result.min_seconds * 1e3:.3f}ms, "
@@ -389,12 +465,20 @@ def print_case_config(
     device_type: str,
     device_id: int,
     cache_buffer_capacity_gb: int,
+    object_target_bytes: int,
 ) -> None:
     shard_bytes = sum(case.tensor_sizes)
+    objects_per_shard, max_object_bytes, max_object_fragments = object_plan_stats(
+        case.tensor_sizes, object_target_bytes
+    )
     print(
         "case_config: "
         f"case={case.name}, device={device_type}:{device_id}, blocks={block_num}, "
         f"fragments={len(case.tensor_sizes)}, shard={format_bytes(shard_bytes)}, "
+        f"object_target={format_bytes(object_target_bytes)}, "
+        f"objects_per_shard={objects_per_shard}, "
+        f"max_object={format_bytes(max_object_bytes)}, "
+        f"max_object_fragments={max_object_fragments}, "
         f"tensor_sizes=[{tensor_size_histogram(case.tensor_sizes)}], "
         f"cache_buffer_capacity_gb={cache_buffer_capacity_gb}, "
         f"warmup={warmup}, repeat={repeat}"
@@ -407,17 +491,29 @@ def print_summary_table(results: list[LoadPerfResult]) -> None:
     ce_by_case = {r.case_name: r for r in results if r.transport == "ce"}
     print(
         "summary: "
-        "case,transport,blocks,fragments,shard,bytes,avg_ms,median_ms,min_ms,gbps,ffts_vs_ce"
+        "case,transport,blocks,fragments,shard,object_target,objects_per_shard,"
+        "max_object,max_object_fragments,bytes,avg_ms,median_ms,min_ms,gbps,ffts_vs_ce"
     )
     for result in results:
         ratio = ""
         if result.transport == "ffts_pipeline" and result.case_name in ce_by_case:
             ratio = f"{result.avg_seconds / ce_by_case[result.case_name].avg_seconds:.3f}x"
+        objects_per_shard = (
+            str(result.objects_per_shard) if result.transport == "ffts_pipeline" else ""
+        )
+        max_object = (
+            format_bytes(result.max_object_bytes) if result.transport == "ffts_pipeline" else ""
+        )
+        max_object_fragments = (
+            str(result.max_object_fragments) if result.transport == "ffts_pipeline" else ""
+        )
         print(
             "summary: "
             f"{result.case_name},{result.transport},{result.block_num},"
             f"{result.fragment_count},{format_bytes(result.shard_bytes)},"
-            f"{result.bytes_per_load},{result.avg_seconds * 1e3:.3f},"
+            f"{format_bytes(result.object_target_bytes)},{objects_per_shard},"
+            f"{max_object},{max_object_fragments},{result.bytes_per_load},"
+            f"{result.avg_seconds * 1e3:.3f},"
             f"{result.median_seconds * 1e3:.3f},{result.min_seconds * 1e3:.3f},"
             f"{result.gbps:.3f},{ratio}"
         )
@@ -438,6 +534,7 @@ def main():
     max_slowdown = env_float("UCM_FFTS_MAX_SLOWDOWN", 5.0)
     min_gbps = env_float("UCM_FFTS_MIN_GBPS", 0.0)
     compare_ce = os.getenv("UCM_FFTS_COMPARE_CE", "1") == "1"
+    object_target_bytes = env_int("UCM_FFTS_OBJECT_TARGET_BYTES", 0)
 
     all_results: list[LoadPerfResult] = []
     for case in cases:
@@ -450,6 +547,7 @@ def main():
             device_type,
             device_id,
             cache_buffer_capacity_gb,
+            object_target_bytes,
         )
         ce_result = None
         if compare_ce:
@@ -463,6 +561,7 @@ def main():
                 warmup,
                 repeat,
                 cache_buffer_capacity_gb,
+                object_target_bytes,
             )
             print_result(ce_result)
             all_results.append(ce_result)
@@ -477,6 +576,7 @@ def main():
             warmup,
             repeat,
             cache_buffer_capacity_gb,
+            object_target_bytes,
         )
         print_result(ffts_result)
         all_results.append(ffts_result)

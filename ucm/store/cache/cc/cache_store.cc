@@ -152,6 +152,7 @@ private:
         config.Get("cache_h2d_transport", param.h2dTransport);
         config.GetNumber("cache_h2d_ffts_pipeline_depth", param.h2dFftsPipelineDepth);
         config.GetNumber("cache_h2d_ffts_max_ready_lanes", param.h2dFftsMaxReadyLanes);
+        config.GetNumber("cache_h2d_ffts_object_target_bytes", param.h2dFftsObjectTargetBytes);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -243,6 +244,8 @@ private:
         UC_INFO("Set {}::H2DTransport to {}.", ns, config.h2dTransport);
         UC_INFO("Set {}::H2DFftsPipelineDepth to {}.", ns, config.h2dFftsPipelineDepth);
         UC_INFO("Set {}::H2DFftsMaxReadyLanes to {}.", ns, config.h2dFftsMaxReadyLanes);
+        UC_INFO("Set {}::H2DFftsObjectTargetBytes to {}.", ns,
+                config.h2dFftsObjectTargetBytes);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

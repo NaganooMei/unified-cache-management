@@ -76,7 +76,7 @@ qwen32b_tp4_full: 16 * 8MiB = 128MiB per load
 脚本会输出每个 case 的配置、CE 结果、FFTS pipeline 结果，以及最终 summary 表：
 
 ```text
-summary: case,transport,blocks,fragments,shard,bytes,avg_ms,median_ms,min_ms,gbps,ffts_vs_ce
+summary: case,transport,blocks,fragments,shard,object_target,objects_per_shard,max_object,max_object_fragments,bytes,avg_ms,median_ms,min_ms,gbps,ffts_vs_ce
 ```
 
 ## 只跑单个 Case
@@ -126,8 +126,13 @@ python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
 | `baseline` | `qwen32b_baseline` 的别名。 |
 | `qwen32b_tp8_full` | 128 个 32KiB fragment，4MiB shard。 |
 | `qwen32b_tp8` | `qwen32b_tp8_full` 的别名。 |
+| `qwen32b_tp8_2m` | 64 个 32KiB fragment，2MiB shard，用于模拟 TP8 2M object。 |
+| `qwen32b_tp8_1m` | 32 个 32KiB fragment，1MiB shard，用于模拟 TP8 1M object。 |
 | `qwen32b_tp4_full` | 128 个 64KiB fragment，8MiB shard。 |
 | `qwen32b_tp4` | `qwen32b_tp4_full` 的别名。 |
+| `qwen32b_tp4_2m` | 32 个 64KiB fragment，2MiB shard，用于模拟 TP4 2M object。 |
+| `qwen32b_tp4_1m` | 16 个 64KiB fragment，1MiB shard，用于模拟 TP4 1M object。 |
+| `qwen32b_object_sweep` | 依次跑 TP8 1M/2M/full 和 TP4 1M/2M/full。 |
 
 如果不设置 case，脚本走自定义 tensor shape：
 
@@ -204,6 +209,7 @@ python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
 | --- | --- | --- |
 | `UCM_FFTS_PIPELINE_DEPTH` | `2` | device staging slot 数。 |
 | `UCM_FFTS_MAX_READY_LANES` | `8` | FFTS launch ready context 数上限。 |
+| `UCM_FFTS_OBJECT_TARGET_BYTES` | `0` | FFTS pipeline 单 shard 内部固定聚合目标大小。`0` 表示保持整 shard object；非 0 时按 fragment 边界拆成多个 object。 |
 
 示例：
 
@@ -211,6 +217,15 @@ python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
 UCM_FFTS_MODEL_CASE=qwen32b_baseline \
 UCM_FFTS_PIPELINE_DEPTH=2 \
 UCM_FFTS_MAX_READY_LANES=8 \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
+```
+
+示例：真实 full shard 内部按 2MiB object 拆分：
+```bash
+UCM_FFTS_MODEL_CASE=qwen32b_baseline \
+UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py

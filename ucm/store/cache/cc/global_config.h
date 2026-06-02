@@ -54,6 +54,7 @@ struct Config {
     std::string h2dTransport{"ce"};
     size_t h2dFftsPipelineDepth{2};
     size_t h2dFftsMaxReadyLanes{8};
+    size_t h2dFftsObjectTargetBytes{0};
 };
 
 }  // namespace UC::CacheStore
