@@ -17,6 +17,7 @@ namespace UC::Trans {
 
 struct AscendH2DFftsPipelineConfig {
     int32_t deviceId{-1};
+    size_t streamNumber{1};
     size_t pipelineDepth{2};
     uint16_t maxReadyLanes{8};
     size_t objectBytes{0};
@@ -27,6 +28,15 @@ class AscendH2DFftsPipeline {
     struct InFlightObject {
         std::vector<AscendFftsCopySpec> specs;
         FftsD2DDispatcher dispatcher;
+    };
+    struct Lane {
+        size_t nextSlotIndex{0};
+        aclrtStream h2dStream{nullptr};
+        aclrtStream fftsStream{nullptr};
+        std::vector<void*> stagingBuffers{};
+        std::vector<aclrtEvent> slotReady{};
+        std::vector<aclrtEvent> slotFree{};
+        std::vector<std::unique_ptr<InFlightObject>> inFlight{};
     };
 
 public:
@@ -46,17 +56,13 @@ private:
 
     bool setup_{false};
     int32_t deviceId_{-1};
+    size_t streamNumber_{0};
     size_t pipelineDepth_{0};
     uint16_t maxReadyLanes_{0};
     size_t objectBytes_{0};
     size_t maxFragments_{0};
     size_t nextObjectIndex_{0};
-    aclrtStream h2dStream_{nullptr};
-    aclrtStream fftsStream_{nullptr};
-    std::vector<void*> stagingBuffers_{};
-    std::vector<aclrtEvent> slotReady_{};
-    std::vector<aclrtEvent> slotFree_{};
-    std::vector<std::unique_ptr<InFlightObject>> inFlight_{};
+    std::vector<Lane> lanes_{};
 };
 
 }  // namespace UC::Trans

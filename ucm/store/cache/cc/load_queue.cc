@@ -107,13 +107,15 @@ public:
         }
         Trans::AscendH2DFftsPipelineConfig pipelineConfig;
         pipelineConfig.deviceId = config.deviceId;
+        pipelineConfig.streamNumber = config.streamNumber;
         pipelineConfig.pipelineDepth = config.h2dFftsPipelineDepth;
         pipelineConfig.maxReadyLanes = static_cast<uint16_t>(config.h2dFftsMaxReadyLanes);
         pipelineConfig.objectBytes = objectBytes;
         pipelineConfig.maxFragments = maxFragments;
-        UC_INFO("Set H2D FFTS object plan target={}, objects={}, maxObjectBytes={}, "
+        UC_INFO("Set H2D FFTS object plan target={}, streams={}, objects={}, maxObjectBytes={}, "
                 "maxFragments={}.",
-                config.h2dFftsObjectTargetBytes, objectPlan_.size(), objectBytes, maxFragments);
+                config.h2dFftsObjectTargetBytes, config.streamNumber, objectPlan_.size(),
+                objectBytes, maxFragments);
         auto s = pipeline_.Setup(pipelineConfig);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to setup H2D FFTS pipeline.", s);

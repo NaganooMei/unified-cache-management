@@ -24,12 +24,14 @@ Status AscendH2DFftsPipeline::Setup(const AscendH2DFftsPipelineConfig& config)
 {
     Cleanup();
     if (config.deviceId < 0) { return Status::InvalidParam("invalid device id"); }
+    if (config.streamNumber == 0) { return Status::InvalidParam("invalid stream number"); }
     if (config.pipelineDepth == 0) { return Status::InvalidParam("invalid pipeline depth"); }
     if (config.maxReadyLanes == 0) { return Status::InvalidParam("invalid max ready lanes"); }
     if (config.objectBytes == 0) { return Status::InvalidParam("invalid object bytes"); }
     if (config.maxFragments == 0) { return Status::InvalidParam("invalid max fragments"); }
 
     deviceId_ = config.deviceId;
+    streamNumber_ = config.streamNumber;
     pipelineDepth_ = config.pipelineDepth;
     maxReadyLanes_ = config.maxReadyLanes;
     objectBytes_ = config.objectBytes;
@@ -38,43 +40,47 @@ Status AscendH2DFftsPipeline::Setup(const AscendH2DFftsPipelineConfig& config)
 
     auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
     if (s.Failure()) { return s; }
-    s = AclStatus(aclrtCreateStream(&h2dStream_), "aclrtCreateStream(h2d)");
-    if (s.Failure()) {
-        Cleanup();
-        return s;
-    }
-    s = AclStatus(aclrtCreateStream(&fftsStream_), "aclrtCreateStream(ffts)");
-    if (s.Failure()) {
-        Cleanup();
-        return s;
-    }
+    lanes_.resize(streamNumber_);
+    for (auto& lane : lanes_) {
+        s = AclStatus(aclrtCreateStream(&lane.h2dStream), "aclrtCreateStream(h2d)");
+        if (s.Failure()) {
+            Cleanup();
+            return s;
+        }
+        s = AclStatus(aclrtCreateStream(&lane.fftsStream), "aclrtCreateStream(ffts)");
+        if (s.Failure()) {
+            Cleanup();
+            return s;
+        }
 
-    stagingBuffers_.assign(pipelineDepth_, nullptr);
-    slotReady_.assign(pipelineDepth_, nullptr);
-    slotFree_.assign(pipelineDepth_, nullptr);
-    for (size_t slot = 0; slot < pipelineDepth_; ++slot) {
-        s = AclStatus(aclrtMalloc(&stagingBuffers_[slot], objectBytes_,
-                                  ACL_MEM_TYPE_HIGH_BAND_WIDTH),
-                      "aclrtMalloc(staging)");
-        if (s.Failure()) {
-            Cleanup();
-            return s;
-        }
-        s = AclStatus(aclrtCreateEvent(&slotReady_[slot]), "aclrtCreateEvent(slotReady)");
-        if (s.Failure()) {
-            Cleanup();
-            return s;
-        }
-        s = AclStatus(aclrtCreateEvent(&slotFree_[slot]), "aclrtCreateEvent(slotFree)");
-        if (s.Failure()) {
-            Cleanup();
-            return s;
-        }
-        s = AclStatus(aclrtRecordEvent(slotFree_[slot], h2dStream_),
-                      "aclrtRecordEvent(slotFree)");
-        if (s.Failure()) {
-            Cleanup();
-            return s;
+        lane.nextSlotIndex = 0;
+        lane.stagingBuffers.assign(pipelineDepth_, nullptr);
+        lane.slotReady.assign(pipelineDepth_, nullptr);
+        lane.slotFree.assign(pipelineDepth_, nullptr);
+        for (size_t slot = 0; slot < pipelineDepth_; ++slot) {
+            s = AclStatus(aclrtMalloc(&lane.stagingBuffers[slot], objectBytes_,
+                                      ACL_MEM_TYPE_HIGH_BAND_WIDTH),
+                          "aclrtMalloc(staging)");
+            if (s.Failure()) {
+                Cleanup();
+                return s;
+            }
+            s = AclStatus(aclrtCreateEvent(&lane.slotReady[slot]), "aclrtCreateEvent(slotReady)");
+            if (s.Failure()) {
+                Cleanup();
+                return s;
+            }
+            s = AclStatus(aclrtCreateEvent(&lane.slotFree[slot]), "aclrtCreateEvent(slotFree)");
+            if (s.Failure()) {
+                Cleanup();
+                return s;
+            }
+            s = AclStatus(aclrtRecordEvent(lane.slotFree[slot], lane.h2dStream),
+                          "aclrtRecordEvent(slotFree)");
+            if (s.Failure()) {
+                Cleanup();
+                return s;
+            }
         }
     }
 
@@ -120,8 +126,9 @@ Status AscendH2DFftsPipeline::SubmitObject(void* host, void** devices,
     if (!setup_) { return Status::Error("H2D FFTS pipeline is not setup"); }
     if (host == nullptr) { return Status::InvalidParam("invalid H2D FFTS host pointer"); }
 
-    const auto slot = nextObjectIndex_ % pipelineDepth_;
-    auto* staging = stagingBuffers_[slot];
+    auto& lane = lanes_[nextObjectIndex_ % streamNumber_];
+    const auto slot = lane.nextSlotIndex % pipelineDepth_;
+    auto* staging = lane.stagingBuffers[slot];
     auto object = std::make_unique<InFlightObject>();
     auto s = BuildCopySpecs(*object, staging, devices, sizes);
     if (s.Failure()) { return s; }
@@ -134,31 +141,32 @@ Status AscendH2DFftsPipeline::SubmitObject(void* host, void** devices,
 
     s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
     if (s.Failure()) { return s; }
-    s = AclStatus(aclrtStreamWaitEvent(h2dStream_, slotFree_[slot]),
+    s = AclStatus(aclrtStreamWaitEvent(lane.h2dStream, lane.slotFree[slot]),
                   "aclrtStreamWaitEvent(slotFree)");
     if (s.Failure()) { return s; }
     s = AclStatus(aclrtMemcpyAsync(staging, objectBytes_, host, objectBytes,
-                                   ACL_MEMCPY_HOST_TO_DEVICE, h2dStream_),
+                                   ACL_MEMCPY_HOST_TO_DEVICE, lane.h2dStream),
                   "aclrtMemcpyAsync(H2D staging)");
     if (s.Failure()) { return s; }
-    s = AclStatus(aclrtRecordEvent(slotReady_[slot], h2dStream_),
+    s = AclStatus(aclrtRecordEvent(lane.slotReady[slot], lane.h2dStream),
                   "aclrtRecordEvent(slotReady)");
     if (s.Failure()) { return s; }
-    s = AclStatus(aclrtStreamWaitEvent(fftsStream_, slotReady_[slot]),
+    s = AclStatus(aclrtStreamWaitEvent(lane.fftsStream, lane.slotReady[slot]),
                   "aclrtStreamWaitEvent(slotReady)");
     if (s.Failure()) { return s; }
 
-    s = object->dispatcher.Launch(fftsStream_, readyCount);
+    s = object->dispatcher.Launch(lane.fftsStream, readyCount);
     if (s.Failure()) {
-        auto release = AclStatus(aclrtRecordEvent(slotFree_[slot], fftsStream_),
+        auto release = AclStatus(aclrtRecordEvent(lane.slotFree[slot], lane.fftsStream),
                                  "aclrtRecordEvent(slotFree after failed launch)");
         return release.Failure() ? release : s;
     }
-    s = AclStatus(aclrtRecordEvent(slotFree_[slot], fftsStream_),
+    s = AclStatus(aclrtRecordEvent(lane.slotFree[slot], lane.fftsStream),
                   "aclrtRecordEvent(slotFree)");
     if (s.Failure()) { return s; }
 
-    inFlight_.push_back(std::move(object));
+    lane.inFlight.push_back(std::move(object));
+    ++lane.nextSlotIndex;
     ++nextObjectIndex_;
     return Status::OK();
 }
@@ -168,46 +176,47 @@ Status AscendH2DFftsPipeline::Synchronize()
     if (!setup_) { return Status::OK(); }
     auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
     if (s.Failure()) { return s; }
-    for (auto event : slotFree_) {
-        s = AclStatus(aclrtStreamWaitEvent(h2dStream_, event), "aclrtStreamWaitEvent(slotFree)");
+    for (auto& lane : lanes_) {
+        for (auto event : lane.slotFree) {
+            s = AclStatus(aclrtStreamWaitEvent(lane.h2dStream, event),
+                          "aclrtStreamWaitEvent(slotFree)");
+            if (s.Failure()) { return s; }
+        }
+        s = AclStatus(aclrtSynchronizeStream(lane.h2dStream), "aclrtSynchronizeStream(h2d)");
         if (s.Failure()) { return s; }
+        s = AclStatus(aclrtSynchronizeStream(lane.fftsStream), "aclrtSynchronizeStream(ffts)");
+        if (s.Failure()) { return s; }
+        lane.inFlight.clear();
     }
-    s = AclStatus(aclrtSynchronizeStream(h2dStream_), "aclrtSynchronizeStream(h2d)");
-    if (s.Failure()) { return s; }
-    s = AclStatus(aclrtSynchronizeStream(fftsStream_), "aclrtSynchronizeStream(ffts)");
-    if (s.Failure()) { return s; }
-    inFlight_.clear();
     return Status::OK();
 }
 
 void AscendH2DFftsPipeline::Cleanup() noexcept
 {
     if (deviceId_ >= 0) { (void)aclrtSetDevice(deviceId_); }
-    for (auto event : slotReady_) {
-        if (event != nullptr) { (void)aclrtDestroyEvent(event); }
+    for (auto& lane : lanes_) {
+        for (auto event : lane.slotReady) {
+            if (event != nullptr) { (void)aclrtDestroyEvent(event); }
+        }
+        for (auto event : lane.slotFree) {
+            if (event != nullptr) { (void)aclrtDestroyEvent(event); }
+        }
+        for (auto* buffer : lane.stagingBuffers) {
+            if (buffer != nullptr) { (void)aclrtFree(buffer); }
+        }
+        if (lane.h2dStream != nullptr) { (void)aclrtDestroyStream(lane.h2dStream); }
+        if (lane.fftsStream != nullptr) { (void)aclrtDestroyStream(lane.fftsStream); }
     }
-    for (auto event : slotFree_) {
-        if (event != nullptr) { (void)aclrtDestroyEvent(event); }
-    }
-    for (auto* buffer : stagingBuffers_) {
-        if (buffer != nullptr) { (void)aclrtFree(buffer); }
-    }
-    if (h2dStream_ != nullptr) { (void)aclrtDestroyStream(h2dStream_); }
-    if (fftsStream_ != nullptr) { (void)aclrtDestroyStream(fftsStream_); }
 
     setup_ = false;
     deviceId_ = -1;
+    streamNumber_ = 0;
     pipelineDepth_ = 0;
     maxReadyLanes_ = 0;
     objectBytes_ = 0;
     maxFragments_ = 0;
     nextObjectIndex_ = 0;
-    h2dStream_ = nullptr;
-    fftsStream_ = nullptr;
-    stagingBuffers_.clear();
-    slotReady_.clear();
-    slotFree_.clear();
-    inFlight_.clear();
+    lanes_.clear();
 }
 
 }  // namespace UC::Trans
