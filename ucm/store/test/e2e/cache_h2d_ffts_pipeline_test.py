@@ -75,6 +75,18 @@ MODEL_CASES = {
     ),
     "qwen32b_tp4_2m": ModelCase("qwen32b_tp4_2m", [64 * KIB] * 32),
     "qwen32b_tp4_1m": ModelCase("qwen32b_tp4_1m", [64 * KIB] * 16),
+    "qwen32b_tp2": ModelCase("qwen32b_tp2", [128 * KIB] * QWEN32B_FRAGMENT_COUNT),
+    "qwen32b_tp2_full": ModelCase(
+        "qwen32b_tp2_full", [128 * KIB] * QWEN32B_FRAGMENT_COUNT
+    ),
+    "qwen32b_tp2_2m": ModelCase("qwen32b_tp2_2m", [128 * KIB] * 16),
+    "qwen32b_tp2_1m": ModelCase("qwen32b_tp2_1m", [128 * KIB] * 8),
+    "qwen32b_tp1": ModelCase("qwen32b_tp1", [256 * KIB] * QWEN32B_FRAGMENT_COUNT),
+    "qwen32b_tp1_full": ModelCase(
+        "qwen32b_tp1_full", [256 * KIB] * QWEN32B_FRAGMENT_COUNT
+    ),
+    "qwen32b_tp1_2m": ModelCase("qwen32b_tp1_2m", [256 * KIB] * 8),
+    "qwen32b_tp1_1m": ModelCase("qwen32b_tp1_1m", [256 * KIB] * 4),
 }
 
 

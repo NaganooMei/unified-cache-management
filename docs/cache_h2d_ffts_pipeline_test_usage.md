@@ -5,8 +5,8 @@
 这份文档只说明三件事：
 
 - 怎么编译带 FFTS pipeline 的 UCM。
-- 怎么分别运行 CE baseline 和 FFTS pipeline。
-- 两个脚本有哪些常用参数。
+- 怎么分别运行 GQA CE baseline、GQA FFTS pipeline 和 DSV4 FAWA case。
+- 这些脚本有哪些常用参数。
 
 测试脚本：
 
@@ -14,7 +14,9 @@
 
 `@ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py`
 
-两个脚本每次都只跑一个 case，不会同时跑 TP8 和 TP4，也不会在一个脚本里同时比较 CE 和 FFTS。
+`@ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py`
+
+GQA 的 CE/FFTS 两个脚本每次都只跑一个 case，不会同时跑多个 TP case，也不会在一个脚本里同时比较 CE 和 FFTS。DSV4 FAWA 脚本会在同一轮请求中创建 FA store 和 WA store，用来模拟 DSV4 的双 store load 形态。
 
 ## 编译
 
@@ -27,8 +29,6 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 推荐用 editable install 编译并安装当前仓库：
 
 ```bash
-cd unified-cache-management
-
 PLATFORM=ascend \
 ENABLE_SPARSE=false \
 UCM_ENABLE_ASCEND_FFTS_PIPELINE=1 \
@@ -45,73 +45,146 @@ pip install -v -e . --no-build-isolation
 
 ## 运行 CE Baseline
 
-TP8 full：
+GQA TP4 full 当前实测命令：
 
 ```bash
-cd unified-cache-management
-
-UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
-UCM_FFTS_TORCH_DEVICE=npu \
-UCM_FFTS_DEVICE_ID=0 \
-UCM_FFTS_BLOCK_NUM=100 \
-python ucm/store/test/e2e/cache_h2d_ce_baseline_test.py
-```
-
-TP4 full：
-
-```bash
-cd unified-cache-management
-
 UCM_FFTS_MODEL_CASE=qwen32b_tp4_full \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_BLOCK_NUM=100 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=100 \
 python ucm/store/test/e2e/cache_h2d_ce_baseline_test.py
 ```
 
 ## 运行 FFTS Pipeline
 
-TP8 full，不拆 shard：
+GQA TP4 full，按 2MiB object 拆：
 
 ```bash
-cd unified-cache-management
-
-UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
-UCM_FFTS_OBJECT_TARGET_BYTES=0 \
-UCM_FFTS_TORCH_DEVICE=npu \
-UCM_FFTS_DEVICE_ID=0 \
-UCM_FFTS_BLOCK_NUM=100 \
-python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
-```
-TP8 full，按 2MiB object 拆：
-
-```bash
-cd unified-cache-management
-
-UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
-UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
-UCM_FFTS_TORCH_DEVICE=npu \
-UCM_FFTS_DEVICE_ID=0 \
-UCM_FFTS_BLOCK_NUM=100 \
-python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
-```
-
-TP4 full，按 2MiB object 拆：
-
-```bash
-cd unified-cache-management
-
 UCM_FFTS_MODEL_CASE=qwen32b_tp4_full \
 UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_BLOCK_NUM=100 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=100 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
 python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
+```
+
+GQA TP4 full，不拆 shard：
+
+```bash
+UCM_FFTS_MODEL_CASE=qwen32b_tp4_full \
+UCM_FFTS_OBJECT_TARGET_BYTES=0 \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+UCM_FFTS_BLOCK_NUM=100 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=100 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
+```
+
+GQA TP8 full，按 2MiB object 拆：
+
+```bash
+UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
+UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+UCM_FFTS_BLOCK_NUM=300 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=100 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
+```
+
+GQA TP8 full，不拆 shard：
+
+```bash
+UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
+UCM_FFTS_OBJECT_TARGET_BYTES=0 \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+UCM_FFTS_BLOCK_NUM=300 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=100 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
+```
+
+按当前内置 case 定义，`qwen32b_tp8_full` 是 32KiB fragment，`qwen32b_tp4_full` 是 64KiB fragment。实测命令按 case 名称记录，具体 fragment size 以 case 表为准。
+
+## 运行 DSV4 FAWA
+
+DSV4 FAWA 脚本会创建两个 CacheStore：FA store 和 WA store。这里 `UCM_FFTS_BLOCK_NUM` 表示 external hit blocks，也就是 FA rows 数；WA store 固定 load 1 个 boundary row。
+
+DSV4 CE：
+
+```bash
+UCM_FFTS_BLOCK_NUM=100 \
+UCM_FFTS_H2D_TRANSPORT=ce \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=100 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+python ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py
+```
+
+DSV4 FFTS pipeline，按 2MiB object 拆：
+
+```bash
+UCM_FFTS_BLOCK_NUM=100 \
+UCM_FFTS_H2D_TRANSPORT=ffts_pipeline \
+UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=100 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+python ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py
+```
+
+DSV4 FFTS pipeline，不拆 shard：
+
+```bash
+UCM_FFTS_BLOCK_NUM=100 \
+UCM_FFTS_H2D_TRANSPORT=ffts_pipeline \
+UCM_FFTS_OBJECT_TARGET_BYTES=0 \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=100 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+python ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py
+```
+
+如果只想采 runtime 和 copy task profiling，可以临时关校验并只测 1 次：
+
+```bash
+UCM_FFTS_VALIDATE=0 \
+UCM_FFTS_BLOCK_NUM=100 \
+UCM_FFTS_H2D_TRANSPORT=ffts_pipeline \
+UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
+UCM_FFTS_TORCH_DEVICE=npu \
+UCM_FFTS_DEVICE_ID=0 \
+UCM_FFTS_WARMUP=1 \
+UCM_FFTS_REPEAT=1 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+msprof --output=./prof_out/ucm_dsv4_ffts_runtime_copy_only \
+  --ascendcl=on \
+  --runtime-api=on \
+  --task-time=on \
+  python ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py
 ```
 
 ## 输出含义
 
-两个脚本都会输出一行 `case_config`、一行结果，以及最终 `summary`。
+GQA CE/FFTS 脚本都会输出一行 `case_config`、一行结果，以及最终 `summary`。
 
 summary 字段：
 
@@ -140,11 +213,13 @@ case,transport,blocks,fragments,shard,object_target,objects_per_shard,max_object
 
 这里的耗时范围是 `load_data + wait`，不是裸 `aclrtMemcpyAsync` 耗时。
 
+DSV4 FAWA 脚本还会额外输出 `dsv4_fa_config`、`dsv4_wa_config` 和 `dsv4_expected_io`。其中 `dsv4_expected_io` 用来对照 profiler 里的 CE fragment copy 数或 FFTS object 数。
+
 ## Case 参数
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `UCM_FFTS_MODEL_CASE` | unset | 选择一个 case。只接受单个 case，不支持逗号分隔和 group。 |
+| `UCM_FFTS_MODEL_CASE` | unset | 选择一个 GQA case。只接受单个 case，不支持逗号分隔和 group。DSV4 FAWA 脚本不使用这个参数。 |
 
 当前内置 case：
 
@@ -158,6 +233,14 @@ case,transport,blocks,fragments,shard,object_target,objects_per_shard,max_object
 | `qwen32b_tp4` | `qwen32b_tp4_full` 的别名。 |
 | `qwen32b_tp4_2m` | 32 个 64KiB fragment，2MiB shard，用于模拟 TP4 2MiB object。 |
 | `qwen32b_tp4_1m` | 16 个 64KiB fragment，1MiB shard，用于模拟 TP4 1MiB object。 |
+| `qwen32b_tp2_full` | 128 个 128KiB fragment，16MiB shard。 |
+| `qwen32b_tp2` | `qwen32b_tp2_full` 的别名。 |
+| `qwen32b_tp2_2m` | 16 个 128KiB fragment，2MiB shard，用于模拟 TP2 2MiB object。 |
+| `qwen32b_tp2_1m` | 8 个 128KiB fragment，1MiB shard，用于模拟 TP2 1MiB object。 |
+| `qwen32b_tp1_full` | 128 个 256KiB fragment，32MiB shard。 |
+| `qwen32b_tp1` | `qwen32b_tp1_full` 的别名。 |
+| `qwen32b_tp1_2m` | 8 个 256KiB fragment，2MiB shard，用于模拟 TP1 2MiB object。 |
+| `qwen32b_tp1_1m` | 4 个 256KiB fragment，1MiB shard，用于模拟 TP1 1MiB object。 |
 
 如果不设置 `UCM_FFTS_MODEL_CASE`，脚本会走自定义 tensor shape：
 
@@ -194,15 +277,14 @@ UCM_FFTS_TENSOR_SIZES
 | `UCM_FFTS_FRAGMENT_BYTES` | `32768` | 每个 fragment 的字节数。 |
 | `UCM_FFTS_TENSOR_SIZES` | unset | 显式指定每个 fragment 字节数，用逗号分隔；设置后覆盖前两个参数。 |
 
-### FFTS Pipeline
-
-只对 FFTS pipeline 脚本有意义。
+### FFTS Pipeline 与 DSV4 Transport
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `UCM_FFTS_PIPELINE_DEPTH` | `2` | device staging slot 数。 |
 | `UCM_FFTS_MAX_READY_LANES` | `8` | FFTS launch ready context 数上限。 |
 | `UCM_FFTS_OBJECT_TARGET_BYTES` | `0` | 单 shard 内部固定聚合目标大小。`0` 表示保持整 shard object；非 0 时按 fragment 边界拆成多个 object。 |
+| `UCM_FFTS_H2D_TRANSPORT` | `ffts_pipeline` | 只对 DSV4 FAWA 脚本有意义。取值为 `ce` 或 `ffts_pipeline`。 |
 
 ### CacheStore
 
@@ -215,37 +297,4 @@ UCM_FFTS_TENSOR_SIZES
 | `UCM_FFTS_RUNNING_QUEUE_DEPTH` | `4096` | CacheStore running queue 深度。 |
 | `UCM_FFTS_TIMEOUT_MS` | `30000` | CacheStore task timeout。 |
 | `UCM_FFTS_SHARE_BUFFER_ENABLE` | `true` | 是否使用 shared buffer。 |
-
-## 推荐实验顺序
-
-先跑 CE：
-
-```bash
-UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
-UCM_FFTS_TORCH_DEVICE=npu \
-UCM_FFTS_DEVICE_ID=0 \
-UCM_FFTS_BLOCK_NUM=100 \
-python ucm/store/test/e2e/cache_h2d_ce_baseline_test.py
-```
-
-再跑 FFTS 不拆：
-
-```bash
-UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
-UCM_FFTS_OBJECT_TARGET_BYTES=0 \
-UCM_FFTS_TORCH_DEVICE=npu \
-UCM_FFTS_DEVICE_ID=0 \
-UCM_FFTS_BLOCK_NUM=100 \
-python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
-```
-
-最后跑 FFTS 2MiB 拆分：
-
-```bash
-UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
-UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
-UCM_FFTS_TORCH_DEVICE=npu \
-UCM_FFTS_DEVICE_ID=0 \
-UCM_FFTS_BLOCK_NUM=100 \
-python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
-```
+| `UCM_FFTS_VALIDATE` | `true` | 只对 DSV4 FAWA 脚本有意义。profiling 时可设为 `0`，减少校验带来的额外 load。 |

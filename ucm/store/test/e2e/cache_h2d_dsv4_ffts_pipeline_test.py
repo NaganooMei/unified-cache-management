@@ -99,9 +99,13 @@ class Dsv4PerfResult:
     gbps: float
 
 
+def repeat_pattern(pattern: list[int], count: int) -> list[int]:
+    return [size for _ in range(count) for size in pattern]
+
+
 DSV4_FA = Dsv4StoreShape(
     "fa",
-    [128 * KIB] * 21 + [16 * KIB] * 21 + [4 * KIB] * 20 + [256] * 21,
+    [128 * KIB] * 21 + repeat_pattern([16 * KIB, 256], 21) + [4 * KIB] * 20,
     3_186_688,
 )
 DSV4_WA = Dsv4StoreShape(
