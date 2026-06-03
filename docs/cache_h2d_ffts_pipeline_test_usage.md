@@ -16,7 +16,7 @@
 
 `@ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py`
 
-GQA 的 CE/FFTS 两个脚本每次都只跑一个 case，不会同时跑多个 TP case，也不会在一个脚本里同时比较 CE 和 FFTS。DSV4 FAWA 脚本会在同一轮请求中创建 FA store 和 WA store，用来模拟 DSV4 的双 store load 形态。
+GQA 的 CE/FFTS 两个脚本每次都只跑一个 case，不会同时跑多个 TP case，也不会在一个脚本里同时比较 CE 和 FFTS。DSV4 FAWA 脚本会在同一轮请求中创建 FA store 和 WA store，用来模拟 DSV4 的双 store load 形态。当前这些性能脚本默认关闭数据正确性校验；如果要做功能校验，可以显式设置 `UCM_FFTS_VALIDATE=1`。
 
 ## 编译
 
@@ -120,7 +120,7 @@ python ucm/store/test/e2e/cache_h2d_ffts_pipeline_test.py
 
 ## 运行 DSV4 FAWA
 
-DSV4 FAWA 脚本会创建两个 CacheStore：FA store 和 WA store。这里 `UCM_FFTS_BLOCK_NUM` 表示 external hit blocks，也就是 FA rows 数；WA store 固定 load 1 个 boundary row。
+DSV4 FAWA 脚本会创建两个 CacheStore：FA store 和 WA store。这里 `UCM_FFTS_BLOCK_NUM` 表示 external hit blocks，也就是 FA rows 数；WA store 固定 load 1 个 boundary row。V4 测试需要打开 shared buffer，以贴近真实 FAWA 双 store 路径。
 
 DSV4 CE：
 
@@ -131,7 +131,7 @@ UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_WARMUP=1 \
 UCM_FFTS_REPEAT=100 \
-UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=1 \
 python ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py
 ```
 
@@ -145,7 +145,7 @@ UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_WARMUP=1 \
 UCM_FFTS_REPEAT=100 \
-UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=1 \
 python ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py
 ```
 
@@ -159,11 +159,11 @@ UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_WARMUP=1 \
 UCM_FFTS_REPEAT=100 \
-UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=1 \
 python ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py
 ```
 
-如果只想采 runtime 和 copy task profiling，可以临时关校验并只测 1 次：
+如果只想采 runtime 和 copy task profiling，可以保持校验关闭并只测 1 次：
 
 ```bash
 UCM_FFTS_VALIDATE=0 \
@@ -174,7 +174,7 @@ UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_WARMUP=1 \
 UCM_FFTS_REPEAT=1 \
-UCM_FFTS_SHARE_BUFFER_ENABLE=0 \
+UCM_FFTS_SHARE_BUFFER_ENABLE=1 \
 msprof --output=./prof_out/ucm_dsv4_ffts_runtime_copy_only \
   --ascendcl=on \
   --runtime-api=on \
@@ -297,4 +297,4 @@ UCM_FFTS_TENSOR_SIZES
 | `UCM_FFTS_RUNNING_QUEUE_DEPTH` | `4096` | CacheStore running queue 深度。 |
 | `UCM_FFTS_TIMEOUT_MS` | `30000` | CacheStore task timeout。 |
 | `UCM_FFTS_SHARE_BUFFER_ENABLE` | `true` | 是否使用 shared buffer。 |
-| `UCM_FFTS_VALIDATE` | `true` | 只对 DSV4 FAWA 脚本有意义。profiling 时可设为 `0`，减少校验带来的额外 load。 |
+| `UCM_FFTS_VALIDATE` | `false` | 是否执行额外的 load + allclose 数据正确性校验。性能测试默认关闭；功能校验时可设为 `1`。 |

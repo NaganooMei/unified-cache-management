@@ -354,6 +354,7 @@ def run_transport(
     repeat: int,
     cache_buffer_capacity_gb: int,
     object_target_bytes: int,
+    validate: bool = False,
 ) -> LoadPerfResult:
     device = torch_device(device_type, device_id)
     unique_id = f"h2d-ffts-{case_name}-{transport}-{secrets.token_hex(8)}"
@@ -378,16 +379,17 @@ def run_transport(
     dst_ptrs = tensor_ptrs(dst_tensors)
     prepare_cache(worker, lookup_store, block_ids, shard_indexes, src_ptrs)
 
-    validate_load(
-        worker,
-        block_ids,
-        shard_indexes,
-        src_tensors,
-        dst_tensors,
-        dst_ptrs,
-        device_type,
-        device_id,
-    )
+    if validate:
+        validate_load(
+            worker,
+            block_ids,
+            shard_indexes,
+            src_tensors,
+            dst_tensors,
+            dst_ptrs,
+            device_type,
+            device_id,
+        )
 
     for _ in range(warmup):
         time_load(worker, block_ids, shard_indexes, dst_ptrs)
@@ -395,16 +397,17 @@ def run_transport(
     samples = [
         time_load(worker, block_ids, shard_indexes, dst_ptrs) for _ in range(repeat)
     ]
-    validate_load(
-        worker,
-        block_ids,
-        shard_indexes,
-        src_tensors,
-        dst_tensors,
-        dst_ptrs,
-        device_type,
-        device_id,
-    )
+    if validate:
+        validate_load(
+            worker,
+            block_ids,
+            shard_indexes,
+            src_tensors,
+            dst_tensors,
+            dst_ptrs,
+            device_type,
+            device_id,
+        )
 
     bytes_per_load = block_num * sum(tensor_sizes)
     avg_seconds = sum(samples) / len(samples)
@@ -465,6 +468,7 @@ def print_case_config(
     cache_buffer_capacity_gb: int,
     object_target_bytes: int,
     transport: str = "ffts_pipeline",
+    validate: bool = False,
 ) -> None:
     shard_bytes = sum(case.tensor_sizes)
     object_info = ""
@@ -485,7 +489,7 @@ def print_case_config(
         f"{object_info}"
         f"tensor_sizes=[{tensor_size_histogram(case.tensor_sizes)}], "
         f"cache_buffer_capacity_gb={cache_buffer_capacity_gb}, "
-        f"warmup={warmup}, repeat={repeat}"
+        f"warmup={warmup}, repeat={repeat}, validate={validate}"
     )
 
 
@@ -533,6 +537,7 @@ def main():
     prepare_torch_backend(device_type)
     min_gbps = env_float("UCM_FFTS_MIN_GBPS", 0.0)
     object_target_bytes = env_int("UCM_FFTS_OBJECT_TARGET_BYTES", 0)
+    validate = env_bool("UCM_FFTS_VALIDATE", False)
 
     cache_buffer_capacity_gb = cache_buffer_capacity_gb_for_case(case.tensor_sizes)
     print_case_config(
@@ -544,6 +549,7 @@ def main():
         device_id,
         cache_buffer_capacity_gb,
         object_target_bytes,
+        validate=validate,
     )
     result = run_transport(
         case.name,
@@ -556,6 +562,7 @@ def main():
         repeat,
         cache_buffer_capacity_gb,
         object_target_bytes,
+        validate=validate,
     )
     print_result(result)
 

@@ -26,6 +26,7 @@ import os
 
 from cache_h2d_ffts_pipeline_test import (
     cache_buffer_capacity_gb_for_case,
+    env_bool,
     env_float,
     env_int,
     parse_model_case,
@@ -51,6 +52,7 @@ def main():
     prepare_torch_backend(device_type)
     min_gbps = env_float("UCM_FFTS_MIN_GBPS", 0.0)
     object_target_bytes = 0
+    validate = env_bool("UCM_FFTS_VALIDATE", False)
 
     cache_buffer_capacity_gb = cache_buffer_capacity_gb_for_case(case.tensor_sizes)
     print_case_config(
@@ -63,6 +65,7 @@ def main():
         cache_buffer_capacity_gb,
         object_target_bytes,
         transport="ce",
+        validate=validate,
     )
     result = run_transport(
         case.name,
@@ -75,6 +78,7 @@ def main():
         repeat,
         cache_buffer_capacity_gb,
         object_target_bytes,
+        validate=validate,
     )
     print_result(result)
 

@@ -373,7 +373,7 @@ def main():
 
     device_type = os.getenv("UCM_FFTS_TORCH_DEVICE", "cuda")
     device_id = env_int("UCM_FFTS_DEVICE_ID", 0)
-    validate = env_bool("UCM_FFTS_VALIDATE", True)
+    validate = env_bool("UCM_FFTS_VALIDATE", False)
     min_gbps = env_float("UCM_FFTS_MIN_GBPS", 0.0)
     prepare_torch_backend(device_type)
     device = torch_device(device_type, device_id)
