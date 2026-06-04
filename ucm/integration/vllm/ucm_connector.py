@@ -538,6 +538,17 @@ class UCMDirectConnector(KVConnectorBase_V1):
         if self.device is None:
             raise RuntimeError(f"Unsupported device platform for UCMDirectConnector.")
 
+    def _load_trace_rank(self) -> str:
+        try:
+            rank_id = get_world_group().rank
+        except Exception:
+            rank_id = "unknown"
+        role = getattr(self._role, "name", str(self._role))
+        return (
+            f"rank_id={rank_id} local_rank={self.local_rank} "
+            f"tp_rank={self.tp_rank} role={role}"
+        )
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -747,6 +758,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
         trace_limit = max(0, _env_int("UCM_LOAD_TRACE_REQUEST_LIMIT", 32))
         trace_step = getattr(self, "_load_trace_step", 0) + 1
         self._load_trace_step = trace_step
+        trace_rank = self._load_trace_rank()
         candidate_requests = sum(
             1
             for request in metadata.request_meta.values()
@@ -758,7 +770,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
         )
         if trace_enabled and (candidate_blocks > 0 or trace_empty):
             logger.info(
-                f"[UCM_LOAD_PY] step={trace_step} begin mode=direct "
+                f"[UCM_LOAD_PY] step={trace_step} {trace_rank} begin mode=direct "
                 f"candidate_requests={candidate_requests} "
                 f"candidate_blocks={candidate_blocks} "
                 f"candidate_bytes={candidate_blocks * self.block_data_size} "
@@ -813,7 +825,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 request_to_trace[request_id] = trace_record
                 if trace_enabled and trace_record["log_detail"]:
                     logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} submit "
+                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} submit "
                         f"request_id={request_id} task={task} "
                         f"blocks={trace_record['blocks']} "
                         f"bytes={trace_record['bytes']} "
@@ -833,7 +845,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 num_loaded_block -= len(ucm_block_ids)
                 if trace_enabled and submit_failures <= trace_limit:
                     logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} submit_error "
+                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} submit_error "
                         f"request_id={request_id} blocks={len(ucm_block_ids)} "
                         f"error={type(e).__name__}"
                     )
@@ -851,7 +863,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     )
                     if trace_enabled and trace_record["log_detail"]:
                         logger.info(
-                            f"[UCM_LOAD_PY] step={trace_step} wait "
+                            f"[UCM_LOAD_PY] step={trace_step} {trace_rank} wait "
                             f"request_id={request_id} task={task} "
                             f"blocks={trace_record['blocks']} "
                             f"bytes={trace_record['bytes']} "
@@ -870,7 +882,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 num_loaded_block -= request_to_load_blocks.get(request_id, 0)
                 if trace_enabled and wait_failures <= trace_limit:
                     logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} wait_error "
+                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} wait_error "
                         f"request_id={request_id} task={task} "
                         f"blocks={request_to_load_blocks.get(request_id, 0)} "
                         f"error={type(e).__name__}"
@@ -888,7 +900,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
         if trace_enabled and (is_load or trace_empty):
             loaded_bytes = num_loaded_block * self.block_data_size
             logger.info(
-                f"[UCM_LOAD_PY] step={trace_step} end mode=direct "
+                f"[UCM_LOAD_PY] step={trace_step} {trace_rank} end mode=direct "
                 f"requests={num_loaded_request} blocks={num_loaded_block} "
                 f"bytes={loaded_bytes} submitted_tasks={len(request_to_task)} "
                 f"submit_failures={submit_failures} "

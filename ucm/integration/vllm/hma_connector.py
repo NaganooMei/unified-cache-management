@@ -1033,6 +1033,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         trace_limit = max(0, _env_int("UCM_LOAD_TRACE_REQUEST_LIMIT", 32))
         trace_step = getattr(self, "_load_trace_step", 0) + 1
         self._load_trace_step = trace_step
+        trace_rank = self._load_trace_rank()
         load_start_time = _now_ms()
         candidate_requests = sum(
             1 for request in metadata.request_meta.values() if request.load_keys
@@ -1043,7 +1044,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         candidate_wa_keys = candidate_requests
         if trace_enabled and (candidate_fa_keys > 0 or trace_empty):
             logger.info(
-                f"[UCM_LOAD_PY] step={trace_step} begin mode=fawa "
+                f"[UCM_LOAD_PY] step={trace_step} {trace_rank} begin mode=fawa "
                 f"candidate_requests={candidate_requests} "
                 f"candidate_fa_keys={candidate_fa_keys} "
                 f"candidate_wa_keys={candidate_wa_keys} "
@@ -1085,7 +1086,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 tasks.append(fa_task)
                 if trace_enabled and len(tasks) <= trace_limit:
                     logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} submit mode=fawa "
+                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} submit mode=fawa "
                         f"request_id={request_id} label=FA task={fa_task.task} "
                         f"keys={fa_task.key_count} bytes={fa_task.byte_count} "
                         f"ptr_shape={fa_task.ptr_shape} "
@@ -1114,7 +1115,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 tasks.append(wa_task)
                 if trace_enabled and len(tasks) <= trace_limit:
                     logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} submit mode=fawa "
+                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} submit mode=fawa "
                         f"request_id={request_id} label=WA task={wa_task.task} "
                         f"keys={wa_task.key_count} bytes={wa_task.byte_count} "
                         f"ptr_shape={wa_task.ptr_shape} "
@@ -1130,7 +1131,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 self._invalid_block_ids.update(group0_vllm_block_ids)
                 if trace_enabled and submit_failures <= trace_limit:
                     logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} submit_error "
+                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} submit_error "
                         f"mode=fawa request_id={request_id} "
                         f"keys={len(request.load_keys)} error={type(e).__name__}"
                     )
@@ -1151,7 +1152,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 wait_failures += 1
             if trace_enabled and task_index < trace_limit:
                 logger.info(
-                    f"[UCM_LOAD_PY] step={trace_step} wait mode=fawa "
+                    f"[UCM_LOAD_PY] step={trace_step} {trace_rank} wait mode=fawa "
                     f"request_id={load_task.request_id} label={load_task.label} "
                     f"task={load_task.task} keys={load_task.key_count} "
                     f"bytes={load_task.byte_count} "
@@ -1169,7 +1170,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             fa_keys = sum(task.key_count for task in tasks if task.label == "FA")
             wa_keys = sum(task.key_count for task in tasks if task.label == "WA")
             logger.info(
-                f"[UCM_LOAD_PY] step={trace_step} end mode=fawa "
+                f"[UCM_LOAD_PY] step={trace_step} {trace_rank} end mode=fawa "
                 f"requests={candidate_requests} tasks={len(tasks)} "
                 f"fa_tasks={fa_tasks} wa_tasks={wa_tasks} "
                 f"fa_keys={fa_keys} wa_keys={wa_keys} "
