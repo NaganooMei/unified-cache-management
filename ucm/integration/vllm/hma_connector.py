@@ -15,7 +15,13 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from ucm.integration.vllm.device import create_device
-from ucm.integration.vllm.ucm_connector import UCMDirectConnector
+from ucm.integration.vllm.ucm_connector import (
+    UCMDirectConnector,
+    _env_flag,
+    _env_int,
+    _now_ms,
+    _trace_speed_gbps,
+)
 from ucm.logger import init_logger
 from ucm.sparse.utils import round_up
 from ucm.store.factory_v1 import UcmConnectorFactoryV1
@@ -253,6 +259,8 @@ class FAWALoadTask:
     store: UcmKVStoreBaseV1
     task: Task
     key_count: int
+    byte_count: Optional[int] = None
+    ptr_shape: tuple[int, ...] = field(default_factory=tuple)
     anchor_vllm_block_ids: set[int] = field(default_factory=set)
 
 
@@ -298,6 +306,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         self._init_group_metas()
         self.fa_store: Optional[UcmKVStoreBaseV1] = None
         self.wa_store: Optional[UcmKVStoreBaseV1] = None
+        self._fawa_store_block_bytes: dict[str, int] = {}
         self.requests_meta: dict[str, FAWARequestMeta] = {}
         self.tp_dump_tasks: dict[tuple, list[FAWADumpTask]] = {}
 
@@ -543,6 +552,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             padded_size = round_up(sum(tensor_size_list), aligned_size)
             config["shard_size"] = padded_size
             config["block_size"] = padded_size
+            self._fawa_store_block_bytes[label] = padded_size
             # MLA stores aggregate TP shards under one logical rank group.
             config["local_rank_size"] = self.tp_size if self.is_mla else 1
             if cpu_affinity_cores:
@@ -901,29 +911,34 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
 
         shard_indices = [0] * len(keys)
         task = store.load_data(keys, shard_indices, ptrs)
+        row_bytes = self._fawa_store_block_bytes.get(label)
         return FAWALoadTask(
             request_id=request_id,
             label=label,
             store=store,
             task=task,
             key_count=len(keys),
+            byte_count=None if row_bytes is None else row_bytes * len(keys),
+            ptr_shape=tuple(int(dim) for dim in ptrs.shape),
             anchor_vllm_block_ids=anchor_vllm_block_ids,
         )
 
     def _wait_load_task(
         self,
         load_task: FAWALoadTask,
-    ) -> None:
+    ) -> bool:
         """Wait a load task and mark its anchor blocks invalid on failure."""
 
         try:
             load_task.store.wait(load_task.task)
+            return True
         except Exception as e:
             logger.error(
                 f"request {load_task.request_id} wait FAWA load "
                 f"task label={load_task.label} error. {type(e).__name__}: {e}"
             )
             self._invalid_block_ids.update(load_task.anchor_vllm_block_ids)
+            return False
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         res = self._invalid_block_ids
@@ -1013,7 +1028,31 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         if not isinstance(metadata, UCMFAWAConnectorMetadata):
             raise RuntimeError(f"Unexpected FAWA metadata type: {type(metadata)}")
 
+        trace_enabled = _env_flag("UCM_LOAD_TRACE")
+        trace_empty = _env_flag("UCM_LOAD_TRACE_EMPTY")
+        trace_limit = max(0, _env_int("UCM_LOAD_TRACE_REQUEST_LIMIT", 32))
+        trace_step = getattr(self, "_load_trace_step", 0) + 1
+        self._load_trace_step = trace_step
+        load_start_time = _now_ms()
+        candidate_requests = sum(
+            1 for request in metadata.request_meta.values() if request.load_keys
+        )
+        candidate_fa_keys = sum(
+            len(request.load_keys) for request in metadata.request_meta.values()
+        )
+        candidate_wa_keys = candidate_requests
+        if trace_enabled and (candidate_fa_keys > 0 or trace_empty):
+            logger.info(
+                f"[UCM_LOAD_PY] step={trace_step} begin mode=fawa "
+                f"candidate_requests={candidate_requests} "
+                f"candidate_fa_keys={candidate_fa_keys} "
+                f"candidate_wa_keys={candidate_wa_keys} "
+                f"fa_row_bytes={self._fawa_store_block_bytes.get('FA')} "
+                f"wa_row_bytes={self._fawa_store_block_bytes.get('WA')}"
+            )
+
         tasks: list[FAWALoadTask] = []
+        submit_failures = 0
         for request_id, request in metadata.request_meta.items():
             if not request.load_keys:
                 continue
@@ -1025,48 +1064,131 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                     raise RuntimeError("WA store is not initialized.")
 
                 # FA groups are loaded for every external-hit canonical block.
+                fa_extract_start_time = _now_ms()
                 fa_ptrs = self._extract_fa_ptr(
                     request.load_keys,
                     request.load_hash_start,
                     request.load_hash_end,
                     request.load_vllm_block_ids,
                 )
-                tasks.append(
-                    self._submit_load_task(
-                        request_id,
-                        "FA",
-                        self.fa_store,
-                        request.load_keys,
-                        fa_ptrs,
-                        group0_vllm_block_ids,
-                    )
+                fa_extract_end_time = _now_ms()
+                fa_submit_start_time = _now_ms()
+                fa_task = self._submit_load_task(
+                    request_id,
+                    "FA",
+                    self.fa_store,
+                    request.load_keys,
+                    fa_ptrs,
+                    group0_vllm_block_ids,
                 )
+                fa_submit_end_time = _now_ms()
+                tasks.append(fa_task)
+                if trace_enabled and len(tasks) <= trace_limit:
+                    logger.info(
+                        f"[UCM_LOAD_PY] step={trace_step} submit mode=fawa "
+                        f"request_id={request_id} label=FA task={fa_task.task} "
+                        f"keys={fa_task.key_count} bytes={fa_task.byte_count} "
+                        f"ptr_shape={fa_task.ptr_shape} "
+                        f"extract_ms={fa_extract_end_time - fa_extract_start_time:.3f} "
+                        f"submit_ms={fa_submit_end_time - fa_submit_start_time:.3f}"
+                    )
 
                 # WA groups only need the final matched boundary.
                 window_keys = request.load_keys[-1:]
+                wa_extract_start_time = _now_ms()
                 window_ptrs = self._extract_wa_ptr(
                     window_keys,
                     request.load_vllm_block_ids,
                 )
-                tasks.append(
-                    self._submit_load_task(
-                        request_id,
-                        "WA",
-                        self.wa_store,
-                        window_keys,
-                        window_ptrs,
-                        group0_vllm_block_ids,
-                    )
+                wa_extract_end_time = _now_ms()
+                wa_submit_start_time = _now_ms()
+                wa_task = self._submit_load_task(
+                    request_id,
+                    "WA",
+                    self.wa_store,
+                    window_keys,
+                    window_ptrs,
+                    group0_vllm_block_ids,
                 )
+                wa_submit_end_time = _now_ms()
+                tasks.append(wa_task)
+                if trace_enabled and len(tasks) <= trace_limit:
+                    logger.info(
+                        f"[UCM_LOAD_PY] step={trace_step} submit mode=fawa "
+                        f"request_id={request_id} label=WA task={wa_task.task} "
+                        f"keys={wa_task.key_count} bytes={wa_task.byte_count} "
+                        f"ptr_shape={wa_task.ptr_shape} "
+                        f"extract_ms={wa_extract_end_time - wa_extract_start_time:.3f} "
+                        f"submit_ms={wa_submit_end_time - wa_submit_start_time:.3f}"
+                    )
             except Exception as e:
+                submit_failures += 1
                 logger.error(
                     f"request {request_id} submit FAWA load task "
                     f"error. {type(e).__name__}: {e}"
                 )
                 self._invalid_block_ids.update(group0_vllm_block_ids)
+                if trace_enabled and submit_failures <= trace_limit:
+                    logger.info(
+                        f"[UCM_LOAD_PY] step={trace_step} submit_error "
+                        f"mode=fawa request_id={request_id} "
+                        f"keys={len(request.load_keys)} error={type(e).__name__}"
+                    )
 
-        for load_task in tasks:
-            self._wait_load_task(load_task)
+        wait_start_time = _now_ms()
+        wait_failures = 0
+        label_wait_ms = {"FA": 0.0, "WA": 0.0}
+        label_bytes = {"FA": 0, "WA": 0}
+        for task_index, load_task in enumerate(tasks):
+            task_wait_start_time = _now_ms()
+            ok = self._wait_load_task(load_task)
+            task_wait_end_time = _now_ms()
+            task_wait_ms = task_wait_end_time - task_wait_start_time
+            if load_task.label in label_wait_ms:
+                label_wait_ms[load_task.label] += task_wait_ms
+                label_bytes[load_task.label] += load_task.byte_count or 0
+            if not ok:
+                wait_failures += 1
+            if trace_enabled and task_index < trace_limit:
+                logger.info(
+                    f"[UCM_LOAD_PY] step={trace_step} wait mode=fawa "
+                    f"request_id={load_task.request_id} label={load_task.label} "
+                    f"task={load_task.task} keys={load_task.key_count} "
+                    f"bytes={load_task.byte_count} "
+                    f"wait_ms={task_wait_ms:.3f} "
+                    f"wait_speed_gbps="
+                    f"{_trace_speed_gbps(load_task.byte_count or 0, task_wait_ms):.3f} "
+                    f"ok={ok}"
+                )
+
+        wait_end_time = _now_ms()
+        total_bytes = sum(task.byte_count or 0 for task in tasks)
+        if trace_enabled and (tasks or trace_empty):
+            fa_tasks = sum(1 for task in tasks if task.label == "FA")
+            wa_tasks = sum(1 for task in tasks if task.label == "WA")
+            fa_keys = sum(task.key_count for task in tasks if task.label == "FA")
+            wa_keys = sum(task.key_count for task in tasks if task.label == "WA")
+            logger.info(
+                f"[UCM_LOAD_PY] step={trace_step} end mode=fawa "
+                f"requests={candidate_requests} tasks={len(tasks)} "
+                f"fa_tasks={fa_tasks} wa_tasks={wa_tasks} "
+                f"fa_keys={fa_keys} wa_keys={wa_keys} "
+                f"fa_bytes={label_bytes['FA']} wa_bytes={label_bytes['WA']} "
+                f"bytes={total_bytes} "
+                f"submit_failures={submit_failures} "
+                f"wait_failures={wait_failures} "
+                f"submit_phase_ms={wait_start_time - load_start_time:.3f} "
+                f"wait_phase_ms={wait_end_time - wait_start_time:.3f} "
+                f"fa_wait_ms={label_wait_ms['FA']:.3f} "
+                f"wa_wait_ms={label_wait_ms['WA']:.3f} "
+                f"fa_wait_speed_gbps="
+                f"{_trace_speed_gbps(label_bytes['FA'], label_wait_ms['FA']):.3f} "
+                f"wa_wait_speed_gbps="
+                f"{_trace_speed_gbps(label_bytes['WA'], label_wait_ms['WA']):.3f} "
+                f"wait_speed_gbps={_trace_speed_gbps(total_bytes, wait_end_time - wait_start_time):.3f} "
+                f"total_ms={wait_end_time - load_start_time:.3f} "
+                f"speed_gbps={_trace_speed_gbps(total_bytes, wait_end_time - load_start_time):.3f}"
+            )
 
     def wait_for_save(self) -> None:
         metadata = self._get_connector_metadata()
