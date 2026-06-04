@@ -31,7 +31,6 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ```bash
 PLATFORM=ascend \
 ENABLE_SPARSE=false \
-UCM_ENABLE_ASCEND_FFTS_PIPELINE=1 \
 ASCEND_ROOT=/usr/local/Ascend/ascend-toolkit/latest \
 pip install -v -e . --no-build-isolation
 ```
@@ -39,9 +38,9 @@ pip install -v -e . --no-build-isolation
 关键点：
 
 - `PLATFORM=ascend` 按 Ascend runtime 编译 UCM。
-- `UCM_ENABLE_ASCEND_FFTS_PIPELINE=1` 打开 CacheStore H2D FFTS pipeline 编译开关。
+- CacheStore H2D FFTS pipeline 编译开关默认开启；如果需要显式关闭，可以设置 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=0`。
 - `ASCEND_ROOT` 指向 Ascend toolkit 路径。
-- 如果没有打开 FFTS pipeline 编译开关，运行 FFTS pipeline 脚本会在 CacheStore setup 阶段失败。
+- 如果显式关闭 FFTS pipeline 编译开关，运行 FFTS pipeline 脚本会在 CacheStore setup 阶段失败。
 
 ## 运行 CE Baseline
 

@@ -37,8 +37,8 @@ CacheStore Load 的输入语义已经完整表达了 H2D 拷贝所需信息：
 第一版目标：
 
 - 只覆盖 CacheStore Load 的 host-to-device 阶段。
-- 保持默认 CE 路径不变。
-- 通过显式编译开关和运行时配置启用 FFTS pipeline。
+- 保持默认运行时 CE 路径不变。
+- 默认编译 FFTS pipeline 支持，通过运行时配置启用 FFTS pipeline。
 - 不修改 `TaskDesc`、`Shard`、Python `load_data` 和 pybind 入参语义。
 
 非目标：
@@ -82,10 +82,10 @@ FFTS pipeline:
 
 ## 编译开关与依赖
 
-顶层新增 CMake 开关，默认关闭：
+顶层 CMake 开关默认开启：
 
 ```text
-UCM_ENABLE_ASCEND_FFTS_PIPELINE=OFF
+UCM_ENABLE_ASCEND_FFTS_PIPELINE=ON
 ```
 
 对应实现：
@@ -93,20 +93,20 @@ UCM_ENABLE_ASCEND_FFTS_PIPELINE=OFF
 - `@CMakeLists.txt:16`
 - `@ucm/shared/trans/ascend/CMakeLists.txt:15`
 
-开启后，Ascend trans 组件会：
+开启时，Ascend trans 组件会：
 
 - 查找 `libruntime`。
 - 查找 `runtime/rt_ffts_plus.h` 或 `rt_external_ffts.h`。
 - 编译 `ascend_h2d_ffts_pipeline.cc` 和 `ffts_d2d_dispatcher.cc`。
 - 向依赖方公开 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=1`。
 
-如果开启编译开关但找不到 FFTS header 或 runtime library，CMake 直接失败：
+如果编译开关开启但找不到 FFTS header 或 runtime library，CMake 直接失败：
 
 ```text
 UCM_ENABLE_ASCEND_FFTS_PIPELINE requires FFTS headers and libruntime.
 ```
 
-默认关闭时不会编译 FFTS 相关源码，并公开 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=0`，确保 CE 路径不依赖 FFTS。
+如果显式关闭编译开关，则不会编译 FFTS 相关源码，并公开 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=0`，确保 CE 路径不依赖 FFTS。
 
 ## 运行时配置
 
@@ -402,7 +402,7 @@ size = sizes[i]
 
 功能验证：
 
-- 默认 CE 构建可以正常编译，不要求 FFTS 头文件。
+- 显式关闭 FFTS pipeline 的 CE 构建可以正常编译，不要求 FFTS 头文件。
 - `UCM_ENABLE_ASCEND_FFTS_PIPELINE=OFF` 且配置 `"ffts_pipeline"` 时，`CacheStore::Setup` 明确失败。
 - `UCM_ENABLE_ASCEND_FFTS_PIPELINE=ON` 时，缺少 FFTS header 或 `libruntime` 的构建明确失败。
 - 对比 CE 与 FFTS pipeline 的 load 后 HBM KV cache 内容。
