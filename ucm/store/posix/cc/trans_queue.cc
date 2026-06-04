@@ -23,7 +23,6 @@
  * */
 #include "trans_queue.h"
 #include "logger/logger.h"
-#include "metrics_api.h"
 #include "posix_file.h"
 
 namespace UC::PosixStore {
@@ -95,8 +94,6 @@ void TransQueue::LoadWorker(IoUnit& ios)
     if (ios.firstIo) {
         auto wait = NowTime::Now() - ios.waiter->startTp;
         UC_DEBUG("Posix load task({}) start running, wait {:.3f}ms.", ios.owner, wait * 1e3);
-        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("posix_load_queue_wait_duration_ms"),
-                                 wait * 1e3);
     }
     if (failureSet_->Contains(ios.owner)) {
         ios.waiter->Done();
@@ -112,8 +109,6 @@ void TransQueue::DumpWorker(IoUnit& ios)
     if (ios.firstIo) {
         auto wait = NowTime::Now() - ios.waiter->startTp;
         UC_DEBUG("Posix dump task({}) start running, wait {:.3f}ms.", ios.owner, wait * 1e3);
-        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("posix_dump_queue_wait_duration_ms"),
-                                 wait * 1e3);
     }
     if (failureSet_->Contains(ios.owner)) {
         ios.waiter->Done();
