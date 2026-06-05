@@ -169,9 +169,6 @@ def apply_all_patches() -> None:
             case "0.17.0" | "0.19.0":
                 logger.info(f"UCM patching vllm-ascend {ascend_version} for pc...")
                 import ucm.integration.vllm.patch.v0180.vllm_ascend.ucm_connector_patch
-            case _ if ascend_version and ascend_version.startswith("0.1.dev"):
-                logger.info(f"UCM patching custom vllm-ascend {ascend_version} for pc...")
-                import ucm.integration.vllm.patch.v0180.vllm_ascend.ucm_connector_patch
             case _:
                 pass
 

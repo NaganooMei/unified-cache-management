@@ -58,17 +58,6 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        logger.warning(f"Invalid {name}={value!r}, fallback to {default}.")
-        return default
-
-
 def _now_ms() -> float:
     return time.perf_counter() * 1000
 
@@ -748,34 +737,15 @@ class UCMDirectConnector(KVConnectorBase_V1):
         assert isinstance(metadata, UCMConnectorMetadata)
 
         request_to_task: dict[str, Task] = {}
-        request_to_trace: dict[str, dict[str, Any]] = {}
         is_load = False
         num_loaded_block = 0
         num_loaded_request = 0
         load_start_time = _now_ms()
         trace_enabled = _env_flag("UCM_LOAD_TRACE")
         trace_empty = _env_flag("UCM_LOAD_TRACE_EMPTY")
-        trace_limit = max(0, _env_int("UCM_LOAD_TRACE_REQUEST_LIMIT", 32))
         trace_step = getattr(self, "_load_trace_step", 0) + 1
         self._load_trace_step = trace_step
         trace_rank = self._load_trace_rank()
-        candidate_requests = sum(
-            1
-            for request in metadata.request_meta.values()
-            if len(request.load_block_ids[0]) > 0
-        )
-        candidate_blocks = sum(
-            len(request.load_block_ids[0])
-            for request in metadata.request_meta.values()
-        )
-        if trace_enabled and (candidate_blocks > 0 or trace_empty):
-            logger.info(
-                f"[UCM_LOAD_PY] step={trace_step} {trace_rank} begin mode=direct "
-                f"candidate_requests={candidate_requests} "
-                f"candidate_blocks={candidate_blocks} "
-                f"candidate_bytes={candidate_blocks * self.block_data_size} "
-                f"block_bytes={self.block_data_size}"
-            )
         request_to_load_blocks: dict[str, int] = {}
         submit_failures = 0
         wait_failures = 0
@@ -802,38 +772,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 for i, ucm_block_id in enumerate(ucm_block_ids):
                     ucm_block_ids[i] = self.request_hasher(ucm_block_id)
             try:
-                extract_start_time = _now_ms()
                 total_ptrs = self.kv_cache_layout.extract_block_addrs(vllm_block_ids)
                 total_ptrs = total_ptrs.reshape(total_ptrs.shape[0], -1)
-                extract_end_time = _now_ms()
                 shard_indexs = [0] * len(ucm_block_ids)
-                submit_start_time = _now_ms()
                 task = self.store.load_data(ucm_block_ids, shard_indexs, total_ptrs)
-                submit_end_time = _now_ms()
                 request_to_task[request_id] = task
                 request_to_load_blocks[request_id] = len(ucm_block_ids)
-                trace_record = {
-                    "blocks": len(ucm_block_ids),
-                    "bytes": len(ucm_block_ids) * self.block_data_size,
-                    "extract_ms": extract_end_time - extract_start_time,
-                    "submit_ms": submit_end_time - submit_start_time,
-                    "ptr_rows": int(total_ptrs.shape[0]),
-                    "ptr_cols": int(total_ptrs.shape[1]),
-                    "task": task,
-                    "log_detail": len(request_to_trace) < trace_limit,
-                }
-                request_to_trace[request_id] = trace_record
-                if trace_enabled and trace_record["log_detail"]:
-                    logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} submit "
-                        f"request_id={request_id} task={task} "
-                        f"blocks={trace_record['blocks']} "
-                        f"bytes={trace_record['bytes']} "
-                        f"ptr_shape=({trace_record['ptr_rows']},"
-                        f"{trace_record['ptr_cols']}) "
-                        f"extract_ms={trace_record['extract_ms']:.3f} "
-                        f"submit_ms={trace_record['submit_ms']:.3f}"
-                    )
             except Exception as e:
                 submit_failures += 1
                 logger.error(
@@ -843,34 +787,11 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     metadata.request_meta[request_id].load_block_ids[1]
                 )
                 num_loaded_block -= len(ucm_block_ids)
-                if trace_enabled and submit_failures <= trace_limit:
-                    logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} submit_error "
-                        f"request_id={request_id} blocks={len(ucm_block_ids)} "
-                        f"error={type(e).__name__}"
-                    )
 
         wait_start_time = _now_ms()
         for request_id, task in request_to_task.items():
             try:
-                request_wait_start_time = _now_ms()
                 self.store.wait(task)
-                request_wait_end_time = _now_ms()
-                trace_record = request_to_trace.get(request_id)
-                if trace_record is not None:
-                    trace_record["wait_ms"] = (
-                        request_wait_end_time - request_wait_start_time
-                    )
-                    if trace_enabled and trace_record["log_detail"]:
-                        logger.info(
-                            f"[UCM_LOAD_PY] step={trace_step} {trace_rank} wait "
-                            f"request_id={request_id} task={task} "
-                            f"blocks={trace_record['blocks']} "
-                            f"bytes={trace_record['bytes']} "
-                            f"wait_ms={trace_record['wait_ms']:.3f} "
-                            f"wait_speed_gbps="
-                            f"{_trace_speed_gbps(trace_record['bytes'], trace_record['wait_ms']):.3f}"
-                        )
             except Exception as e:
                 wait_failures += 1
                 logger.error(
@@ -880,13 +801,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     metadata.request_meta[request_id].load_block_ids[1]
                 )
                 num_loaded_block -= request_to_load_blocks.get(request_id, 0)
-                if trace_enabled and wait_failures <= trace_limit:
-                    logger.info(
-                        f"[UCM_LOAD_PY] step={trace_step} {trace_rank} wait_error "
-                        f"request_id={request_id} task={task} "
-                        f"blocks={request_to_load_blocks.get(request_id, 0)} "
-                        f"error={type(e).__name__}"
-                    )
 
         wait_end_time = _now_ms()
         load_end_time = wait_end_time
