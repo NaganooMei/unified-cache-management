@@ -52,7 +52,6 @@ if(UCM_ENABLE_ASCEND_FFTS_PIPELINE)
     list(REMOVE_DUPLICATES ASCEND_FFTS_INCLUDE_DIRS)
     target_sources(trans PRIVATE
         ascend_shard_io_aggregator.cc
-        ascend_h2d_ffts_pipeline.cc
         ffts_d2d_dispatcher.cc
     )
     target_include_directories(trans PUBLIC ${ASCEND_FFTS_INCLUDE_DIRS})

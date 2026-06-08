@@ -161,9 +161,9 @@ def main():
     config["waiting_queue_depth"] = env_int("UCM_FFTS_WAITING_QUEUE_DEPTH", 64)
     config["running_queue_depth"] = env_int("UCM_FFTS_RUNNING_QUEUE_DEPTH", 4096)
     config["cache_stream_number"] = env_int("UCM_FFTS_CACHE_STREAM_NUMBER", 4)
-    config["cache_h2d_transport"] = "ffts_pipeline"
-    config["cache_h2d_ffts_pipeline_depth"] = env_int("UCM_FFTS_PIPELINE_DEPTH", 2)
-    config["cache_h2d_ffts_max_ready_lanes"] = env_int("UCM_FFTS_MAX_READY_LANES", 8)
+    config["cache_io_aggregation"] = True
+    config["cache_io_aggregation_pipeline_depth"] = env_int("UCM_FFTS_PIPELINE_DEPTH", 2)
+    config["cache_io_aggregation_max_ready_lanes"] = env_int("UCM_FFTS_MAX_READY_LANES", 8)
 
     worker = UcmPipelineStore(config | {"device_id": device_id})
     scheduler = UcmPipelineStore(config)

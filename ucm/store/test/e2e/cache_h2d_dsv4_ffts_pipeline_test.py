@@ -41,7 +41,6 @@ from cache_h2d_ffts_pipeline_test import (
     format_bytes,
     make_empty_like,
     make_tensors,
-    object_plan_stats,
     poison_tensors,
     prepare_cache,
     prepare_torch_backend,
@@ -91,7 +90,6 @@ class Dsv4PerfResult:
     wa_max_object_bytes: int
     fa_max_object_fragments: int
     wa_max_object_fragments: int
-    object_target_bytes: int
     bytes_per_load: int
     avg_seconds: float
     median_seconds: float
@@ -134,14 +132,12 @@ def build_store_config(
     unique_id: str,
     shape: Dsv4StoreShape,
     transport: str,
-    object_target_bytes: int,
 ) -> dict:
     config = build_config(
         unique_id,
         transport,
         shape.tensor_sizes,
         store_cache_buffer_capacity_gb(shape),
-        object_target_bytes,
     )
     config["shard_size"] = shape.shard_bytes
     config["block_size"] = shape.shard_bytes
@@ -157,10 +153,9 @@ def make_store_context(
     device_type: str,
     device_id: int,
     transport: str,
-    object_target_bytes: int,
 ) -> Dsv4StoreContext:
     unique_id = f"h2d-dsv4-{case_name}-{shape.name}-{transport}-{secrets.token_hex(8)}"
-    config = build_store_config(unique_id, shape, transport, object_target_bytes)
+    config = build_store_config(unique_id, shape, transport)
     worker = UcmPipelineStore(config | {"device_id": device_id})
     lookup_store = UcmPipelineStore(config) if bool(config["share_buffer_enable"]) else worker
 
@@ -220,22 +215,20 @@ def print_store_config(
     shape: Dsv4StoreShape,
     rows: int,
     transport: str,
-    object_target_bytes: int,
 ) -> None:
     objects_per_shard = 0
     max_object_bytes = 0
     max_object_fragments = 0
     if transport == "ffts_pipeline":
-        objects_per_shard, max_object_bytes, max_object_fragments = object_plan_stats(
-            shape.tensor_sizes, object_target_bytes
-        )
+        objects_per_shard = 1
+        max_object_bytes = sum(shape.tensor_sizes)
+        max_object_fragments = len(shape.tensor_sizes)
     print(
         f"dsv4_{shape.name}_config: rows={rows}, "
         f"fragments={len(shape.tensor_sizes)}, "
         f"payload={format_bytes(sum(shape.tensor_sizes))}, "
         f"shard={format_bytes(shape.shard_bytes)}, "
         f"tensor_sizes=[{tensor_size_histogram(shape.tensor_sizes)}], "
-        f"object_target={format_bytes(object_target_bytes)}, "
         f"objects_per_shard={objects_per_shard}, "
         f"max_object={format_bytes(max_object_bytes)}, "
         f"max_object_fragments={max_object_fragments}, "
@@ -243,7 +236,7 @@ def print_store_config(
     )
 
 
-def print_expected_io(hit_blocks: int, transport: str, object_target_bytes: int) -> None:
+def print_expected_io(hit_blocks: int, transport: str) -> None:
     copy_128k = 21 * hit_blocks + 43
     copy_16k = 21 * hit_blocks + 42
     copy_4k = 20 * hit_blocks + 42
@@ -251,9 +244,7 @@ def print_expected_io(hit_blocks: int, transport: str, object_target_bytes: int)
     ce_fragment_copies = copy_128k + copy_16k + copy_4k + copy_256b
     ffts_objects = 0
     if transport == "ffts_pipeline":
-        fa_objects, _, _ = object_plan_stats(DSV4_FA.tensor_sizes, object_target_bytes)
-        wa_objects, _, _ = object_plan_stats(DSV4_WA.tensor_sizes, object_target_bytes)
-        ffts_objects = hit_blocks * fa_objects + wa_objects
+        ffts_objects = hit_blocks + 1
     bytes_per_load = hit_blocks * sum(DSV4_FA.tensor_sizes) + sum(DSV4_WA.tensor_sizes)
     print(
         "dsv4_expected_io: "
@@ -266,16 +257,16 @@ def print_expected_io(hit_blocks: int, transport: str, object_target_bytes: int)
 def make_result(
     transport: str,
     hit_blocks: int,
-    object_target_bytes: int,
     samples: list[float],
 ) -> Dsv4PerfResult:
-    fa_objects, fa_max_object, fa_max_frags = object_plan_stats(
-        DSV4_FA.tensor_sizes, object_target_bytes
-    )
-    wa_objects, wa_max_object, wa_max_frags = object_plan_stats(
-        DSV4_WA.tensor_sizes, object_target_bytes
-    )
-    if transport != "ffts_pipeline":
+    if transport == "ffts_pipeline":
+        fa_objects = 1
+        wa_objects = 1
+        fa_max_object = sum(DSV4_FA.tensor_sizes)
+        wa_max_object = sum(DSV4_WA.tensor_sizes)
+        fa_max_frags = len(DSV4_FA.tensor_sizes)
+        wa_max_frags = len(DSV4_WA.tensor_sizes)
+    else:
         fa_objects = wa_objects = 0
         fa_max_object = wa_max_object = 0
         fa_max_frags = wa_max_frags = 0
@@ -300,7 +291,6 @@ def make_result(
         wa_max_object_bytes=wa_max_object,
         fa_max_object_fragments=fa_max_frags,
         wa_max_object_fragments=wa_max_frags,
-        object_target_bytes=object_target_bytes,
         bytes_per_load=bytes_per_load,
         avg_seconds=avg_seconds,
         median_seconds=statistics.median(samples),
@@ -317,7 +307,6 @@ def print_result(result: Dsv4PerfResult) -> None:
         f"fa_fragments={result.fa_fragments}, wa_fragments={result.wa_fragments}, "
         f"fa_payload={format_bytes(result.fa_payload_bytes)}, "
         f"wa_payload={format_bytes(result.wa_payload_bytes)}, "
-        f"object_target={format_bytes(result.object_target_bytes)}, "
         f"fa_objects_per_shard={result.fa_objects_per_shard}, "
         f"wa_objects_per_shard={result.wa_objects_per_shard}, "
         f"fa_max_object={format_bytes(result.fa_max_object_bytes)}, "
@@ -336,7 +325,7 @@ def print_summary(result: Dsv4PerfResult) -> None:
     print(
         "summary: "
         "case,transport,hit_blocks,fa_rows,wa_rows,fa_fragments,wa_fragments,"
-        "fa_payload,wa_payload,fa_shard,wa_shard,object_target,"
+        "fa_payload,wa_payload,fa_shard,wa_shard,"
         "fa_objects_per_shard,wa_objects_per_shard,fa_max_object,wa_max_object,"
         "fa_max_object_fragments,wa_max_object_fragments,bytes,avg_ms,median_ms,min_ms,gbps"
     )
@@ -346,8 +335,8 @@ def print_summary(result: Dsv4PerfResult) -> None:
         f"{result.fa_rows},{result.wa_rows},{result.fa_fragments},{result.wa_fragments},"
         f"{format_bytes(result.fa_payload_bytes)},{format_bytes(result.wa_payload_bytes)},"
         f"{format_bytes(result.fa_shard_bytes)},{format_bytes(result.wa_shard_bytes)},"
-        f"{format_bytes(result.object_target_bytes)},{result.fa_objects_per_shard},"
-        f"{result.wa_objects_per_shard},{format_bytes(result.fa_max_object_bytes)},"
+        f"{result.fa_objects_per_shard},{result.wa_objects_per_shard},"
+        f"{format_bytes(result.fa_max_object_bytes)},"
         f"{format_bytes(result.wa_max_object_bytes)},{result.fa_max_object_fragments},"
         f"{result.wa_max_object_fragments},{result.bytes_per_load},"
         f"{result.avg_seconds * 1e3:.3f},{result.median_seconds * 1e3:.3f},"
@@ -367,10 +356,6 @@ def main():
     transport = os.getenv("UCM_FFTS_H2D_TRANSPORT", "ffts_pipeline").strip().lower()
     if transport not in ("ce", "ffts_pipeline"):
         raise ValueError("UCM_FFTS_H2D_TRANSPORT must be ce or ffts_pipeline")
-    object_target_bytes = env_int("UCM_FFTS_OBJECT_TARGET_BYTES", 0)
-    if transport == "ce":
-        object_target_bytes = 0
-
     device_type = os.getenv("UCM_FFTS_TORCH_DEVICE", "cuda")
     device_id = env_int("UCM_FFTS_DEVICE_ID", 0)
     validate = env_bool("UCM_FFTS_VALIDATE", False)
@@ -384,9 +369,9 @@ def main():
         f"hit_blocks={hit_blocks}, warmup={warmup}, repeat={repeat}, "
         f"validate={validate}, share_buffer_enable={env_bool('UCM_FFTS_SHARE_BUFFER_ENABLE', True)}"
     )
-    print_store_config(DSV4_FA, hit_blocks, transport, object_target_bytes)
-    print_store_config(DSV4_WA, 1, transport, object_target_bytes)
-    print_expected_io(hit_blocks, transport, object_target_bytes)
+    print_store_config(DSV4_FA, hit_blocks, transport)
+    print_store_config(DSV4_WA, 1, transport)
+    print_expected_io(hit_blocks, transport)
 
     fa_keys = [secrets.token_bytes(16) for _ in range(hit_blocks)]
     wa_keys = fa_keys[-1:]
@@ -399,7 +384,6 @@ def main():
         device_type,
         device_id,
         transport,
-        object_target_bytes,
     )
     wa = make_store_context(
         "dsv4_fawa",
@@ -410,7 +394,6 @@ def main():
         device_type,
         device_id,
         transport,
-        object_target_bytes,
     )
 
     if validate:
@@ -421,7 +404,7 @@ def main():
     if validate:
         validate_dsv4_load(fa, wa, device_type, device_id)
 
-    result = make_result(transport, hit_blocks, object_target_bytes, samples)
+    result = make_result(transport, hit_blocks, samples)
     print_result(result)
     if min_gbps > 0:
         assert result.gbps >= min_gbps, (

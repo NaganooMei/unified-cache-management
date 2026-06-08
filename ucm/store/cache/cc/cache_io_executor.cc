@@ -77,15 +77,16 @@ public:
         tensorSizes_ = config.tensorSizes;
         const auto objectBytes =
             std::accumulate(tensorSizes_.begin(), tensorSizes_.end(), static_cast<size_t>(0));
-        if (config.h2dFftsMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
+        if (config.ioAggregationMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
             return Status::InvalidParam("too many FFTS ready lanes({})",
-                                        config.h2dFftsMaxReadyLanes);
+                                        config.ioAggregationMaxReadyLanes);
         }
         Trans::AscendShardIOAggregatorConfig aggregatorConfig;
         aggregatorConfig.deviceId = config.deviceId;
         aggregatorConfig.streamNumber = config.streamNumber;
-        aggregatorConfig.pipelineDepth = config.h2dFftsPipelineDepth;
-        aggregatorConfig.maxReadyLanes = static_cast<uint16_t>(config.h2dFftsMaxReadyLanes);
+        aggregatorConfig.pipelineDepth = config.ioAggregationPipelineDepth;
+        aggregatorConfig.maxReadyLanes =
+            static_cast<uint16_t>(config.ioAggregationMaxReadyLanes);
         aggregatorConfig.objectBytes = objectBytes;
         aggregatorConfig.maxFragments = tensorSizes_.size();
         UC_INFO("Set Cache IO aggregation streams={}, objectBytes={}, tensors={}.",

@@ -51,7 +51,6 @@ def main():
     device_id = env_int("UCM_FFTS_DEVICE_ID", 0)
     prepare_torch_backend(device_type)
     min_gbps = env_float("UCM_FFTS_MIN_GBPS", 0.0)
-    object_target_bytes = 0
     validate = env_bool("UCM_FFTS_VALIDATE", False)
 
     cache_buffer_capacity_gb = cache_buffer_capacity_gb_for_case(case.tensor_sizes)
@@ -63,7 +62,6 @@ def main():
         device_type,
         device_id,
         cache_buffer_capacity_gb,
-        object_target_bytes,
         transport="ce",
         validate=validate,
     )
@@ -77,7 +75,6 @@ def main():
         warmup,
         repeat,
         cache_buffer_capacity_gb,
-        object_target_bytes,
         validate=validate,
     )
     print_result(result)

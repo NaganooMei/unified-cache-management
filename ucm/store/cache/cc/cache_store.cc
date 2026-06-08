@@ -160,9 +160,12 @@ private:
             param.h2dTransport == "ffts_pipeline") {
             param.cacheIOAggregation = true;
         }
-        config.GetNumber("cache_h2d_ffts_pipeline_depth", param.h2dFftsPipelineDepth);
-        config.GetNumber("cache_h2d_ffts_max_ready_lanes", param.h2dFftsMaxReadyLanes);
-        config.GetNumber("cache_h2d_ffts_object_target_bytes", param.h2dFftsObjectTargetBytes);
+        config.GetNumber("cache_h2d_ffts_pipeline_depth", param.ioAggregationPipelineDepth);
+        config.GetNumber("cache_h2d_ffts_max_ready_lanes", param.ioAggregationMaxReadyLanes);
+        config.GetNumber("cache_io_aggregation_pipeline_depth",
+                         param.ioAggregationPipelineDepth);
+        config.GetNumber("cache_io_aggregation_max_ready_lanes",
+                         param.ioAggregationMaxReadyLanes);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -206,7 +209,8 @@ private:
         }
 #endif
         if (config.cacheIOAggregation &&
-            (config.h2dFftsPipelineDepth == 0 || config.h2dFftsMaxReadyLanes == 0)) {
+            (config.ioAggregationPipelineDepth == 0 ||
+             config.ioAggregationMaxReadyLanes == 0)) {
             return Status::InvalidParam("invalid Cache IO aggregation config");
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
@@ -255,9 +259,9 @@ private:
         if (config.cacheIOAggregation) {
             UC_INFO("Set {}::AggregationObject to CacheStoreShard.", ns);
             UC_INFO("Set {}::CacheIOAggregationPipelineDepth to {}.", ns,
-                    config.h2dFftsPipelineDepth);
+                    config.ioAggregationPipelineDepth);
             UC_INFO("Set {}::CacheIOAggregationMaxReadyLanes to {}.", ns,
-                    config.h2dFftsMaxReadyLanes);
+                    config.ioAggregationMaxReadyLanes);
         }
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());

@@ -63,7 +63,6 @@ GQA TP4 full，按 2MiB object 拆：
 
 ```bash
 UCM_FFTS_MODEL_CASE=qwen32b_tp4_full \
-UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_BLOCK_NUM=100 \
@@ -77,7 +76,6 @@ GQA TP4 full，不拆 shard：
 
 ```bash
 UCM_FFTS_MODEL_CASE=qwen32b_tp4_full \
-UCM_FFTS_OBJECT_TARGET_BYTES=0 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_BLOCK_NUM=100 \
@@ -91,7 +89,6 @@ GQA TP8 full，按 2MiB object 拆：
 
 ```bash
 UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
-UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_BLOCK_NUM=300 \
@@ -105,7 +102,6 @@ GQA TP8 full，不拆 shard：
 
 ```bash
 UCM_FFTS_MODEL_CASE=qwen32b_tp8_full \
-UCM_FFTS_OBJECT_TARGET_BYTES=0 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_BLOCK_NUM=300 \
@@ -139,7 +135,6 @@ DSV4 FFTS pipeline，按 2MiB object 拆：
 ```bash
 UCM_FFTS_BLOCK_NUM=100 \
 UCM_FFTS_H2D_TRANSPORT=ffts_pipeline \
-UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_WARMUP=1 \
@@ -153,7 +148,6 @@ DSV4 FFTS pipeline，不拆 shard：
 ```bash
 UCM_FFTS_BLOCK_NUM=100 \
 UCM_FFTS_H2D_TRANSPORT=ffts_pipeline \
-UCM_FFTS_OBJECT_TARGET_BYTES=0 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_WARMUP=1 \
@@ -168,7 +162,6 @@ python ucm/store/test/e2e/cache_h2d_dsv4_ffts_pipeline_test.py
 UCM_FFTS_VALIDATE=0 \
 UCM_FFTS_BLOCK_NUM=100 \
 UCM_FFTS_H2D_TRANSPORT=ffts_pipeline \
-UCM_FFTS_OBJECT_TARGET_BYTES=2097152 \
 UCM_FFTS_TORCH_DEVICE=npu \
 UCM_FFTS_DEVICE_ID=0 \
 UCM_FFTS_WARMUP=1 \
@@ -188,7 +181,7 @@ GQA CE/FFTS 脚本都会输出一行 `case_config`、一行结果，以及最终
 summary 字段：
 
 ```text
-case,transport,blocks,fragments,shard,object_target,objects_per_shard,max_object,max_object_fragments,bytes,avg_ms,median_ms,min_ms,gbps
+case,transport,blocks,fragments,shard,objects_per_shard,max_object,max_object_fragments,bytes,avg_ms,median_ms,min_ms,gbps
 ```
 
 字段含义：
@@ -200,7 +193,6 @@ case,transport,blocks,fragments,shard,object_target,objects_per_shard,max_object
 | `blocks` | 一次 load task 里的 shard 数。 |
 | `fragments` | 一个 shard 内的 device fragment 数。 |
 | `shard` | 单个 CacheStore shard 大小。 |
-| `object_target` | FFTS pipeline 目标 object 大小；CE 脚本固定为 `0B`。 |
 | `objects_per_shard` | 一个 shard 被拆成几个 FFTS object；CE 为空。 |
 | `max_object` | 拆分后单个 object 的最大大小；CE 为空。 |
 | `max_object_fragments` | 拆分后单个 object 的最大 fragment 数；CE 为空。 |
@@ -282,7 +274,6 @@ UCM_FFTS_TENSOR_SIZES
 | --- | --- | --- |
 | `UCM_FFTS_PIPELINE_DEPTH` | `2` | device staging slot 数。 |
 | `UCM_FFTS_MAX_READY_LANES` | `8` | FFTS launch ready context 数上限。 |
-| `UCM_FFTS_OBJECT_TARGET_BYTES` | `0` | 单 shard 内部固定聚合目标大小。`0` 表示保持整 shard object；非 0 时按 fragment 边界拆成多个 object。 |
 | `UCM_FFTS_H2D_TRANSPORT` | `ffts_pipeline` | 只对 DSV4 FAWA 脚本有意义。取值为 `ce` 或 `ffts_pipeline`。 |
 
 ### CacheStore

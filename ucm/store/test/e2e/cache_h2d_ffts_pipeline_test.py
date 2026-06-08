@@ -41,7 +41,6 @@ class LoadPerfResult:
     block_num: int
     fragment_count: int
     shard_bytes: int
-    object_target_bytes: int
     objects_per_shard: int
     max_object_bytes: int
     max_object_fragments: int
@@ -148,39 +147,6 @@ def tensor_size_histogram(tensor_sizes: list[int]) -> str:
     return ", ".join(f"{count}x{format_bytes(size)}" for size, count in sorted(counts.items()))
 
 
-def build_object_plan(tensor_sizes: list[int], target_bytes: int) -> list[list[int]]:
-    if not tensor_sizes:
-        return []
-    if target_bytes <= 0:
-        return [tensor_sizes]
-
-    plan: list[list[int]] = []
-    current: list[int] = []
-    current_bytes = 0
-    for size in tensor_sizes:
-        exceeds_target = current_bytes >= target_bytes or size > target_bytes - current_bytes
-        if current and exceeds_target:
-            plan.append(current)
-            current = []
-            current_bytes = 0
-        current.append(size)
-        current_bytes += size
-    if current:
-        plan.append(current)
-    return plan
-
-
-def object_plan_stats(tensor_sizes: list[int], target_bytes: int) -> tuple[int, int, int]:
-    plan = build_object_plan(tensor_sizes, target_bytes)
-    if not plan:
-        return 0, 0, 0
-    return (
-        len(plan),
-        max(sum(item) for item in plan),
-        max(len(item) for item in plan),
-    )
-
-
 def cache_buffer_capacity_gb_for_case(tensor_sizes: list[int]) -> int:
     configured = os.getenv("UCM_FFTS_CACHE_BUFFER_CAPACITY_GB")
     if configured is not None:
@@ -276,7 +242,6 @@ def build_config(
     transport: str,
     tensor_sizes: list[int],
     cache_buffer_capacity_gb: int,
-    object_target_bytes: int,
 ) -> dict:
     shard_size = sum(tensor_sizes)
     return {
@@ -294,10 +259,9 @@ def build_config(
         "waiting_queue_depth": env_int("UCM_FFTS_WAITING_QUEUE_DEPTH", 64),
         "running_queue_depth": env_int("UCM_FFTS_RUNNING_QUEUE_DEPTH", 4096),
         "cache_stream_number": env_int("UCM_FFTS_CACHE_STREAM_NUMBER", 4),
-        "cache_h2d_transport": transport,
-        "cache_h2d_ffts_pipeline_depth": env_int("UCM_FFTS_PIPELINE_DEPTH", 2),
-        "cache_h2d_ffts_max_ready_lanes": env_int("UCM_FFTS_MAX_READY_LANES", 8),
-        "cache_h2d_ffts_object_target_bytes": object_target_bytes,
+        "cache_io_aggregation": transport == "ffts_pipeline",
+        "cache_io_aggregation_pipeline_depth": env_int("UCM_FFTS_PIPELINE_DEPTH", 2),
+        "cache_io_aggregation_max_ready_lanes": env_int("UCM_FFTS_MAX_READY_LANES", 8),
     }
 
 
@@ -353,7 +317,6 @@ def run_transport(
     warmup: int,
     repeat: int,
     cache_buffer_capacity_gb: int,
-    object_target_bytes: int,
     validate: bool = False,
 ) -> LoadPerfResult:
     device = torch_device(device_type, device_id)
@@ -363,7 +326,6 @@ def run_transport(
         transport,
         tensor_sizes,
         cache_buffer_capacity_gb,
-        object_target_bytes,
     )
     worker = UcmPipelineStore(config | {"device_id": device_id})
     share_buffer_enable = bool(config["share_buffer_enable"])
@@ -411,10 +373,11 @@ def run_transport(
 
     bytes_per_load = block_num * sum(tensor_sizes)
     avg_seconds = sum(samples) / len(samples)
-    objects_per_shard, max_object_bytes, max_object_fragments = object_plan_stats(
-        tensor_sizes, object_target_bytes
-    )
-    if transport != "ffts_pipeline":
+    if transport == "ffts_pipeline":
+        objects_per_shard = 1
+        max_object_bytes = sum(tensor_sizes)
+        max_object_fragments = len(tensor_sizes)
+    else:
         objects_per_shard = 0
         max_object_bytes = 0
         max_object_fragments = 0
@@ -424,7 +387,6 @@ def run_transport(
         block_num=block_num,
         fragment_count=len(tensor_sizes),
         shard_bytes=sum(tensor_sizes),
-        object_target_bytes=object_target_bytes,
         objects_per_shard=objects_per_shard,
         max_object_bytes=max_object_bytes,
         max_object_fragments=max_object_fragments,
@@ -440,7 +402,6 @@ def print_result(result: LoadPerfResult) -> None:
     object_info = ""
     if result.transport == "ffts_pipeline":
         object_info = (
-            f"object_target={format_bytes(result.object_target_bytes)}, "
             f"objects_per_shard={result.objects_per_shard}, "
             f"max_object={format_bytes(result.max_object_bytes)}, "
             f"max_object_fragments={result.max_object_fragments}, "
@@ -466,21 +427,16 @@ def print_case_config(
     device_type: str,
     device_id: int,
     cache_buffer_capacity_gb: int,
-    object_target_bytes: int,
     transport: str = "ffts_pipeline",
     validate: bool = False,
 ) -> None:
     shard_bytes = sum(case.tensor_sizes)
     object_info = ""
     if transport == "ffts_pipeline":
-        objects_per_shard, max_object_bytes, max_object_fragments = object_plan_stats(
-            case.tensor_sizes, object_target_bytes
-        )
         object_info = (
-            f"object_target={format_bytes(object_target_bytes)}, "
-            f"objects_per_shard={objects_per_shard}, "
-            f"max_object={format_bytes(max_object_bytes)}, "
-            f"max_object_fragments={max_object_fragments}, "
+            "objects_per_shard=1, "
+            f"max_object={format_bytes(shard_bytes)}, "
+            f"max_object_fragments={len(case.tensor_sizes)}, "
         )
     print(
         "case_config: "
@@ -498,7 +454,7 @@ def print_summary_table(results: list[LoadPerfResult]) -> None:
         return
     print(
         "summary: "
-        "case,transport,blocks,fragments,shard,object_target,objects_per_shard,"
+        "case,transport,blocks,fragments,shard,objects_per_shard,"
         "max_object,max_object_fragments,bytes,avg_ms,median_ms,min_ms,gbps"
     )
     for result in results:
@@ -514,8 +470,7 @@ def print_summary_table(results: list[LoadPerfResult]) -> None:
         print(
             "summary: "
             f"{result.case_name},{result.transport},{result.block_num},"
-            f"{result.fragment_count},{format_bytes(result.shard_bytes)},"
-            f"{format_bytes(result.object_target_bytes)},{objects_per_shard},"
+            f"{result.fragment_count},{format_bytes(result.shard_bytes)},{objects_per_shard},"
             f"{max_object},{max_object_fragments},{result.bytes_per_load},"
             f"{result.avg_seconds * 1e3:.3f},"
             f"{result.median_seconds * 1e3:.3f},{result.min_seconds * 1e3:.3f},"
@@ -536,7 +491,6 @@ def main():
     device_id = env_int("UCM_FFTS_DEVICE_ID", 0)
     prepare_torch_backend(device_type)
     min_gbps = env_float("UCM_FFTS_MIN_GBPS", 0.0)
-    object_target_bytes = env_int("UCM_FFTS_OBJECT_TARGET_BYTES", 0)
     validate = env_bool("UCM_FFTS_VALIDATE", False)
 
     cache_buffer_capacity_gb = cache_buffer_capacity_gb_for_case(case.tensor_sizes)
@@ -548,7 +502,6 @@ def main():
         device_type,
         device_id,
         cache_buffer_capacity_gb,
-        object_target_bytes,
         validate=validate,
     )
     result = run_transport(
@@ -561,7 +514,6 @@ def main():
         warmup,
         repeat,
         cache_buffer_capacity_gb,
-        object_target_bytes,
         validate=validate,
     )
     print_result(result)

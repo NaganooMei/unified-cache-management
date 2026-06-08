@@ -53,9 +53,8 @@ struct Config {
     bool useGdr{false};
     bool cacheIOAggregation{false};
     std::string h2dTransport{"ce"};
-    size_t h2dFftsPipelineDepth{2};
-    size_t h2dFftsMaxReadyLanes{8};
-    size_t h2dFftsObjectTargetBytes{0};
+    size_t ioAggregationPipelineDepth{2};
+    size_t ioAggregationMaxReadyLanes{8};
 };
 
 }  // namespace UC::CacheStore

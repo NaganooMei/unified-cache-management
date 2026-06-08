@@ -44,8 +44,8 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
     cacheIOAggregation_ = config.cacheIOAggregation;
-    h2dFftsPipelineDepth_ = config.h2dFftsPipelineDepth;
-    h2dFftsMaxReadyLanes_ = config.h2dFftsMaxReadyLanes;
+    ioAggregationPipelineDepth_ = config.ioAggregationPipelineDepth;
+    ioAggregationMaxReadyLanes_ = config.ioAggregationMaxReadyLanes;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -74,8 +74,8 @@ void DumpQueue::DispatchStage(std::promise<Status>& started)
     transferConfig.streamNumber = streamNumber_;
     transferConfig.useGdr = useGdr_;
     transferConfig.cacheIOAggregation = cacheIOAggregation_;
-    transferConfig.h2dFftsPipelineDepth = h2dFftsPipelineDepth_;
-    transferConfig.h2dFftsMaxReadyLanes = h2dFftsMaxReadyLanes_;
+    transferConfig.ioAggregationPipelineDepth = ioAggregationPipelineDepth_;
+    transferConfig.ioAggregationMaxReadyLanes = ioAggregationMaxReadyLanes_;
 
     auto executor = MakeCacheIOExecutor(transferConfig);
     auto s = executor->Setup(transferConfig);
