@@ -758,8 +758,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
         self._load_trace_step = trace_step
         trace_rank = self._load_trace_rank()
         request_to_load_blocks: dict[str, int] = {}
-        submit_failures = 0
-        wait_failures = 0
         for request_id, request in metadata.request_meta.items():
             if len(request.load_block_ids[0]) == 0:
                 continue
@@ -790,7 +788,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 request_to_task[request_id] = task
                 request_to_load_blocks[request_id] = len(ucm_block_ids)
             except Exception as e:
-                submit_failures += 1
                 logger.error(
                     f"request {request_id} submit load task error. {type(e).__name__}: {e}"
                 )
@@ -799,12 +796,10 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 )
                 num_loaded_block -= len(ucm_block_ids)
 
-        wait_start_time = _now_ms()
         for request_id, task in request_to_task.items():
             try:
                 self.store.wait(task)
             except Exception as e:
-                wait_failures += 1
                 logger.error(
                     f"request {request_id} wait load task error. {type(e).__name__}: {e}"
                 )
@@ -826,13 +821,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
             loaded_bytes = num_loaded_block * self.block_data_size
             logger.info(
                 f"[UCM_LOAD_PY] step={trace_step} {trace_rank} end mode=direct "
-                f"requests={num_loaded_request} blocks={num_loaded_block} "
-                f"bytes={loaded_bytes} submitted_tasks={len(request_to_task)} "
-                f"submit_failures={submit_failures} "
-                f"wait_failures={wait_failures} "
-                f"submit_phase_ms={wait_start_time - load_start_time:.3f} "
-                f"wait_phase_ms={wait_end_time - wait_start_time:.3f} "
-                f"wait_speed_gbps={_trace_speed_gbps(loaded_bytes, wait_end_time - wait_start_time):.3f} "
                 f"total_ms={load_end_time - load_start_time:.3f} "
                 f"speed_gbps={_trace_speed_gbps(loaded_bytes, load_end_time - load_start_time):.3f}"
             )
