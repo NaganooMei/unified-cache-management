@@ -12,7 +12,7 @@ add_library(trans STATIC
 if(ASCEND_SUPPORTS_REGISTER_PIN)
     target_compile_definitions(trans PRIVATE ASCEND_SUPPORTS_REGISTER_PIN=1)
 endif()
-if(UCM_ENABLE_ASCEND_FFTS_PIPELINE)
+if(UCM_ENABLE_ASCEND_IO_AGGREGATION)
     find_library(ASCEND_RUNTIME_LIBRARY runtime
         PATHS
             "${ASCEND_ROOT}/lib64"
@@ -34,7 +34,7 @@ if(UCM_ENABLE_ASCEND_FFTS_PIPELINE)
         NO_DEFAULT_PATH
     )
     if(NOT ASCEND_RUNTIME_LIBRARY OR NOT ASCEND_FFTS_INCLUDE_DIR)
-        message(FATAL_ERROR "UCM_ENABLE_ASCEND_FFTS_PIPELINE requires FFTS headers and libruntime.")
+        message(FATAL_ERROR "UCM_ENABLE_ASCEND_IO_AGGREGATION requires FFTS headers and libruntime.")
     endif()
     get_filename_component(ASCEND_FFTS_INCLUDE_PARENT "${ASCEND_FFTS_INCLUDE_DIR}" DIRECTORY)
     set(ASCEND_FFTS_INCLUDE_DIRS "${ASCEND_FFTS_INCLUDE_DIR}")
@@ -55,10 +55,10 @@ if(UCM_ENABLE_ASCEND_FFTS_PIPELINE)
         ffts_d2d_dispatcher.cc
     )
     target_include_directories(trans PUBLIC ${ASCEND_FFTS_INCLUDE_DIRS})
-    target_compile_definitions(trans PUBLIC UCM_ENABLE_ASCEND_FFTS_PIPELINE=1)
+    target_compile_definitions(trans PUBLIC UCM_ENABLE_ASCEND_IO_AGGREGATION=1)
     target_link_libraries(trans PUBLIC ${ASCEND_RUNTIME_LIBRARY})
 else()
-    target_compile_definitions(trans PUBLIC UCM_ENABLE_ASCEND_FFTS_PIPELINE=0)
+    target_compile_definitions(trans PUBLIC UCM_ENABLE_ASCEND_IO_AGGREGATION=0)
 endif()
 target_link_libraries(trans PUBLIC
     fmt

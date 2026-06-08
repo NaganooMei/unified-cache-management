@@ -28,8 +28,8 @@
 #include "trans/cuda/gdr/gdr_config.h"
 #include "trans_manager.h"
 
-#ifndef UCM_ENABLE_ASCEND_FFTS_PIPELINE
-#define UCM_ENABLE_ASCEND_FFTS_PIPELINE 0
+#ifndef UCM_ENABLE_ASCEND_IO_AGGREGATION
+#define UCM_ENABLE_ASCEND_IO_AGGREGATION 0
 #endif
 
 namespace UC::CacheStore {
@@ -203,7 +203,7 @@ private:
         if (config.deviceId == -1) { return Status::OK(); }
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
-#if !UCM_ENABLE_ASCEND_FFTS_PIPELINE
+#if !UCM_ENABLE_ASCEND_IO_AGGREGATION
         if (config.cacheIOAggregation) {
             return Status::InvalidParam("Cache IO aggregation is not compiled");
         }

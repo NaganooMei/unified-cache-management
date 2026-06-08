@@ -35,7 +35,7 @@ PLATFORM = os.getenv("PLATFORM")
 ENABLE_SPARSE = os.getenv("ENABLE_SPARSE")
 ENABLE_MINDIE = os.getenv("UCM_ENABLE_MINDIE", "0") not in ("", "0", "false", "False")
 ENABLE_GDR = os.getenv("ENABLE_GDR", "0") not in ("", "0", "false", "False")
-ENABLE_ASCEND_FFTS_PIPELINE = os.getenv("UCM_ENABLE_ASCEND_FFTS_PIPELINE", "1") not in (
+ENABLE_ASCEND_IO_AGGREGATION = os.getenv("UCM_ENABLE_ASCEND_IO_AGGREGATION", "1") not in (
     "",
     "0",
     "false",
@@ -179,7 +179,7 @@ class CMakeBuild(build_ext):
             cmake_args += ["-DUCM_ENABLE_GDR_STREAM=ON"]
 
         cmake_args += [
-            f"-DUCM_ENABLE_ASCEND_FFTS_PIPELINE={'ON' if ENABLE_ASCEND_FFTS_PIPELINE else 'OFF'}"
+            f"-DUCM_ENABLE_ASCEND_IO_AGGREGATION={'ON' if ENABLE_ASCEND_IO_AGGREGATION else 'OFF'}"
         ]
 
         if ASCEND_ROOT:

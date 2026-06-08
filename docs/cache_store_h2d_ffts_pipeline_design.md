@@ -85,7 +85,7 @@ FFTS pipeline:
 顶层 CMake 开关默认开启：
 
 ```text
-UCM_ENABLE_ASCEND_FFTS_PIPELINE=ON
+UCM_ENABLE_ASCEND_IO_AGGREGATION=ON
 ```
 
 对应实现：
@@ -98,15 +98,15 @@ UCM_ENABLE_ASCEND_FFTS_PIPELINE=ON
 - 查找 `libruntime`。
 - 查找 `runtime/rt_ffts_plus.h` 或 `rt_external_ffts.h`。
 - 编译 `ascend_h2d_ffts_pipeline.cc` 和 `ffts_d2d_dispatcher.cc`。
-- 向依赖方公开 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=1`。
+- 向依赖方公开 `UCM_ENABLE_ASCEND_IO_AGGREGATION=1`。
 
 如果编译开关开启但找不到 FFTS header 或 runtime library，CMake 直接失败：
 
 ```text
-UCM_ENABLE_ASCEND_FFTS_PIPELINE requires FFTS headers and libruntime.
+UCM_ENABLE_ASCEND_IO_AGGREGATION requires FFTS headers and libruntime.
 ```
 
-如果显式关闭编译开关，则不会编译 FFTS 相关源码，并公开 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=0`，确保 CE 路径不依赖 FFTS。
+如果显式关闭编译开关，则不会编译 FFTS 相关源码，并公开 `UCM_ENABLE_ASCEND_IO_AGGREGATION=0`，确保 CE 路径不依赖 FFTS。
 
 ## 运行时配置
 
@@ -135,7 +135,7 @@ cache_h2d_ffts_max_ready_lanes: 8
 校验规则：
 
 - `cache_h2d_transport` 只能是 `"ce"` 或 `"ffts_pipeline"`。
-- 如果运行时配置为 `"ffts_pipeline"`，但编译时未启用 `UCM_ENABLE_ASCEND_FFTS_PIPELINE`，`CacheStore::Setup` 返回错误。
+- 如果运行时配置为 `"ffts_pipeline"`，但编译时未启用 `UCM_ENABLE_ASCEND_IO_AGGREGATION`，`CacheStore::Setup` 返回错误。
 - 如果启用 FFTS pipeline，`depth` 和 `max_ready_lanes` 都必须大于 0。
 - 当编译支持 FFTS 且配置为 `"ffts_pipeline"` 时，LoadQueue 会直接选择 FFTS executor，不再按 fragment 数自动回退 CE。
 
@@ -173,7 +173,7 @@ public:
 
 ### FFTS executor
 
-`FftsPipelineH2DTransferExecutor` 只在 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=1` 时编译：
+`FftsPipelineH2DTransferExecutor` 只在 `UCM_ENABLE_ASCEND_IO_AGGREGATION=1` 时编译：
 
 - 计算 `objectBytes = sum(tensorSizes)`。
 - 检查 `h2dFftsMaxReadyLanes` 是否能放入 `uint16_t`。
@@ -403,8 +403,8 @@ size = sizes[i]
 功能验证：
 
 - 显式关闭 FFTS pipeline 的 CE 构建可以正常编译，不要求 FFTS 头文件。
-- `UCM_ENABLE_ASCEND_FFTS_PIPELINE=OFF` 且配置 `"ffts_pipeline"` 时，`CacheStore::Setup` 明确失败。
-- `UCM_ENABLE_ASCEND_FFTS_PIPELINE=ON` 时，缺少 FFTS header 或 `libruntime` 的构建明确失败。
+- `UCM_ENABLE_ASCEND_IO_AGGREGATION=OFF` 且配置 `"ffts_pipeline"` 时，`CacheStore::Setup` 明确失败。
+- `UCM_ENABLE_ASCEND_IO_AGGREGATION=ON` 时，缺少 FFTS header 或 `libruntime` 的构建明确失败。
 - 对比 CE 与 FFTS pipeline 的 load 后 HBM KV cache 内容。
 - 覆盖不等长 `tensor_size_list`。
 - 覆盖多 shard task，确认只有最后一个 shard 同步后才 `Done()`。

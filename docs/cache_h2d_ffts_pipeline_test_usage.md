@@ -38,9 +38,9 @@ pip install -v -e . --no-build-isolation
 关键点：
 
 - `PLATFORM=ascend` 按 Ascend runtime 编译 UCM。
-- CacheStore H2D FFTS pipeline 编译开关默认开启；如果需要显式关闭，可以设置 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=0`。
+- CacheStore IO 聚合编译开关默认开启；如果需要显式关闭，可以设置 `UCM_ENABLE_ASCEND_IO_AGGREGATION=0`。
 - `ASCEND_ROOT` 指向 Ascend toolkit 路径。
-- 如果显式关闭 FFTS pipeline 编译开关，运行 FFTS pipeline 脚本会在 CacheStore setup 阶段失败。
+- 如果显式关闭 IO 聚合编译开关，运行 FFTS pipeline 脚本会在 CacheStore setup 阶段失败。
 
 ## 运行 CE Baseline
 

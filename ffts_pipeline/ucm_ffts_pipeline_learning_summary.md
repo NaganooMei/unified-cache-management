@@ -205,10 +205,10 @@ Synchronize 会让 H2D stream 等所有 slot free event，然后同步 H2D strea
 顶层 CMake 选项默认开启：
 
 ```text
-UCM_ENABLE_ASCEND_FFTS_PIPELINE=ON
+UCM_ENABLE_ASCEND_IO_AGGREGATION=ON
 ```
 
-开启时，Ascend trans 组件会查找 FFTS header 和 `libruntime`，并把 `ascend_h2d_ffts_pipeline.cc`、`ffts_d2d_dispatcher.cc` 加入编译。如果缺少依赖，CMake 会直接失败。需要关闭时可以显式设置 `UCM_ENABLE_ASCEND_FFTS_PIPELINE=OFF`。
+开启时，Ascend trans 组件会查找 FFTS header 和 `libruntime`，并把 IO 聚合相关源码加入编译。如果缺少依赖，CMake 会直接失败。需要关闭时可以显式设置 `UCM_ENABLE_ASCEND_IO_AGGREGATION=OFF`。
 
 运行时配置有三个关键项：
 

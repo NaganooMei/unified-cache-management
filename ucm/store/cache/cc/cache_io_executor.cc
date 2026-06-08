@@ -10,11 +10,11 @@
 #include "copy_stream.h"
 #include "logger/logger.h"
 
-#ifndef UCM_ENABLE_ASCEND_FFTS_PIPELINE
-#define UCM_ENABLE_ASCEND_FFTS_PIPELINE 0
+#ifndef UCM_ENABLE_ASCEND_IO_AGGREGATION
+#define UCM_ENABLE_ASCEND_IO_AGGREGATION 0
 #endif
 
-#if UCM_ENABLE_ASCEND_FFTS_PIPELINE
+#if UCM_ENABLE_ASCEND_IO_AGGREGATION
 #include "trans/ascend/ascend_shard_io_aggregator.h"
 #endif
 
@@ -66,7 +66,7 @@ public:
     Status Synchronize() override { return stream_.Synchronize(); }
 };
 
-#if UCM_ENABLE_ASCEND_FFTS_PIPELINE
+#if UCM_ENABLE_ASCEND_IO_AGGREGATION
 class AggregatedIOExecutor : public CacheIOExecutor {
     Trans::AscendShardIOAggregator aggregator_;
     std::vector<size_t> tensorSizes_{};
@@ -137,7 +137,7 @@ public:
 std::unique_ptr<CacheIOExecutor> MakeCacheIOExecutor(const Config& config)
 {
     if (!config.cacheIOAggregation) { return std::make_unique<TensorIOExecutor>(); }
-#if UCM_ENABLE_ASCEND_FFTS_PIPELINE
+#if UCM_ENABLE_ASCEND_IO_AGGREGATION
     return std::make_unique<AggregatedIOExecutor>();
 #else
     return std::make_unique<UnavailableAggregatedIOExecutor>();

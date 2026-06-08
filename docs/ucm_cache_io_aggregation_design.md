@@ -311,7 +311,7 @@ config = {
 开启 `cache_io_aggregation = true` 需要构建时启用 Ascend FFTS 支持：
 
 ```text
-UCM_ENABLE_ASCEND_FFTS_PIPELINE = ON
+UCM_ENABLE_ASCEND_IO_AGGREGATION = ON
 ```
 
 运行环境需要可用的 Ascend runtime 和 FFTS Plus 相关头文件 / runtime library。
