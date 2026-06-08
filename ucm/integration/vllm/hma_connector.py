@@ -272,6 +272,7 @@ class FAWADumpTask:
     task: Task
     key_count: int
     event_handle: int
+    byte_count: Optional[int] = None
 
 
 class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
@@ -956,12 +957,14 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
 
         shard_indices = [0] * len(keys)
         task = store.dump_data(keys, shard_indices, ptrs, event_handle)
+        row_bytes = self._fawa_store_block_bytes.get(label)
         return FAWADumpTask(
             label=label,
             store=store,
             task=task,
             key_count=len(keys),
             event_handle=event_handle,
+            byte_count=None if row_bytes is None else row_bytes * len(keys),
         )
 
     def _extract_fa_ptr(self, store_keys, hash_start, hash_end, candidate_vllm_ids):
@@ -1216,11 +1219,21 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         if not finished_req_ids:
             return
 
+        trace_enabled = _env_flag("UCM_DUMP_TRACE")
+        trace_empty = _env_flag("UCM_DUMP_TRACE_EMPTY")
+        trace_step = getattr(self, "_dump_trace_step", 0) + 1
+        self._dump_trace_step = trace_step
+        trace_rank = self._load_trace_rank()
+        dump_start_time = _now_ms()
+        drained_task_count = 0
+        drained_bytes = 0
         finished_chunk_req_ids = []
         for request_ids, dump_tasks in self.tp_dump_tasks.items():
             if finished_req_ids.intersection(request_ids):
                 finished_chunk_req_ids.append(request_ids)
                 for dump_task in dump_tasks:
+                    drained_task_count += 1
+                    drained_bytes += dump_task.byte_count or 0
                     try:
                         dump_task.store.wait(dump_task.task)
                     except Exception as e:
@@ -1234,6 +1247,15 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
 
         for request_ids in finished_chunk_req_ids:
             self.tp_dump_tasks.pop(request_ids, None)
+
+        if trace_enabled and (drained_task_count or trace_empty):
+            dump_end_time = _now_ms()
+            dump_duration = dump_end_time - dump_start_time
+            logger.info(
+                f"[UCM_DUMP_PY] step={trace_step} {trace_rank} end mode=fawa "
+                f"total_ms={dump_duration:.3f} "
+                f"speed_gbps={_trace_speed_gbps(drained_bytes, dump_duration):.3f}"
+            )
 
     def handle_preemptions(self, kv_connector_metadata: UCMFAWAConnectorMetadata):
         # Worker side method

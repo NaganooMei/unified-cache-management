@@ -864,6 +864,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, UCMConnectorMetadata)
 
+        trace_enabled = _env_flag("UCM_DUMP_TRACE")
+        trace_empty = _env_flag("UCM_DUMP_TRACE_EMPTY")
+        trace_step = getattr(self, "_dump_trace_step", 0) + 1
+        self._dump_trace_step = trace_step
+        trace_rank = self._load_trace_rank()
+        dump_start_time = _now_ms()
         dump_tasks: List[Task] = []
         is_save = False
         num_saved_block = 0
@@ -899,7 +905,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 total_ptrs = total_ptrs.reshape(total_ptrs.shape[0], -1)
                 shard_indexs = [0] * len(total_ucm_block_ids)
                 event_handle = self._get_dump_event_handle()
-                save_start_time = time.perf_counter() * 1000
+                save_start_time = _now_ms()
                 task = self.store.dump_data(
                     total_ucm_block_ids, shard_indexs, total_ptrs, event_handle
                 )
@@ -911,27 +917,41 @@ class UCMDirectConnector(KVConnectorBase_V1):
             try:
                 for task in dump_tasks:
                     self.store.wait(task)
-                save_end_time = time.perf_counter() * 1000
+                save_end_time = _now_ms()
             except Exception as e:
                 logger.error(f"wait for dump kv cache failed. {type(e).__name__}: {e}")
                 return
 
+            saved_bytes = num_saved_block * self.block_data_size
+            save_duration = save_end_time - save_start_time
             save_speed = (
-                num_saved_block
-                * self.block_data_size
-                / (save_end_time - save_start_time)
-                / 1024
-                / 1024
-            )  # GB/s
+                _trace_speed_gbps(saved_bytes, save_duration)
+                if save_duration > 0
+                else 0.0
+            )
+            if trace_enabled:
+                logger.info(
+                    f"[UCM_DUMP_PY] step={trace_step} {trace_rank} end mode=direct "
+                    f"total_ms={save_duration:.3f} "
+                    f"speed_gbps={_trace_speed_gbps(saved_bytes, save_duration):.3f}"
+                )
             if self.metrics_config:
                 ucmmetrics.update_stats(
                     {
                         "save_requests_num": num_saved_request,
                         "save_blocks_num": num_saved_block,
-                        "save_duration": save_end_time - save_start_time,
+                        "save_duration": save_duration,
                         "save_speed": save_speed,
                     },
                 )
+        elif trace_enabled and trace_empty:
+            dump_end_time = _now_ms()
+            dump_duration = dump_end_time - dump_start_time
+            logger.info(
+                f"[UCM_DUMP_PY] step={trace_step} {trace_rank} end mode=direct "
+                f"total_ms={dump_duration:.3f} "
+                f"speed_gbps={_trace_speed_gbps(0, dump_duration):.3f}"
+            )
 
     def clear_connector_metadata(self) -> None:
         super().clear_connector_metadata()
