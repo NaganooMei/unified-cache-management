@@ -149,7 +149,17 @@ private:
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
+        const bool hasCacheIOAggregation = config.Contains("cache_io_aggregation");
+        const bool hasLegacyH2DIOAggregation = config.Contains("cache_h2d_io_aggregation");
+        config.Get("cache_io_aggregation", param.cacheIOAggregation);
         config.Get("cache_h2d_transport", param.h2dTransport);
+        if (!hasCacheIOAggregation && hasLegacyH2DIOAggregation) {
+            config.Get("cache_h2d_io_aggregation", param.cacheIOAggregation);
+        }
+        if (!hasCacheIOAggregation && !hasLegacyH2DIOAggregation &&
+            param.h2dTransport == "ffts_pipeline") {
+            param.cacheIOAggregation = true;
+        }
         config.GetNumber("cache_h2d_ffts_pipeline_depth", param.h2dFftsPipelineDepth);
         config.GetNumber("cache_h2d_ffts_max_ready_lanes", param.h2dFftsMaxReadyLanes);
         config.GetNumber("cache_h2d_ffts_object_target_bytes", param.h2dFftsObjectTargetBytes);
@@ -191,13 +201,13 @@ private:
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
 #if !UCM_ENABLE_ASCEND_FFTS_PIPELINE
-        if (config.h2dTransport == "ffts_pipeline") {
-            return Status::InvalidParam("H2D FFTS pipeline is not compiled");
+        if (config.cacheIOAggregation) {
+            return Status::InvalidParam("Cache IO aggregation is not compiled");
         }
 #endif
-        if (config.h2dTransport == "ffts_pipeline" &&
+        if (config.cacheIOAggregation &&
             (config.h2dFftsPipelineDepth == 0 || config.h2dFftsMaxReadyLanes == 0)) {
-            return Status::InvalidParam("invalid H2D FFTS pipeline config");
+            return Status::InvalidParam("invalid Cache IO aggregation config");
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
         if (bufferNumber < 1024 || bufferNumber < config.loadExclusiveBufferNumber * 2) {
@@ -241,11 +251,14 @@ private:
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, config.runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
-        UC_INFO("Set {}::H2DTransport to {}.", ns, config.h2dTransport);
-        UC_INFO("Set {}::H2DFftsPipelineDepth to {}.", ns, config.h2dFftsPipelineDepth);
-        UC_INFO("Set {}::H2DFftsMaxReadyLanes to {}.", ns, config.h2dFftsMaxReadyLanes);
-        UC_INFO("Set {}::H2DFftsObjectTargetBytes to {}.", ns,
-                config.h2dFftsObjectTargetBytes);
+        UC_INFO("Set {}::CacheIOAggregation to {}.", ns, config.cacheIOAggregation);
+        if (config.cacheIOAggregation) {
+            UC_INFO("Set {}::AggregationObject to CacheStoreShard.", ns);
+            UC_INFO("Set {}::CacheIOAggregationPipelineDepth to {}.", ns,
+                    config.h2dFftsPipelineDepth);
+            UC_INFO("Set {}::CacheIOAggregationMaxReadyLanes to {}.", ns,
+                    config.h2dFftsMaxReadyLanes);
+        }
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

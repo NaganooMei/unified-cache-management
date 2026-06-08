@@ -25,9 +25,8 @@
 #define UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 
 #include <future>
-#include <string>
 #include <thread>
-#include "copy_stream.h"
+#include "cache_io_executor.h"
 #include "template/hashset.h"
 #include "template/spsc_ring_queue.h"
 #include "thread/latch.h"
@@ -36,8 +35,6 @@
 #include "ucmstore_v1.h"
 
 namespace UC::CacheStore {
-
-class H2DTransferExecutor;
 
 class LoadQueue {
     using TaskPtr = std::shared_ptr<TransTask>;
@@ -61,10 +58,9 @@ private:
     std::vector<size_t> tensorSizes_{};
     size_t streamNumber_{1};
     bool useGdr_{false};
-    std::string h2dTransport_{"ce"};
+    bool cacheIOAggregation_{false};
     size_t h2dFftsPipelineDepth_{2};
     size_t h2dFftsMaxReadyLanes_{8};
-    size_t h2dFftsObjectTargetBytes_{0};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;
@@ -81,7 +77,7 @@ private:
     void DispatchStage();
     void DispatchOneTask(TaskPair&& pair);
     void TransferStage(std::promise<Status>& started);
-    void TransferOneTask(H2DTransferExecutor& executor, ShardTask&& task);
+    void TransferOneTask(CacheIOExecutor& executor, ShardTask&& task);
     Status WaitBackendTaskReady(ShardTask& task);
 };
 

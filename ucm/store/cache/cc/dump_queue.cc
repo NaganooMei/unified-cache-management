@@ -43,6 +43,9 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     tensorSizes_ = config.tensorSizes;
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
+    cacheIOAggregation_ = config.cacheIOAggregation;
+    h2dFftsPipelineDepth_ = config.h2dFftsPipelineDepth;
+    h2dFftsMaxReadyLanes_ = config.h2dFftsMaxReadyLanes;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -65,31 +68,40 @@ void DumpQueue::Submit(TaskPtr task, WaiterPtr waiter)
 
 void DumpQueue::DispatchStage(std::promise<Status>& started)
 {
-    CopyStream stream;
-    auto s = stream.Setup(deviceId_, streamNumber_, useGdr_);
+    Config transferConfig;
+    transferConfig.deviceId = deviceId_;
+    transferConfig.tensorSizes = tensorSizes_;
+    transferConfig.streamNumber = streamNumber_;
+    transferConfig.useGdr = useGdr_;
+    transferConfig.cacheIOAggregation = cacheIOAggregation_;
+    transferConfig.h2dFftsPipelineDepth = h2dFftsPipelineDepth_;
+    transferConfig.h2dFftsMaxReadyLanes = h2dFftsMaxReadyLanes_;
+
+    auto executor = MakeCacheIOExecutor(transferConfig);
+    auto s = executor->Setup(transferConfig);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {
         s = CpuAffinity::SetCpuAffinity4CurrentThread(cpuAffinityCores_);
         if (s.Failure()) { UC_WARN("Failed({}) to set affinity.", s); }
     }
-    waiting_.ConsumerLoop(stop_, &DumpQueue::DispatchOneTask, this, stream);
+    waiting_.ConsumerLoop(stop_, &DumpQueue::DispatchOneTask, this, *executor);
 }
 
-void DumpQueue::DispatchOneTask(CopyStream& stream, TaskPair&& pair)
+void DumpQueue::DispatchOneTask(CacheIOExecutor& executor, TaskPair&& pair)
 {
     auto& task = pair.first;
     auto& waiter = pair.second;
     auto wait = NowTime::Now() - waiter->startTp;
     UC_DEBUG("Cache task({}) start running, wait {:.3f}ms.", task->id, wait * 1e3);
     if (!failureSet_->Contains(task->id)) {
-        auto s = DumpOneTask(stream, task);
+        auto s = DumpOneTask(executor, task);
         if (s.Failure()) [[unlikely]] { failureSet_->Insert(task->id); }
     }
     waiter->Done();
 }
 
-Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
+Status DumpQueue::DumpOneTask(CacheIOExecutor& executor, TaskPtr task)
 {
     auto tp = NowTime::Now();
     Detail::TaskDesc backendTaskDesc;
@@ -99,7 +111,7 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     DumpCtx dumpCtx;
     dumpCtx.taskHandle = task->id;
     if (task->desc.prerequisiteHandle != 0) {
-        auto s = stream.WaitEvent(reinterpret_cast<void*>(task->desc.prerequisiteHandle));
+        auto s = executor.WaitEvent(reinterpret_cast<void*>(task->desc.prerequisiteHandle));
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to wait prerequisite event for dump task({}).", s, task->id);
             return s;
@@ -110,10 +122,9 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         auto handle = buffer_->Get(shard.owner, shard.index);
         if (!handle.Owner()) { continue; }
         if (!handle.Ready()) {
-            auto s =
-                DeviceToHostGatherAsync(stream.NextStream(), shard.addrs.data(), handle.Data());
+            auto s = executor.DeviceToHost(shard.addrs.data(), handle.Data());
             if (s.Failure()) [[unlikely]] {
-                UC_ERROR("Failed({}) to do D2H batch async for task({}).", s, task->id);
+                UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
                 return s;
             }
         }
@@ -122,7 +133,7 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     }
     auto tpMakeBuffer = NowTime::Now();
     if (backendTaskDesc.empty()) { return Status::OK(); }
-    auto s = stream.Synchronize();
+    auto s = executor.Synchronize();
     if (s.Failure()) [[unlikely]] {
         UC_ERROR("Failed({}) to sync on stream for task({}).", s, task->id);
         return s;
@@ -140,24 +151,6 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     UC_DEBUG("Cache task({}) mk_buf={:.3f}ms, sync={:.3f}ms, back={:.3f}ms.", task->id,
              (tpMakeBuffer - tp) * 1e3, (tpSyncStream - tpMakeBuffer) * 1e3,
              (tpEnd - tpSyncStream) * 1e3);
-    return Status::OK();
-}
-
-Status DumpQueue::DeviceToHostGatherAsync(std::shared_ptr<Trans::Stream> stream, void** device,
-                                          void* host)
-{
-    const auto number = tensorSizes_.size();
-    for (size_t i = 0, offset = 0; i < number; i++) {
-        auto pDevice = device[i];
-        auto pHost = (void*)(((int8_t*)host) + offset);
-        auto size = tensorSizes_[i];
-        auto s = stream->DeviceToHostAsync(pDevice, pHost, size);
-        if (s.Failure()) [[unlikely]] {
-            UC_ERROR("Failed({}) to do D2H({}) batch({}/{}) async.", s, size, i, number);
-            return s;
-        }
-        offset += size;
-    }
     return Status::OK();
 }
 

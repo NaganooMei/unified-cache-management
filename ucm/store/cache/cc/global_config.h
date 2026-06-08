@@ -51,6 +51,7 @@ struct Config {
     std::vector<uintptr_t> gpuKvBufferAddrs{};
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
+    bool cacheIOAggregation{false};
     std::string h2dTransport{"ce"};
     size_t h2dFftsPipelineDepth{2};
     size_t h2dFftsMaxReadyLanes{8};
