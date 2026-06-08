@@ -36,7 +36,7 @@ ENABLE_SPARSE = os.getenv("ENABLE_SPARSE")
 ENABLE_MINDIE = os.getenv("UCM_ENABLE_MINDIE", "0") not in ("", "0", "false", "False")
 ENABLE_GDR = os.getenv("ENABLE_GDR", "0") not in ("", "0", "false", "False")
 ENABLE_ASCEND_IO_AGGREGATION = os.getenv(
-    "UCM_ENABLE_ASCEND_IO_AGGREGATION", "0"
+    "UCM_ENABLE_ASCEND_IO_AGGREGATION", "1"
 ) not in (
     "",
     "0",
