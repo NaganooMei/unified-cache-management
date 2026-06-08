@@ -924,6 +924,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
             saved_bytes = num_saved_block * self.block_data_size
             save_duration = save_end_time - save_start_time
+            dump_duration = save_end_time - dump_start_time
             save_speed = (
                 _trace_speed_gbps(saved_bytes, save_duration)
                 if save_duration > 0
@@ -932,8 +933,8 @@ class UCMDirectConnector(KVConnectorBase_V1):
             if trace_enabled:
                 logger.info(
                     f"[UCM_DUMP_PY] step={trace_step} {trace_rank} end mode=direct "
-                    f"total_ms={save_duration:.3f} "
-                    f"speed_gbps={_trace_speed_gbps(saved_bytes, save_duration):.3f}"
+                    f"total_ms={dump_duration:.3f} "
+                    f"speed_gbps={_trace_speed_gbps(saved_bytes, dump_duration):.3f}"
                 )
             if self.metrics_config:
                 ucmmetrics.update_stats(
