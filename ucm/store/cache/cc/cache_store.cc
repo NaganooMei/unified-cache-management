@@ -149,7 +149,23 @@ private:
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
+        const bool hasCacheIOAggregation = config.Contains("cache_io_aggregation");
+        const bool hasLegacyH2DIOAggregation = config.Contains("cache_h2d_io_aggregation");
         config.Get("cache_io_aggregation", param.cacheIOAggregation);
+        config.Get("cache_h2d_transport", param.h2dTransport);
+        if (!hasCacheIOAggregation && hasLegacyH2DIOAggregation) {
+            config.Get("cache_h2d_io_aggregation", param.cacheIOAggregation);
+        }
+        if (!hasCacheIOAggregation && !hasLegacyH2DIOAggregation &&
+            param.h2dTransport == "ffts_pipeline") {
+            param.cacheIOAggregation = true;
+        }
+        config.GetNumber("cache_h2d_ffts_pipeline_depth", param.ioAggregationPipelineDepth);
+        config.GetNumber("cache_h2d_ffts_max_ready_lanes", param.ioAggregationMaxReadyLanes);
+        config.GetNumber("cache_io_aggregation_pipeline_depth",
+                         param.ioAggregationPipelineDepth);
+        config.GetNumber("cache_io_aggregation_max_ready_lanes",
+                         param.ioAggregationMaxReadyLanes);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -173,6 +189,9 @@ private:
             return Status::InvalidParam("invalid device({})", config.deviceId);
         }
         if (config.uniqueId.empty()) { return Status::InvalidParam("invalid unique id"); }
+        if (config.h2dTransport != "ce" && config.h2dTransport != "ffts_pipeline") {
+            return Status::InvalidParam("invalid H2D transport({})", config.h2dTransport);
+        }
         auto s =
             Trans::GdrKVBufferConfig::Validate(config.gpuKvBufferAddrs, config.gpuKvBufferSizes);
         if (s.Failure()) { return s; }
@@ -190,7 +209,8 @@ private:
         }
 #endif
         if (config.cacheIOAggregation &&
-            (config.ioAggregationPipelineDepth == 0 || config.ioAggregationMaxReadyLanes == 0)) {
+            (config.ioAggregationPipelineDepth == 0 ||
+             config.ioAggregationMaxReadyLanes == 0)) {
             return Status::InvalidParam("invalid Cache IO aggregation config");
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
@@ -238,6 +258,10 @@ private:
         UC_INFO("Set {}::CacheIOAggregation to {}.", ns, config.cacheIOAggregation);
         if (config.cacheIOAggregation) {
             UC_INFO("Set {}::AggregationObject to CacheStoreShard.", ns);
+            UC_INFO("Set {}::CacheIOAggregationPipelineDepth to {}.", ns,
+                    config.ioAggregationPipelineDepth);
+            UC_INFO("Set {}::CacheIOAggregationMaxReadyLanes to {}.", ns,
+                    config.ioAggregationMaxReadyLanes);
         }
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());

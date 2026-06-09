@@ -259,6 +259,7 @@ class FAWALoadTask:
     task: Task
     key_count: int
     byte_count: Optional[int] = None
+    ptr_shape: tuple[int, ...] = field(default_factory=tuple)
     anchor_vllm_block_ids: set[int] = field(default_factory=set)
 
 
@@ -915,23 +916,26 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             task=task,
             key_count=len(keys),
             byte_count=None if row_bytes is None else row_bytes * len(keys),
+            ptr_shape=tuple(int(dim) for dim in ptrs.shape),
             anchor_vllm_block_ids=anchor_vllm_block_ids,
         )
 
     def _wait_load_task(
         self,
         load_task: FAWALoadTask,
-    ) -> None:
+    ) -> bool:
         """Wait a load task and mark its anchor blocks invalid on failure."""
 
         try:
             load_task.store.wait(load_task.task)
+            return True
         except Exception as e:
             logger.error(
                 f"request {load_task.request_id} wait FAWA load "
                 f"task label={load_task.label} error. {type(e).__name__}: {e}"
             )
             self._invalid_block_ids.update(load_task.anchor_vllm_block_ids)
+            return False
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         res = self._invalid_block_ids
@@ -1048,16 +1052,15 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                     request.load_hash_end,
                     request.load_vllm_block_ids,
                 )
-                tasks.append(
-                    self._submit_load_task(
-                        request_id,
-                        "FA",
-                        self.fa_store,
-                        request.load_keys,
-                        fa_ptrs,
-                        group0_vllm_block_ids,
-                    )
+                fa_task = self._submit_load_task(
+                    request_id,
+                    "FA",
+                    self.fa_store,
+                    request.load_keys,
+                    fa_ptrs,
+                    group0_vllm_block_ids,
                 )
+                tasks.append(fa_task)
 
                 # WA groups only need the final matched boundary.
                 window_keys = request.load_keys[-1:]
@@ -1065,16 +1068,15 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                     window_keys,
                     request.load_vllm_block_ids,
                 )
-                tasks.append(
-                    self._submit_load_task(
-                        request_id,
-                        "WA",
-                        self.wa_store,
-                        window_keys,
-                        window_ptrs,
-                        group0_vllm_block_ids,
-                    )
+                wa_task = self._submit_load_task(
+                    request_id,
+                    "WA",
+                    self.wa_store,
+                    window_keys,
+                    window_ptrs,
+                    group0_vllm_block_ids,
                 )
+                tasks.append(wa_task)
             except Exception as e:
                 logger.error(
                     f"request {request_id} submit FAWA load task "
@@ -1085,13 +1087,13 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         for load_task in tasks:
             self._wait_load_task(load_task)
 
-        load_end_time = _now_ms()
+        wait_end_time = _now_ms()
         total_bytes = sum(task.byte_count or 0 for task in tasks)
         if trace_enabled and (tasks or trace_empty):
             logger.info(
                 f"[UCM_LOAD_PY] step={trace_step} {trace_rank} end mode=fawa "
-                f"total_ms={load_end_time - load_start_time:.3f} "
-                f"speed_gbps={_trace_speed_gbps(total_bytes, load_end_time - load_start_time):.3f}"
+                f"total_ms={wait_end_time - load_start_time:.3f} "
+                f"speed_gbps={_trace_speed_gbps(total_bytes, wait_end_time - load_start_time):.3f}"
             )
 
     def wait_for_save(self) -> None:
