@@ -58,9 +58,9 @@ Status AscendShardIOAggregator::Setup(const AscendShardIOAggregatorConfig& confi
         lane.slotReady.assign(pipelineDepth_, nullptr);
         lane.slotFree.assign(pipelineDepth_, nullptr);
         for (size_t slot = 0; slot < pipelineDepth_; ++slot) {
-            s = AclStatus(aclrtMalloc(&lane.stagingBuffers[slot], objectBytes_,
-                                      ACL_MEM_TYPE_HIGH_BAND_WIDTH),
-                          "aclrtMalloc(staging)");
+            s = AclStatus(
+                aclrtMalloc(&lane.stagingBuffers[slot], objectBytes_, ACL_MEM_TYPE_HIGH_BAND_WIDTH),
+                "aclrtMalloc(staging)");
             if (s.Failure()) {
                 Cleanup();
                 return s;
@@ -114,8 +114,7 @@ Status AscendShardIOAggregator::BuildScatterSpecs(InFlightObject& object, void* 
         return Status::InvalidParam("invalid shard IO aggregation pointers");
     }
     if (sizes.empty() || sizes.size() > maxFragments_) {
-        return Status::InvalidParam("invalid shard IO aggregation tensor number({})",
-                                    sizes.size());
+        return Status::InvalidParam("invalid shard IO aggregation tensor number({})", sizes.size());
     }
 
     object.specs.clear();
@@ -147,8 +146,7 @@ Status AscendShardIOAggregator::BuildGatherSpecs(InFlightObject& object, void* s
         return Status::InvalidParam("invalid shard IO aggregation pointers");
     }
     if (sizes.empty() || sizes.size() > maxFragments_) {
-        return Status::InvalidParam("invalid shard IO aggregation tensor number({})",
-                                    sizes.size());
+        return Status::InvalidParam("invalid shard IO aggregation tensor number({})", sizes.size());
     }
 
     object.specs.clear();
@@ -193,8 +191,7 @@ Status AscendShardIOAggregator::SubmitLoadObject(void* host, void** devices,
     auto s = BuildScatterSpecs(*object, staging, devices, sizes);
     if (s.Failure()) { return s; }
 
-    const auto objectBytes =
-        std::accumulate(sizes.begin(), sizes.end(), static_cast<size_t>(0));
+    const auto objectBytes = std::accumulate(sizes.begin(), sizes.end(), static_cast<size_t>(0));
     s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
     if (s.Failure()) { return s; }
     s = AclStatus(aclrtStreamWaitEvent(lane.copyStream, lane.slotFree[slot]),
@@ -240,8 +237,7 @@ Status AscendShardIOAggregator::SubmitDumpObject(void** devices, void* host,
     auto s = BuildGatherSpecs(*object, staging, devices, sizes);
     if (s.Failure()) { return s; }
 
-    const auto objectBytes =
-        std::accumulate(sizes.begin(), sizes.end(), static_cast<size_t>(0));
+    const auto objectBytes = std::accumulate(sizes.begin(), sizes.end(), static_cast<size_t>(0));
     s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
     if (s.Failure()) { return s; }
     s = AclStatus(aclrtStreamWaitEvent(lane.fftsStream, lane.slotFree[slot]),

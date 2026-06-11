@@ -78,8 +78,7 @@ Status FftsD2DDispatcher::BuildCopies(const std::vector<AscendFftsCopySpec>& cop
     if (maxReadyLanes == 0) { return Status::InvalidParam("invalid FFTS max ready lanes"); }
 
     contexts_.reserve(copies.size());
-    const auto laneCount =
-        static_cast<uint16_t>(std::min<size_t>(copies.size(), maxReadyLanes));
+    const auto laneCount = static_cast<uint16_t>(std::min<size_t>(copies.size(), maxReadyLanes));
     std::vector<int32_t> lastTaskId(laneCount, -1);
 
     for (size_t i = 0; i < copies.size(); ++i) {

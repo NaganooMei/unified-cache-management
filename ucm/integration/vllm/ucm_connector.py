@@ -58,17 +58,6 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        logger.warning(f"Invalid {name}={value!r}, fallback to {default}.")
-        return default
-
-
 def _now_ms() -> float:
     return time.perf_counter() * 1000
 
@@ -808,8 +797,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 )
                 num_loaded_block -= request_to_load_blocks.get(request_id, 0)
 
-        wait_end_time = _now_ms()
-        load_end_time = wait_end_time
+        load_end_time = _now_ms()
         load_speed = (
             num_loaded_block
             * self.block_data_size
@@ -924,7 +912,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
             saved_bytes = num_saved_block * self.block_data_size
             save_duration = save_end_time - save_start_time
-            dump_duration = save_end_time - dump_start_time
             save_speed = (
                 _trace_speed_gbps(saved_bytes, save_duration)
                 if save_duration > 0

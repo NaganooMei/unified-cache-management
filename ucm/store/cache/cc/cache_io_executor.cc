@@ -85,16 +85,13 @@ public:
         aggregatorConfig.deviceId = config.deviceId;
         aggregatorConfig.streamNumber = config.streamNumber;
         aggregatorConfig.pipelineDepth = config.ioAggregationPipelineDepth;
-        aggregatorConfig.maxReadyLanes =
-            static_cast<uint16_t>(config.ioAggregationMaxReadyLanes);
+        aggregatorConfig.maxReadyLanes = static_cast<uint16_t>(config.ioAggregationMaxReadyLanes);
         aggregatorConfig.objectBytes = objectBytes;
         aggregatorConfig.maxFragments = tensorSizes_.size();
         UC_INFO("Set Cache IO aggregation streams={}, objectBytes={}, tensors={}.",
                 config.streamNumber, objectBytes, tensorSizes_.size());
         auto s = aggregator_.Setup(aggregatorConfig);
-        if (s.Failure()) [[unlikely]] {
-            UC_ERROR("Failed({}) to setup Cache IO aggregator.", s);
-        }
+        if (s.Failure()) [[unlikely]] { UC_ERROR("Failed({}) to setup Cache IO aggregator.", s); }
         return s;
     }
     Status WaitEvent(void* event) override { return aggregator_.WaitEvent(event); }
