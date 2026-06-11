@@ -54,6 +54,9 @@ struct Config {
     bool cacheIOAggregation{false};
     size_t ioAggregationPipelineDepth{2};
     size_t ioAggregationMaxReadyLanes{8};
+    bool cacheFftsDirectH2D{false};
+    std::string fftsDirectH2DLaunchMode{"shard"};
+    size_t fftsDirectH2DMaxReadyLanes{8};
 };
 
 }  // namespace UC::CacheStore

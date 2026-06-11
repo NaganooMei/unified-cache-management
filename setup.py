@@ -43,6 +43,14 @@ ENABLE_ASCEND_IO_AGGREGATION = os.getenv(
     "false",
     "False",
 )
+ENABLE_ASCEND_FFTS_DIRECT_H2D = os.getenv(
+    "UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D", "1"
+) not in (
+    "",
+    "0",
+    "false",
+    "False",
+)
 ASCEND_ROOT = os.getenv("ASCEND_ROOT")
 
 
@@ -182,6 +190,9 @@ class CMakeBuild(build_ext):
 
         cmake_args += [
             f"-DUCM_ENABLE_ASCEND_IO_AGGREGATION={'ON' if ENABLE_ASCEND_IO_AGGREGATION else 'OFF'}"
+        ]
+        cmake_args += [
+            f"-DUCM_ENABLE_ASCEND_FFTS_DIRECT_H2D={'ON' if ENABLE_ASCEND_FFTS_DIRECT_H2D else 'OFF'}"
         ]
 
         if ASCEND_ROOT:

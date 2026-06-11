@@ -47,6 +47,9 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     cacheIOAggregation_ = config.cacheIOAggregation;
     ioAggregationPipelineDepth_ = config.ioAggregationPipelineDepth;
     ioAggregationMaxReadyLanes_ = config.ioAggregationMaxReadyLanes;
+    cacheFftsDirectH2D_ = config.cacheFftsDirectH2D;
+    fftsDirectH2DLaunchMode_ = config.fftsDirectH2DLaunchMode;
+    fftsDirectH2DMaxReadyLanes_ = config.fftsDirectH2DMaxReadyLanes;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
@@ -137,6 +140,9 @@ void LoadQueue::TransferStage(std::promise<Status>& started)
     transferConfig.cacheIOAggregation = cacheIOAggregation_;
     transferConfig.ioAggregationPipelineDepth = ioAggregationPipelineDepth_;
     transferConfig.ioAggregationMaxReadyLanes = ioAggregationMaxReadyLanes_;
+    transferConfig.cacheFftsDirectH2D = cacheFftsDirectH2D_;
+    transferConfig.fftsDirectH2DLaunchMode = fftsDirectH2DLaunchMode_;
+    transferConfig.fftsDirectH2DMaxReadyLanes = fftsDirectH2DMaxReadyLanes_;
 
     auto executor = MakeCacheIOExecutor(transferConfig);
     auto s = executor->Setup(transferConfig);
@@ -161,7 +167,8 @@ void LoadQueue::TransferOneTask(CacheIOExecutor& executor, ShardTask&& task)
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
-        s = executor.HostToDevice(task.bufferHandle.Data(), task.shard.addrs.data());
+        s = executor.HostToDevice(task.bufferHandle.Data(), task.shard.addrs.data(),
+                                  task.bufferHandle.DeviceData());
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
             break;

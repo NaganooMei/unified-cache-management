@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <limits>
 #include <memory>
 #include <numeric>
 #include "buffer_manager.h"
@@ -30,6 +31,10 @@
 
 #ifndef UCM_ENABLE_ASCEND_IO_AGGREGATION
 #define UCM_ENABLE_ASCEND_IO_AGGREGATION 0
+#endif
+
+#ifndef UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
+#define UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D 0
 #endif
 
 namespace UC::CacheStore {
@@ -150,6 +155,10 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_io_aggregation", param.cacheIOAggregation);
+        config.Get("cache_ffts_direct_h2d", param.cacheFftsDirectH2D);
+        config.Get("cache_ffts_direct_h2d_launch_mode", param.fftsDirectH2DLaunchMode);
+        config.GetNumber("cache_ffts_direct_h2d_max_ready_lanes",
+                         param.fftsDirectH2DMaxReadyLanes);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -189,9 +198,32 @@ private:
             return Status::InvalidParam("Cache IO aggregation is not compiled");
         }
 #endif
+#if !UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
+        if (config.cacheFftsDirectH2D) {
+            return Status::InvalidParam("Cache FFTS direct H2D is not compiled");
+        }
+#endif
+        if (config.cacheIOAggregation && config.cacheFftsDirectH2D) {
+            return Status::InvalidParam(
+                "Cache IO aggregation and FFTS direct H2D cannot be enabled together");
+        }
         if (config.cacheIOAggregation &&
             (config.ioAggregationPipelineDepth == 0 || config.ioAggregationMaxReadyLanes == 0)) {
             return Status::InvalidParam("invalid Cache IO aggregation config");
+        }
+        if (config.cacheFftsDirectH2D) {
+            if (config.fftsDirectH2DLaunchMode != "shard" &&
+                config.fftsDirectH2DLaunchMode != "task") {
+                return Status::InvalidParam("invalid Cache FFTS direct H2D launch mode({})",
+                                            config.fftsDirectH2DLaunchMode);
+            }
+            if (config.fftsDirectH2DMaxReadyLanes == 0) {
+                return Status::InvalidParam("invalid Cache FFTS direct H2D max ready lanes");
+            }
+            if (config.fftsDirectH2DMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
+                return Status::InvalidParam("too many Cache FFTS direct H2D ready lanes({})",
+                                            config.fftsDirectH2DMaxReadyLanes);
+            }
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
         if (bufferNumber < 1024 || bufferNumber < config.loadExclusiveBufferNumber * 2) {
@@ -239,6 +271,10 @@ private:
         if (config.cacheIOAggregation) {
             UC_INFO("Set {}::AggregationObject to CacheStoreShard.", ns);
         }
+        UC_INFO("Set {}::CacheFftsDirectH2D to {}.", ns, config.cacheFftsDirectH2D);
+        UC_INFO("Set {}::FftsDirectH2DLaunchMode to {}.", ns, config.fftsDirectH2DLaunchMode);
+        UC_INFO("Set {}::FftsDirectH2DMaxReadyLanes to {}.", ns,
+                config.fftsDirectH2DMaxReadyLanes);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

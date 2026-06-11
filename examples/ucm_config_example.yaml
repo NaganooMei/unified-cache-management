@@ -29,6 +29,17 @@ ucm_connectors:
       # This requires an Ascend runtime and building UCM with UCM_ENABLE_ASCEND_IO_AGGREGATION=1.
       cache_io_aggregation: false
 
+      # Enable direct Ascend FFTS SDMA H2D for CacheStore load copies.
+      # This replaces the normal per-tensor aclrtMemcpyAsync H2D path, while
+      # keeping D2H on the original copy stream path. Do not enable it together
+      # with cache_io_aggregation.
+      # launch_mode:
+      #   shard: one FFTS launch per CacheStore shard.
+      #   task: one FFTS launch for all shards in one CacheStore load task.
+      cache_ffts_direct_h2d: false
+      cache_ffts_direct_h2d_launch_mode: "shard"
+      cache_ffts_direct_h2d_max_ready_lanes: 8
+
 # When you use UcmNfsStore, you should set enable_event_sync to false.
 enable_event_sync: true
 # Enable UCM metrics so they can be monitored online via Grafana and Prometheus.
