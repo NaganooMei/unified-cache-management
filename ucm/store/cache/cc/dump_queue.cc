@@ -47,6 +47,9 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     cacheIOAggregation_ = config.cacheIOAggregation;
     ioAggregationPipelineDepth_ = config.ioAggregationPipelineDepth;
     ioAggregationMaxReadyLanes_ = config.ioAggregationMaxReadyLanes;
+    cacheFftsDirectH2D_ = config.cacheFftsDirectH2D;
+    fftsDirectH2DLaunchMode_ = config.fftsDirectH2DLaunchMode;
+    fftsDirectH2DMaxReadyLanes_ = config.fftsDirectH2DMaxReadyLanes;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -77,6 +80,9 @@ void DumpQueue::DispatchStage(std::promise<Status>& started)
     transferConfig.cacheIOAggregation = cacheIOAggregation_;
     transferConfig.ioAggregationPipelineDepth = ioAggregationPipelineDepth_;
     transferConfig.ioAggregationMaxReadyLanes = ioAggregationMaxReadyLanes_;
+    transferConfig.cacheFftsDirectH2D = cacheFftsDirectH2D_;
+    transferConfig.fftsDirectH2DLaunchMode = fftsDirectH2DLaunchMode_;
+    transferConfig.fftsDirectH2DMaxReadyLanes = fftsDirectH2DMaxReadyLanes_;
 
     auto executor = MakeCacheIOExecutor(transferConfig);
     auto s = executor->Setup(transferConfig);
@@ -124,7 +130,7 @@ Status DumpQueue::DumpOneTask(CacheIOExecutor& executor, TaskPtr task)
         auto handle = buffer_->Get(shard.owner, shard.index);
         if (!handle.Owner()) { continue; }
         if (!handle.Ready()) {
-            auto s = executor.DeviceToHost(shard.addrs.data(), handle.Data());
+            auto s = executor.DeviceToHost(shard.addrs.data(), handle.Data(), handle.DeviceData());
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
                 return s;

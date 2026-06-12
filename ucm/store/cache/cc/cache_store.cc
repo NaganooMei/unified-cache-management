@@ -200,7 +200,7 @@ private:
 #endif
 #if !UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
         if (config.cacheFftsDirectH2D) {
-            return Status::InvalidParam("Cache FFTS direct H2D is not compiled");
+            return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
         }
 #endif
         if (config.cacheIOAggregation && config.cacheFftsDirectH2D) {
@@ -214,14 +214,14 @@ private:
         if (config.cacheFftsDirectH2D) {
             if (config.fftsDirectH2DLaunchMode != "shard" &&
                 config.fftsDirectH2DLaunchMode != "task") {
-                return Status::InvalidParam("invalid Cache FFTS direct H2D launch mode({})",
+                return Status::InvalidParam("invalid Cache FFTS direct H2D/D2H launch mode({})",
                                             config.fftsDirectH2DLaunchMode);
             }
             if (config.fftsDirectH2DMaxReadyLanes == 0) {
-                return Status::InvalidParam("invalid Cache FFTS direct H2D max ready lanes");
+                return Status::InvalidParam("invalid Cache FFTS direct H2D/D2H max ready lanes");
             }
             if (config.fftsDirectH2DMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
-                return Status::InvalidParam("too many Cache FFTS direct H2D ready lanes({})",
+                return Status::InvalidParam("too many Cache FFTS direct H2D/D2H ready lanes({})",
                                             config.fftsDirectH2DMaxReadyLanes);
             }
         }

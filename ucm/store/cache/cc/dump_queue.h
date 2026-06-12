@@ -25,6 +25,7 @@
 #define UNIFIEDCACHE_CACHE_STORE_CC_DUMP_QUEUE_H
 
 #include <future>
+#include <string>
 #include <thread>
 #include "cache_io_executor.h"
 #include "template/hashset.h"
@@ -60,6 +61,9 @@ private:
     bool cacheIOAggregation_{false};
     size_t ioAggregationPipelineDepth_{2};
     size_t ioAggregationMaxReadyLanes_{8};
+    bool cacheFftsDirectH2D_{false};
+    std::string fftsDirectH2DLaunchMode_{"shard"};
+    size_t fftsDirectH2DMaxReadyLanes_{8};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<DumpCtx> dumping_;

@@ -59,7 +59,7 @@ public:
         }
         return Status::OK();
     }
-    Status DeviceToHost(void** devices, void* host) override
+    Status DeviceToHost(void** devices, void* host, void*) override
     {
         const auto number = tensorSizes_.size();
         for (size_t i = 0, offset = 0; i < number; i++) {
@@ -104,7 +104,7 @@ public:
         Cleanup();
         if (config.deviceId < 0) { return Status::InvalidParam("invalid device id"); }
         if (config.fftsDirectH2DMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
-            return Status::InvalidParam("too many FFTS direct H2D ready lanes({})",
+            return Status::InvalidParam("too many FFTS direct H2D/D2H ready lanes({})",
                                         config.fftsDirectH2DMaxReadyLanes);
         }
         tensorSizes_ = config.tensorSizes;
@@ -123,7 +123,7 @@ public:
         setup_ = true;
         const auto objectBytes =
             std::accumulate(tensorSizes_.begin(), tensorSizes_.end(), static_cast<size_t>(0));
-        UC_INFO("Set Cache FFTS direct H2D mode={}, streams={}, objectBytes={}, tensors={}, "
+        UC_INFO("Set Cache FFTS direct H2D/D2H mode={}, streams={}, objectBytes={}, tensors={}, "
                 "maxReadyLanes={}.",
                 config.fftsDirectH2DLaunchMode, config.streamNumber, objectBytes,
                 tensorSizes_.size(), maxReadyLanes_);
@@ -143,7 +143,7 @@ public:
     Status HostToDevice(void*, void** devices, const void* deviceHost) override
     {
         std::vector<Trans::AscendFftsCopySpec> specs;
-        auto s = BuildSpecs(deviceHost, devices, specs);
+        auto s = BuildHostToDeviceSpecs(deviceHost, devices, specs);
         if (s.Failure()) { return s; }
         if (launchMode_ == LaunchMode::TASK) {
             pendingSpecs_.insert(pendingSpecs_.end(), specs.begin(), specs.end());
@@ -152,21 +152,16 @@ public:
         return LaunchSpecs(std::move(specs));
     }
 
-    Status DeviceToHost(void** devices, void* host) override
+    Status DeviceToHost(void** devices, void* host, void* deviceHost) override
     {
-        const auto number = tensorSizes_.size();
-        for (size_t i = 0, offset = 0; i < number; i++) {
-            auto pDevice = devices[i];
-            auto pHost = static_cast<void*>(static_cast<int8_t*>(host) + offset);
-            auto size = tensorSizes_[i];
-            auto s = copyStream_.NextStream()->DeviceToHostAsync(pDevice, pHost, size);
-            if (s.Failure()) [[unlikely]] {
-                UC_ERROR("Failed({}) to do D2H({}) tensor({}/{}).", s, size, i, number);
-                return s;
-            }
-            offset += size;
+        std::vector<Trans::AscendFftsCopySpec> specs;
+        auto s = BuildDeviceToHostSpecs(devices, host, deviceHost, specs);
+        if (s.Failure()) { return s; }
+        if (launchMode_ == LaunchMode::TASK) {
+            pendingSpecs_.insert(pendingSpecs_.end(), specs.begin(), specs.end());
+            return Status::OK();
         }
-        return Status::OK();
+        return LaunchSpecs(std::move(specs));
     }
 
     Status Synchronize() override
@@ -192,10 +187,10 @@ private:
         return Status{static_cast<int32_t>(ret), expr};
     }
 
-    Status BuildSpecs(const void* deviceHost, void** devices,
-                      std::vector<Trans::AscendFftsCopySpec>& specs)
+    Status BuildHostToDeviceSpecs(const void* deviceHost, void** devices,
+                                  std::vector<Trans::AscendFftsCopySpec>& specs)
     {
-        if (!setup_) { return Status::Error("FFTS direct H2D executor is not setup"); }
+        if (!setup_) { return Status::Error("FFTS direct H2D/D2H executor is not setup"); }
         if (deviceHost == nullptr || devices == nullptr) {
             return Status::InvalidParam("invalid FFTS direct H2D pointers");
         }
@@ -206,6 +201,25 @@ private:
             auto size = tensorSizes_[i];
             auto* src = static_cast<const std::byte*>(deviceHost) + offset;
             specs.push_back({devices[i], src, size});
+            offset += size;
+        }
+        return Status::OK();
+    }
+
+    Status BuildDeviceToHostSpecs(void** devices, void*, void* deviceHost,
+                                  std::vector<Trans::AscendFftsCopySpec>& specs)
+    {
+        if (!setup_) { return Status::Error("FFTS direct H2D/D2H executor is not setup"); }
+        if (deviceHost == nullptr || devices == nullptr) {
+            return Status::InvalidParam("invalid FFTS direct D2H pointers");
+        }
+
+        const auto number = tensorSizes_.size();
+        specs.reserve(number);
+        for (size_t i = 0, offset = 0; i < number; i++) {
+            auto size = tensorSizes_[i];
+            auto* dst = static_cast<std::byte*>(deviceHost) + offset;
+            specs.push_back({dst, devices[i], size});
             offset += size;
         }
         return Status::OK();
@@ -253,23 +267,23 @@ class UnavailableFftsDirectH2DExecutor : public CacheIOExecutor {
 public:
     Status Setup(const Config&) override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D is not compiled");
+        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
     }
     Status WaitEvent(void*) override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D is not compiled");
+        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
     }
     Status HostToDevice(void*, void**, const void*) override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D is not compiled");
+        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
     }
-    Status DeviceToHost(void**, void*) override
+    Status DeviceToHost(void**, void*, void*) override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D is not compiled");
+        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
     }
     Status Synchronize() override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D is not compiled");
+        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
     }
 };
 #endif
@@ -307,7 +321,7 @@ public:
     {
         return aggregator_.SubmitLoadObject(host, devices, tensorSizes_);
     }
-    Status DeviceToHost(void** devices, void* host) override
+    Status DeviceToHost(void** devices, void* host, void*) override
     {
         return aggregator_.SubmitDumpObject(devices, host, tensorSizes_);
     }
@@ -328,7 +342,7 @@ public:
     {
         return Status::InvalidParam("Cache IO aggregation is not compiled");
     }
-    Status DeviceToHost(void**, void*) override
+    Status DeviceToHost(void**, void*, void*) override
     {
         return Status::InvalidParam("Cache IO aggregation is not compiled");
     }
