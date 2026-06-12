@@ -1090,6 +1090,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         if trace_enabled and (tasks or trace_empty):
             logger.info(
                 f"[UCM_LOAD_PY] step={trace_step} {trace_rank} end mode=fawa "
+                f"bytes={total_bytes} "
                 f"total_ms={wait_end_time - load_start_time:.3f} "
                 f"speed_gbps={_trace_speed_gbps(total_bytes, wait_end_time - load_start_time):.3f}"
             )
@@ -1288,7 +1289,8 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             dump_duration = dump_end_time - dump_start_time
             logger.info(
                 f"[UCM_DUMP_PY] step={trace_step} {trace_rank} end mode=fawa "
-                f"total_ms={dump_duration:.3f} "
+                f"bytes={drained_bytes} "
+                f"save_ms={dump_duration:.3f} "
                 f"speed_gbps={_trace_speed_gbps(drained_bytes, dump_duration):.3f}"
             )
 
