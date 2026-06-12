@@ -981,26 +981,14 @@ class UCMLayerWiseConnector(UCMDirectConnector):
         super().__init__(vllm_config, role, kv_cache_config)
         # {layer_id: {request_id: Task}}
         self.load_tasks: dict[int, dict[str, Task]] = defaultdict(dict)
-        self.load_task_bytes: dict[int, dict[str, int]] = defaultdict(dict)
         self.dump_tasks: dict[str, Task] = {}
-        self.dump_task_bytes: dict[str, int] = {}
         self.use_layerwise = True
         self.is_save = False
         self.need_load = False
         self.dump_total_ptrs: np.ndarray | None = None
         self.request_data: list[tuple[str, list, np.ndarray]] = []
         self._failure_req_ids: set[str] = set()
-        self._layerwise_load_trace_step = 0
-        self._layerwise_load_trace_rank = ""
         logger.info("Init UCMLayerWiseConnector.")
-
-    def _layer_block_data_size(self, layer_id: int) -> int:
-        local_layer_id = layer_id - self.first_layer_id
-        if local_layer_id < 0 or local_layer_id >= len(
-            self.kv_cache_layout.tensor_size_lists
-        ):
-            return int(self.kv_cache_layout.shard_size)
-        return int(self.kv_cache_layout.tensor_size_lists[local_layer_id].sum())
 
     def _submit_request_load_tasks_for_layer(
         self,
@@ -1016,9 +1004,6 @@ class UCMLayerWiseConnector(UCMDirectConnector):
                 layer_ptrs = total_ptrs[local_row]
                 task = self.store.load_data(ucm_block_ids, shard_indexs, layer_ptrs)
                 self.load_tasks[layer_id][request_id] = task
-                self.load_task_bytes[layer_id][request_id] = (
-                    len(ucm_block_ids) * self._layer_block_data_size(layer_id)
-                )
             except Exception as e:
                 logger.error(
                     f"request {request_id} submit load task error. {type(e).__name__}: {e}"
@@ -1031,16 +1016,9 @@ class UCMLayerWiseConnector(UCMDirectConnector):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         metadata = self._get_connector_metadata()
         self.load_tasks.clear()
-        self.load_task_bytes.clear()
         self.request_data.clear()
         self._failure_req_ids.clear()
         self.need_load = False
-        trace_enabled = _env_flag("UCM_LOAD_TRACE")
-        trace_empty = _env_flag("UCM_LOAD_TRACE_EMPTY")
-        trace_step = getattr(self, "_load_trace_step", 0) + 1
-        self._load_trace_step = trace_step
-        self._layerwise_load_trace_step = trace_step
-        self._layerwise_load_trace_rank = self._load_trace_rank()
 
         for request_id, request in metadata.request_meta.items():
             if len(request.load_block_ids[0]) == 0:
@@ -1058,11 +1036,6 @@ class UCMLayerWiseConnector(UCMDirectConnector):
 
         if self.need_load:
             self._submit_request_load_tasks_for_layer(self.first_layer_id, 0, metadata)
-        elif trace_enabled and trace_empty:
-            logger.info(
-                f"[UCM_LOAD_PY] step={trace_step} {self._layerwise_load_trace_rank} "
-                f"end mode=layerwise bytes=0 total_ms=0.000 speed_gbps=0.000"
-            )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self._connector_metadata:
@@ -1074,17 +1047,10 @@ class UCMLayerWiseConnector(UCMDirectConnector):
 
         # Pop before wait so MTP / rollback paths that revisit the same layer_name
         # do not call store.wait() again on already-completed handles.
-        wait_start_time = _now_ms()
         layer_tasks = self.load_tasks.pop(current_layer_id, {})
-        loaded_bytes = 0
-        loaded_task_count = 0
         for request_id, task in layer_tasks.items():
             try:
                 self.store.wait(task)
-                loaded_bytes += self.load_task_bytes[current_layer_id].get(
-                    request_id, 0
-                )
-                loaded_task_count += 1
             except Exception as e:
                 logger.error(
                     f"request {request_id} wait {layer_name} load failed. {type(e).__name__}: {e}"
@@ -1093,21 +1059,6 @@ class UCMLayerWiseConnector(UCMDirectConnector):
                     metadata.request_meta[request_id].load_block_ids[1]
                 )
                 self._failure_req_ids.add(request_id)
-        self.load_task_bytes.pop(current_layer_id, None)
-
-        trace_enabled = _env_flag("UCM_LOAD_TRACE")
-        trace_empty = _env_flag("UCM_LOAD_TRACE_EMPTY")
-        if trace_enabled and (layer_tasks or trace_empty):
-            wait_end_time = _now_ms()
-            load_duration = wait_end_time - wait_start_time
-            logger.info(
-                f"[UCM_LOAD_PY] step={self._layerwise_load_trace_step} "
-                f"{self._layerwise_load_trace_rank} end mode=layerwise "
-                f"layer={layer_name} layer_id={current_layer_id} "
-                f"tasks={loaded_task_count} bytes={loaded_bytes} "
-                f"total_ms={load_duration:.3f} "
-                f"speed_gbps={_trace_speed_gbps(loaded_bytes, load_duration):.3f}"
-            )
 
         next_layer_id = current_layer_id + 1
         if next_layer_id not in self.layer_ids:
@@ -1160,47 +1111,19 @@ class UCMLayerWiseConnector(UCMDirectConnector):
                     total_ucm_block_ids, shard_indexs, layer_ptrs, event_handle
                 )
                 self.dump_tasks[layer_name] = task
-                self.dump_task_bytes[layer_name] = len(
-                    total_ucm_block_ids
-                ) * self._layer_block_data_size(layer_id)
             except Exception as e:
                 logger.error(f"submit dump task failed. {type(e).__name__}: {e}")
 
     def wait_for_save(self) -> None:
-        trace_enabled = _env_flag("UCM_DUMP_TRACE")
-        trace_empty = _env_flag("UCM_DUMP_TRACE_EMPTY")
-        trace_step = getattr(self, "_dump_trace_step", 0) + 1
-        self._dump_trace_step = trace_step
-        trace_rank = self._load_trace_rank()
         if not self.is_save:
-            if trace_enabled and trace_empty:
-                logger.info(
-                    f"[UCM_DUMP_PY] step={trace_step} {trace_rank} "
-                    f"end mode=layerwise bytes=0 save_ms=0.000 speed_gbps=0.000"
-                )
             return
-        save_start_time = _now_ms()
-        saved_bytes = 0
-        saved_layer_count = 0
         try:
             for layer_name in self.kv_caches:
                 if layer_name in self.dump_tasks:
                     self.store.wait(self.dump_tasks[layer_name])
-                    saved_bytes += self.dump_task_bytes.get(layer_name, 0)
-                    saved_layer_count += 1
         except Exception as e:
             logger.error(f"wait for dump kv cache failed. {type(e).__name__}: {e}")
-        save_end_time = _now_ms()
-        if trace_enabled and (saved_layer_count or trace_empty):
-            save_duration = save_end_time - save_start_time
-            logger.info(
-                f"[UCM_DUMP_PY] step={trace_step} {trace_rank} end mode=layerwise "
-                f"layers={saved_layer_count} bytes={saved_bytes} "
-                f"save_ms={save_duration:.3f} "
-                f"speed_gbps={_trace_speed_gbps(saved_bytes, save_duration):.3f}"
-            )
         self.dump_tasks.clear()
-        self.dump_task_bytes.clear()
         self.is_save = False
         self.dump_total_ptrs = None
         if self.enable_event_sync:
