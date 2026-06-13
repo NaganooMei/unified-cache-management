@@ -15,7 +15,11 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from ucm.integration.vllm.device import create_device
-from ucm.integration.vllm.ucm_connector import UCMDirectConnector
+from ucm.integration.vllm.ucm_connector import (
+    UCMDirectConnector,
+    _now_ms,
+    _trace_speed_gbps,
+)
 from ucm.logger import init_logger
 from ucm.sparse.utils import round_up
 from ucm.store.factory_v1 import UcmConnectorFactoryV1
@@ -253,6 +257,7 @@ class FAWALoadTask:
     store: UcmKVStoreBaseV1
     task: Task
     key_count: int
+    byte_count: Optional[int] = None
     anchor_vllm_block_ids: set[int] = field(default_factory=set)
 
 
@@ -265,6 +270,7 @@ class FAWADumpTask:
     task: Task
     key_count: int
     event_handle: int
+    byte_count: Optional[int] = None
 
 
 class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
@@ -298,6 +304,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         self._init_group_metas()
         self.fa_store: Optional[UcmKVStoreBaseV1] = None
         self.wa_store: Optional[UcmKVStoreBaseV1] = None
+        self._fawa_store_block_bytes: dict[str, int] = {}
         self.requests_meta: dict[str, FAWARequestMeta] = {}
         self.tp_dump_tasks: dict[tuple, list[FAWADumpTask]] = {}
         self.wa_dump_block_wise = self.launch_config.get("wa_dump_block_wise", True)
@@ -540,6 +547,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             padded_size = round_up(sum(tensor_size_list), aligned_size)
             config["shard_size"] = padded_size
             config["block_size"] = padded_size
+            self._fawa_store_block_bytes[label] = padded_size
             # MLA stores aggregate TP shards under one logical rank group.
             config["local_rank_size"] = self.tp_size if self.is_mla else 1
             if cpu_affinity_cores:
@@ -898,12 +906,14 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
 
         shard_indices = [0] * len(keys)
         task = store.load_data(keys, shard_indices, ptrs)
+        row_bytes = self._fawa_store_block_bytes.get(label)
         return FAWALoadTask(
             request_id=request_id,
             label=label,
             store=store,
             task=task,
             key_count=len(keys),
+            byte_count=None if row_bytes is None else row_bytes * len(keys),
             anchor_vllm_block_ids=anchor_vllm_block_ids,
         )
 
@@ -939,12 +949,14 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
 
         shard_indices = [0] * len(keys)
         task = store.dump_data(keys, shard_indices, ptrs, event_handle)
+        row_bytes = self._fawa_store_block_bytes.get(label)
         return FAWADumpTask(
             label=label,
             store=store,
             task=task,
             key_count=len(keys),
             event_handle=event_handle,
+            byte_count=None if row_bytes is None else row_bytes * len(keys),
         )
 
     def _extract_fa_ptr(self, store_keys, hash_start, hash_end, candidate_vllm_ids):
@@ -1010,6 +1022,10 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         if not isinstance(metadata, UCMFAWAConnectorMetadata):
             raise RuntimeError(f"Unexpected FAWA metadata type: {type(metadata)}")
 
+        trace_step = getattr(self, "_load_trace_step", 0) + 1
+        self._load_trace_step = trace_step
+        trace_rank = self._load_trace_rank()
+        load_start_time = _now_ms()
         tasks: list[FAWALoadTask] = []
         for request_id, request in metadata.request_meta.items():
             if not request.load_keys:
@@ -1064,6 +1080,17 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
 
         for load_task in tasks:
             self._wait_load_task(load_task)
+
+        if tasks:
+            load_end_time = _now_ms()
+            load_duration = load_end_time - load_start_time
+            total_bytes = sum(task.byte_count or 0 for task in tasks)
+            logger.info(
+                f"[UCM_LOAD_PY] step={trace_step} {trace_rank} end mode=fawa "
+                f"bytes={total_bytes} "
+                f"total_ms={load_duration:.3f} "
+                f"speed_gbps={_trace_speed_gbps(total_bytes, load_duration):.3f}"
+            )
 
     def wait_for_save(self) -> None:
         metadata = self._get_connector_metadata()
@@ -1225,11 +1252,19 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         if not finished_req_ids:
             return
 
+        trace_step = getattr(self, "_dump_trace_step", 0) + 1
+        self._dump_trace_step = trace_step
+        trace_rank = self._load_trace_rank()
+        dump_start_time = _now_ms()
+        drained_task_count = 0
+        drained_bytes = 0
         finished_chunk_req_ids = []
         for request_ids, dump_tasks in self.tp_dump_tasks.items():
             if finished_req_ids.intersection(request_ids):
                 finished_chunk_req_ids.append(request_ids)
                 for dump_task in dump_tasks:
+                    drained_task_count += 1
+                    drained_bytes += dump_task.byte_count or 0
                     try:
                         dump_task.store.wait(dump_task.task)
                     except Exception as e:
@@ -1243,6 +1278,16 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
 
         for request_ids in finished_chunk_req_ids:
             self.tp_dump_tasks.pop(request_ids, None)
+
+        if drained_task_count:
+            dump_end_time = _now_ms()
+            dump_duration = dump_end_time - dump_start_time
+            logger.info(
+                f"[UCM_DUMP_PY] step={trace_step} {trace_rank} end mode=fawa "
+                f"bytes={drained_bytes} "
+                f"save_ms={dump_duration:.3f} "
+                f"speed_gbps={_trace_speed_gbps(drained_bytes, dump_duration):.3f}"
+            )
 
     def handle_preemptions(self, kv_connector_metadata: UCMFAWAConnectorMetadata):
         # Worker side method

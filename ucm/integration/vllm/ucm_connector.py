@@ -51,6 +51,16 @@ from ucm.sparse.state import has_ucm_sparse
 logger = init_logger(__name__)
 
 
+def _now_ms() -> float:
+    return time.perf_counter() * 1000
+
+
+def _trace_speed_gbps(byte_count: int, duration_ms: float) -> float:
+    if duration_ms <= 0:
+        return 0.0
+    return byte_count / duration_ms / 1024 / 1024
+
+
 def _short_list(values: list[int], limit: int = 12) -> list[int]:
     return values[:limit]
 
@@ -510,6 +520,17 @@ class UCMDirectConnector(KVConnectorBase_V1):
         if self.device is None:
             raise RuntimeError(f"Unsupported device platform for UCMDirectConnector.")
 
+    def _load_trace_rank(self) -> str:
+        try:
+            rank_id = get_world_group().rank
+        except Exception:
+            rank_id = "unknown"
+        role = getattr(self._role, "name", str(self._role))
+        return (
+            f"rank_id={rank_id} local_rank={self.local_rank} "
+            f"tp_rank={self.tp_rank} role={role}"
+        )
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -711,7 +732,10 @@ class UCMDirectConnector(KVConnectorBase_V1):
         is_load = False
         num_loaded_block = 0
         num_loaded_request = 0
-        load_start_time = time.perf_counter() * 1000
+        load_start_time = _now_ms()
+        trace_step = getattr(self, "_load_trace_step", 0) + 1
+        self._load_trace_step = trace_step
+        trace_rank = self._load_trace_rank()
         request_to_load_blocks: dict[str, int] = {}
         for request_id, request in metadata.request_meta.items():
             if len(request.load_block_ids[0]) == 0:
@@ -763,17 +787,22 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 )
                 num_loaded_block -= request_to_load_blocks.get(request_id, 0)
 
-        load_end_time = time.perf_counter() * 1000
+        load_end_time = _now_ms()
+        load_duration = load_end_time - load_start_time
         load_bytes = num_loaded_block * self.block_data_size
-        load_speed = (
-            load_bytes / (load_end_time - load_start_time) / 1024 / 1024
-        )  # GB/s
+        load_speed = _trace_speed_gbps(load_bytes, load_duration)
         if is_load:
+            logger.info(
+                f"[UCM_LOAD_PY] step={trace_step} {trace_rank} end mode=direct "
+                f"bytes={load_bytes} "
+                f"total_ms={load_duration:.3f} "
+                f"speed_gbps={_trace_speed_gbps(load_bytes, load_duration):.3f}"
+            )
             ucmmetrics.update_stats(
                 {
                     "load_requests_num": num_loaded_request,
                     "load_blocks_num": num_loaded_block,
-                    "load_duration": load_end_time - load_start_time,
+                    "load_duration": load_duration,
                     "load_speed": load_speed,
                     "load_bytes_total": load_bytes,
                 }
@@ -809,6 +838,9 @@ class UCMDirectConnector(KVConnectorBase_V1):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, UCMConnectorMetadata)
 
+        trace_step = getattr(self, "_dump_trace_step", 0) + 1
+        self._dump_trace_step = trace_step
+        trace_rank = self._load_trace_rank()
         dump_tasks: List[Task] = []
         is_save = False
         num_saved_block = 0
@@ -844,7 +876,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 total_ptrs = total_ptrs.reshape(total_ptrs.shape[0], -1)
                 shard_indexs = [0] * len(total_ucm_block_ids)
                 event_handle = self._get_dump_event_handle()
-                save_start_time = time.perf_counter() * 1000
+                save_start_time = _now_ms()
                 task = self.store.dump_data(
                     total_ucm_block_ids, shard_indexs, total_ptrs, event_handle
                 )
@@ -856,20 +888,25 @@ class UCMDirectConnector(KVConnectorBase_V1):
             try:
                 for task in dump_tasks:
                     self.store.wait(task)
-                save_end_time = time.perf_counter() * 1000
+                save_end_time = _now_ms()
             except Exception as e:
                 logger.error(f"wait for dump kv cache failed. {type(e).__name__}: {e}")
                 return
 
             save_bytes = num_saved_block * self.block_data_size
-            save_speed = (
-                save_bytes / (save_end_time - save_start_time) / 1024 / 1024
-            )  # GB/s
+            save_duration = save_end_time - save_start_time
+            save_speed = _trace_speed_gbps(save_bytes, save_duration)
+            logger.info(
+                f"[UCM_DUMP_PY] step={trace_step} {trace_rank} end mode=direct "
+                f"bytes={save_bytes} "
+                f"save_ms={save_duration:.3f} "
+                f"speed_gbps={_trace_speed_gbps(save_bytes, save_duration):.3f}"
+            )
             ucmmetrics.update_stats(
                 {
                     "save_requests_num": num_saved_request,
                     "save_blocks_num": num_saved_block,
-                    "save_duration": save_end_time - save_start_time,
+                    "save_duration": save_duration,
                     "save_speed": save_speed,
                     "save_bytes_total": save_bytes,
                 },
