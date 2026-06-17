@@ -64,6 +64,18 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
     return nullptr;
 }
 
+std::shared_ptr<Stream> Device::MakeSharedStream(const StreamOptions& options)
+{
+    std::shared_ptr<Stream> stream = nullptr;
+    try {
+        stream = std::make_shared<CudaStream>();
+    } catch (...) {
+        return nullptr;
+    }
+    if (stream->Setup(options).Success()) { return stream; }
+    return nullptr;
+}
+
 std::unique_ptr<Stream> Device::MakeGdrStream()
 {
 #if UCM_ENABLE_GDR_STREAM

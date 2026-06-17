@@ -39,16 +39,36 @@ class CopyStream {
 public:
     Status Setup(const int32_t deviceId, const size_t streamNumber, const bool useGdr)
     {
+        Trans::StreamOptions options;
+        options.deviceId = deviceId;
+        options.streamNumber = streamNumber;
+        return Setup(deviceId, options, useGdr);
+    }
+
+    Status Setup(const int32_t deviceId, const Trans::StreamOptions& options, const bool useGdr)
+    {
         Trans::Device device;
         auto s = device.Setup(deviceId);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to setup device({}).", s, deviceId);
             return s;
         }
-        streams_.reserve(streamNumber);
-        for (size_t i = 0; i < streamNumber; ++i) {
-            std::shared_ptr<Trans::Stream> stream =
-                useGdr ? device.MakeGdrStream() : device.MakeSharedStream();
+        Trans::ResolvedStreamOptions resolved;
+        s = Trans::ResolveStreamOptions(options, resolved);
+        if (s.Failure()) [[unlikely]] { return s; }
+        if (useGdr &&
+            (resolved.streamOptions.cacheIOAggregation || resolved.streamOptions.cacheSdmaDirect)) {
+            return Status::InvalidParam("GDR stream is incompatible with cache copy strategy");
+        }
+        streams_.clear();
+        streams_.reserve(resolved.submitterNumber);
+        for (size_t i = 0; i < resolved.submitterNumber; ++i) {
+            std::shared_ptr<Trans::Stream> stream;
+            if (useGdr) {
+                stream = device.MakeGdrStream();
+            } else {
+                stream = device.MakeSharedStream(resolved.streamOptions);
+            }
             if (!stream) [[unlikely]] {
                 UC_ERROR("Failed to make stream on device({}).", deviceId);
                 return Status::Error();
@@ -56,7 +76,7 @@ public:
             streams_.push_back(std::move(stream));
         }
         deviceId_ = deviceId;
-        streamNumber_ = streamNumber;
+        streamNumber_ = resolved.submitterNumber;
         return Status::OK();
     }
     std::shared_ptr<Trans::Stream> NextStream() noexcept
@@ -65,6 +85,20 @@ public:
         auto& stream = streams_[streamIndex_];
         streamIndex_ = (streamIndex_ + 1) % streamNumber_;
         return stream;
+    }
+    Status HostToDeviceScatterAsync(void* host, void* hostDevicePtr, void** device,
+                                    const std::vector<size_t>& sizes) noexcept
+    {
+        auto stream = NextStream();
+        if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
+        return stream->HostToDeviceScatterAsync(host, hostDevicePtr, device, sizes);
+    }
+    Status DeviceToHostGatherAsync(void** device, void* host, void* hostDevicePtr,
+                                   const std::vector<size_t>& sizes) noexcept
+    {
+        auto stream = NextStream();
+        if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
+        return stream->DeviceToHostGatherAsync(device, host, hostDevicePtr, sizes);
     }
     Status WaitEvent(void* event) noexcept
     {

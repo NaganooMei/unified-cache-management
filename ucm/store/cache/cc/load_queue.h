@@ -27,7 +27,7 @@
 #include <future>
 #include <string>
 #include <thread>
-#include "cache_io_executor.h"
+#include "copy_stream.h"
 #include "template/hashset.h"
 #include "template/spsc_ring_queue.h"
 #include "thread/latch.h"
@@ -78,8 +78,10 @@ private:
     void DispatchStage();
     void DispatchOneTask(TaskPair&& pair);
     void TransferStage(std::promise<Status>& started);
-    void TransferOneTask(CacheIOExecutor& executor, ShardTask&& task);
+    void TransferOneTask(CopyStream& stream, ShardTask&& task);
     Status WaitBackendTaskReady(ShardTask& task);
+    Status HostToDeviceScatterAsync(CopyStream& stream, void* host, void* hostDevicePtr,
+                                    void** device);
 };
 
 }  // namespace UC::CacheStore

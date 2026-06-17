@@ -132,27 +132,26 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
 
 void LoadQueue::TransferStage(std::promise<Status>& started)
 {
-    Config transferConfig;
-    transferConfig.deviceId = deviceId_;
-    transferConfig.tensorSizes = tensorSizes_;
-    transferConfig.streamNumber = streamNumber_;
-    transferConfig.useGdr = useGdr_;
-    transferConfig.cacheSdmaDirect = cacheSdmaDirect_;
-    transferConfig.sdmaDirectLaunchMode = sdmaDirectLaunchMode_;
-    transferConfig.sdmaDirectMaxReadyLanes = sdmaDirectMaxReadyLanes_;
+    Trans::StreamOptions options;
+    options.deviceId = deviceId_;
+    options.tensorSizes = tensorSizes_;
+    options.streamNumber = streamNumber_;
+    options.cacheSdmaDirect = cacheSdmaDirect_;
+    options.sdmaDirectLaunchMode = sdmaDirectLaunchMode_;
+    options.sdmaDirectMaxReadyLanes = sdmaDirectMaxReadyLanes_;
 
-    auto executor = MakeCacheIOExecutor(transferConfig);
-    auto s = executor->Setup(transferConfig);
+    CopyStream stream;
+    auto s = stream.Setup(deviceId_, options, useGdr_);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {
         s = CpuAffinity::SetCpuAffinity4CurrentThread(cpuAffinityCores_);
         if (s.Failure()) { UC_WARN("Failed({}) to set affinity.", s); }
     }
-    running_.ConsumerLoop(stop_, &LoadQueue::TransferOneTask, this, *executor);
+    running_.ConsumerLoop(stop_, &LoadQueue::TransferOneTask, this, stream);
 }
 
-void LoadQueue::TransferOneTask(CacheIOExecutor& executor, ShardTask&& task)
+void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
 {
     if (failureSet_->Contains(task.taskHandle)) {
         if (task.waiter) { task.waiter->Done(); }
@@ -164,8 +163,8 @@ void LoadQueue::TransferOneTask(CacheIOExecutor& executor, ShardTask&& task)
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
-        s = executor.HostToDevice(task.bufferHandle.Data(), task.shard.addrs.data(),
-                                  task.bufferHandle.DeviceData());
+        s = HostToDeviceScatterAsync(stream, task.bufferHandle.Data(),
+                                     task.bufferHandle.DeviceData(), task.shard.addrs.data());
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
@@ -180,7 +179,7 @@ void LoadQueue::TransferOneTask(CacheIOExecutor& executor, ShardTask&& task)
             holder_.push_back(std::move(task));
             return;
         }
-        s = executor.Synchronize();
+        s = stream.Synchronize();
         holder_.clear();
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);
@@ -211,6 +210,12 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
         std::this_thread::yield();
     }
     return Status::OK();
+}
+
+Status LoadQueue::HostToDeviceScatterAsync(CopyStream& stream, void* host, void* hostDevicePtr,
+                                           void** device)
+{
+    return stream.HostToDeviceScatterAsync(host, hostDevicePtr, device, tensorSizes_);
 }
 
 }  // namespace UC::CacheStore

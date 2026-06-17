@@ -150,55 +150,14 @@ private:
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
-        ReadSdmaDirectAliases(config, param);
+        config.Get("cache_sdma_direct", param.cacheSdmaDirect);
+        config.Get("cache_sdma_direct_launch_mode", param.sdmaDirectLaunchMode);
+        config.GetNumber("cache_sdma_direct_max_ready_lanes",
+                         param.sdmaDirectMaxReadyLanes);
+        param.deprecatedSdmaDirectConfig = config.Contains("cache_ffts_direct_h2d") ||
+                                           config.Contains("cache_ffts_direct_h2d_launch_mode") ||
+                                           config.Contains("cache_ffts_direct_h2d_max_ready_lanes");
         return param;
-    }
-    void ReadSdmaDirectAliases(const Detail::Dictionary& config, Config& param)
-    {
-        const auto hasDirect = config.Contains("cache_sdma_direct");
-        const auto hasDirectAlias = config.Contains("cache_ffts_direct_h2d");
-        if (hasDirect) { config.Get("cache_sdma_direct", param.cacheSdmaDirect); }
-        if (hasDirectAlias) {
-            bool aliasValue = false;
-            config.Get("cache_ffts_direct_h2d", aliasValue);
-            if (hasDirect && aliasValue != param.cacheSdmaDirect) {
-                param.sdmaDirectAliasConflict = true;
-            } else if (!hasDirect) {
-                param.cacheSdmaDirect = aliasValue;
-            }
-        }
-
-        const auto hasLaunchMode = config.Contains("cache_sdma_direct_launch_mode");
-        const auto hasLaunchModeAlias = config.Contains("cache_ffts_direct_h2d_launch_mode");
-        if (hasLaunchMode) {
-            config.Get("cache_sdma_direct_launch_mode", param.sdmaDirectLaunchMode);
-        }
-        if (hasLaunchModeAlias) {
-            std::string aliasValue;
-            config.Get("cache_ffts_direct_h2d_launch_mode", aliasValue);
-            if (hasLaunchMode && aliasValue != param.sdmaDirectLaunchMode) {
-                param.sdmaDirectAliasConflict = true;
-            } else if (!hasLaunchMode) {
-                param.sdmaDirectLaunchMode = aliasValue;
-            }
-        }
-
-        const auto hasMaxReadyLanes = config.Contains("cache_sdma_direct_max_ready_lanes");
-        const auto hasMaxReadyLanesAlias =
-            config.Contains("cache_ffts_direct_h2d_max_ready_lanes");
-        if (hasMaxReadyLanes) {
-            config.GetNumber("cache_sdma_direct_max_ready_lanes",
-                             param.sdmaDirectMaxReadyLanes);
-        }
-        if (hasMaxReadyLanesAlias) {
-            size_t aliasValue = 0;
-            config.GetNumber("cache_ffts_direct_h2d_max_ready_lanes", aliasValue);
-            if (hasMaxReadyLanes && aliasValue != param.sdmaDirectMaxReadyLanes) {
-                param.sdmaDirectAliasConflict = true;
-            } else if (!hasMaxReadyLanes) {
-                param.sdmaDirectMaxReadyLanes = aliasValue;
-            }
-        }
     }
     Status CheckSizeConfig(const Config& config)
     {
@@ -229,8 +188,9 @@ private:
                 return Status::InvalidParam("invalid cpu core({})", core);
             }
         }
-        if (config.sdmaDirectAliasConflict) {
-            return Status::InvalidParam("conflicting Cache SDMA Direct config aliases");
+        if (config.deprecatedSdmaDirectConfig) {
+            return Status::InvalidParam(
+                "cache_ffts_direct_h2d config is no longer supported");
         }
         if (config.deviceId == -1) { return Status::OK(); }
         s = CheckSizeConfig(config);

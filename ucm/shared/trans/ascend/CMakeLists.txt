@@ -50,7 +50,10 @@ if(UCM_RUNTIME_ASCEND_SDMA_DIRECT)
         "${ASCEND_ROOT}/aarch64-linux/pkg_inc/profiling"
     )
     list(REMOVE_DUPLICATES ASCEND_FFTS_INCLUDE_DIRS)
-    target_sources(trans PRIVATE ffts_sdma_dispatcher.cc)
+    target_sources(trans PRIVATE
+        ascend_sdma_direct_copier.cc
+        ffts_sdma_dispatcher.cc
+    )
     target_include_directories(trans PUBLIC ${ASCEND_FFTS_INCLUDE_DIRS})
     target_link_libraries(trans PUBLIC ${ASCEND_RUNTIME_LIBRARY})
 endif()

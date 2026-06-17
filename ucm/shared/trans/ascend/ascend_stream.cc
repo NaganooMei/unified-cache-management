@@ -22,6 +22,11 @@
  * SOFTWARE.
  * */
 #include "ascend_stream.h"
+#include <limits>
+
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#include "ascend_sdma_direct_copier.h"
+#endif
 
 namespace UC::Trans {
 
@@ -51,6 +56,46 @@ Status AscendStream::Setup()
     ret = aclrtSubscribeReport(tid, stream_);
     if (ret != ACL_SUCCESS) [[unlikely]] { return Status{ret, std::to_string(ret)}; }
     return Status::OK();
+}
+
+Status AscendStream::Setup(const StreamOptions& options)
+{
+    ResolvedStreamOptions resolved;
+    auto s = ResolveStreamOptions(options, resolved);
+    if (s.Failure()) [[unlikely]] { return s; }
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+    if (resolved.streamOptions.cacheSdmaDirect) {
+        if (resolved.streamOptions.tensorSizes.empty()) {
+            return Status::InvalidParam("invalid tensor sizes for Cache SDMA Direct");
+        }
+        if (resolved.streamOptions.sdmaDirectLaunchMode != "shard" &&
+            resolved.streamOptions.sdmaDirectLaunchMode != "task") {
+            return Status::InvalidParam("invalid Cache SDMA Direct launch mode({})",
+                                        resolved.streamOptions.sdmaDirectLaunchMode);
+        }
+        if (resolved.streamOptions.sdmaDirectMaxReadyLanes == 0 ||
+            resolved.streamOptions.sdmaDirectMaxReadyLanes >
+                static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
+            return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes({})",
+                                        resolved.streamOptions.sdmaDirectMaxReadyLanes);
+        }
+        AscendSdmaDirectCopyConfig config;
+        config.deviceId = resolved.streamOptions.deviceId;
+        config.launchMode = resolved.streamOptions.sdmaDirectLaunchMode;
+        config.maxReadyLanes =
+            static_cast<uint16_t>(resolved.streamOptions.sdmaDirectMaxReadyLanes);
+        sdmaDirectCopier_ = std::make_unique<AscendSdmaDirectCopier>();
+        s = sdmaDirectCopier_->Setup(config);
+        if (s.Failure()) [[unlikely]] {
+            sdmaDirectCopier_.reset();
+            sdmaDirect_ = false;
+            return s;
+        }
+        sdmaDirect_ = true;
+        return Status::OK();
+    }
+#endif
+    return Setup();
 }
 
 Status AscendStream::DeviceToHost(void* device, void* host, size_t size)
@@ -147,6 +192,26 @@ Status AscendStream::HostToDeviceAsync(void* host, void* device[], size_t size, 
     return Status::OK();
 }
 
+Status AscendStream::HostToDeviceScatterAsync(void* host, void* hostDevicePtr, void** device,
+                                              const std::vector<size_t>& sizes)
+{
+    (void)host;
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+    if (sdmaDirect_) { return sdmaDirectCopier_->SubmitLoadObject(hostDevicePtr, device, sizes); }
+#endif
+    return Stream::HostToDeviceScatterAsync(host, hostDevicePtr, device, sizes);
+}
+
+Status AscendStream::DeviceToHostGatherAsync(void** device, void* host, void* hostDevicePtr,
+                                             const std::vector<size_t>& sizes)
+{
+    (void)host;
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+    if (sdmaDirect_) { return sdmaDirectCopier_->SubmitDumpObject(device, hostDevicePtr, sizes); }
+#endif
+    return Stream::DeviceToHostGatherAsync(device, host, hostDevicePtr, sizes);
+}
+
 using Closure = std::function<void(bool)>;
 
 static void Trampoline(void* data)
@@ -158,6 +223,9 @@ static void Trampoline(void* data)
 
 Status Trans::AscendStream::AppendCallback(std::function<void(bool)> cb)
 {
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+    if (sdmaDirect_) { return Status::InvalidParam("Cache SDMA Direct callback unsupported"); }
+#endif
     auto c = new (std::nothrow) Closure{std::move(cb)};
     if (!c) [[unlikely]] { return Status::Error("out of memory for appending callback"); }
     auto ret = aclrtLaunchCallback(Trampoline, (void*)c, ACL_CALLBACK_NO_BLOCK, stream_);
@@ -170,6 +238,9 @@ Status Trans::AscendStream::AppendCallback(std::function<void(bool)> cb)
 
 Status AscendStream::Synchronized()
 {
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+    if (sdmaDirect_) { return sdmaDirectCopier_->Synchronize(); }
+#endif
     auto ret = aclrtSynchronizeStream(stream_);
     if (ret == ACL_SUCCESS) { return Status::OK(); }
     return Status{ret, std::to_string(ret)};
@@ -177,6 +248,9 @@ Status AscendStream::Synchronized()
 
 Status AscendStream::WaitEvent(void* event)
 {
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+    if (sdmaDirect_) { return sdmaDirectCopier_->WaitEvent(event); }
+#endif
     if (event == nullptr) { return Status::OK(); }
     auto ret = aclrtStreamWaitEvent(stream_, static_cast<aclrtEvent>(event));
     if (ret != ACL_SUCCESS) [[unlikely]] { return Status{ret, std::to_string(ret)}; }
