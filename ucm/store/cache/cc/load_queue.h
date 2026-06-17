@@ -25,8 +25,9 @@
 #define UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 
 #include <future>
+#include <string>
 #include <thread>
-#include "copy_stream.h"
+#include "cache_io_executor.h"
 #include "template/hashset.h"
 #include "template/spsc_ring_queue.h"
 #include "thread/latch.h"
@@ -58,6 +59,9 @@ private:
     std::vector<size_t> tensorSizes_{};
     size_t streamNumber_{1};
     bool useGdr_{false};
+    bool cacheFftsDirectH2D_{false};
+    std::string fftsDirectH2DLaunchMode_{"shard"};
+    size_t fftsDirectH2DMaxReadyLanes_{8};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;
@@ -74,10 +78,8 @@ private:
     void DispatchStage();
     void DispatchOneTask(TaskPair&& pair);
     void TransferStage(std::promise<Status>& started);
-    void TransferOneTask(CopyStream& stream, ShardTask&& task);
+    void TransferOneTask(CacheIOExecutor& executor, ShardTask&& task);
     Status WaitBackendTaskReady(ShardTask& task);
-    Status HostToDeviceScatterAsync(std::shared_ptr<Trans::Stream> stream, void* host,
-                                    void** device);
 };
 
 }  // namespace UC::CacheStore

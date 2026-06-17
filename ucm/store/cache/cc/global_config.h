@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include "ucmstore_v1.h"
 
 namespace UC::CacheStore {
@@ -50,6 +51,9 @@ struct Config {
     std::vector<uintptr_t> gpuKvBufferAddrs{};
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
+    bool cacheFftsDirectH2D{false};
+    std::string fftsDirectH2DLaunchMode{"shard"};
+    size_t fftsDirectH2DMaxReadyLanes{8};
 };
 
 }  // namespace UC::CacheStore
