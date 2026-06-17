@@ -3,8 +3,8 @@
  *
  * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
  */
-#ifndef UNIFIEDCACHE_TRANS_ASCEND_FFTS_D2D_DISPATCHER_H
-#define UNIFIEDCACHE_TRANS_ASCEND_FFTS_D2D_DISPATCHER_H
+#ifndef UNIFIEDCACHE_TRANS_ASCEND_FFTS_SDMA_DISPATCHER_H
+#define UNIFIEDCACHE_TRANS_ASCEND_FFTS_SDMA_DISPATCHER_H
 
 #include <acl/acl.h>
 #include <cstdint>
@@ -27,7 +27,7 @@ struct AscendFftsCopySpec {
     size_t size{0};
 };
 
-class FftsD2DDispatcher {
+class FftsSdmaDispatcher {
 public:
     Status BuildCopies(const std::vector<AscendFftsCopySpec>& copies, uint16_t maxReadyLanes,
                        uint16_t& readyContextNum);

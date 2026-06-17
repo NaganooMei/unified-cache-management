@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
-#include "ffts_d2d_dispatcher.h"
+#include "ffts_sdma_dispatcher.h"
 #include "status/status.h"
 
 namespace UC::Trans {
@@ -27,7 +27,7 @@ struct AscendShardIOAggregatorConfig {
 class AscendShardIOAggregator {
     struct InFlightObject {
         std::vector<AscendFftsCopySpec> specs;
-        FftsD2DDispatcher dispatcher;
+        FftsSdmaDispatcher dispatcher;
     };
     struct Lane {
         size_t nextSlotIndex{0};
