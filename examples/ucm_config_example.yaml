@@ -25,13 +25,14 @@ ucm_connectors:
       use_gdr: false
 
       # Enable direct Ascend FFTS SDMA for CacheStore load H2D and dump D2H copies.
+      # This requires building UCM with PLATFORM=ascend-a3.
       # This replaces the normal per-tensor aclrtMemcpyAsync path with FFTS SDMA descriptors.
       # launch_mode:
       #   shard: one FFTS launch per CacheStore shard.
       #   task: one FFTS launch for all shards in one CacheStore task.
-      cache_ffts_direct_h2d: false
-      cache_ffts_direct_h2d_launch_mode: "shard"
-      cache_ffts_direct_h2d_max_ready_lanes: 8
+      cache_sdma_direct: false
+      cache_sdma_direct_launch_mode: "shard"
+      cache_sdma_direct_max_ready_lanes: 8
 
 # When you use UcmNfsStore, you should set enable_event_sync to false.
 enable_event_sync: true

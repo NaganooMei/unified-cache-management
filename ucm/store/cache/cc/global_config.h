@@ -51,9 +51,10 @@ struct Config {
     std::vector<uintptr_t> gpuKvBufferAddrs{};
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
-    bool cacheFftsDirectH2D{false};
-    std::string fftsDirectH2DLaunchMode{"shard"};
-    size_t fftsDirectH2DMaxReadyLanes{8};
+    bool cacheSdmaDirect{false};
+    std::string sdmaDirectLaunchMode{"shard"};
+    size_t sdmaDirectMaxReadyLanes{8};
+    bool sdmaDirectAliasConflict{false};
 };
 
 }  // namespace UC::CacheStore

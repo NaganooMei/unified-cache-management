@@ -12,7 +12,7 @@ add_library(trans STATIC
 if(ASCEND_SUPPORTS_REGISTER_PIN)
     target_compile_definitions(trans PRIVATE ASCEND_SUPPORTS_REGISTER_PIN=1)
 endif()
-if(UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D)
+if(UCM_RUNTIME_ASCEND_SDMA_DIRECT)
     find_library(ASCEND_RUNTIME_LIBRARY runtime
         PATHS
             "${ASCEND_ROOT}/lib64"
@@ -34,7 +34,7 @@ if(UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D)
         NO_DEFAULT_PATH
     )
     if(NOT ASCEND_RUNTIME_LIBRARY OR NOT ASCEND_FFTS_INCLUDE_DIR)
-        message(FATAL_ERROR "Ascend FFTS direct H2D/D2H requires FFTS headers and libruntime.")
+        message(FATAL_ERROR "RUNTIME_ENVIRONMENT=ascend-a3 requires FFTS headers and libruntime for Cache SDMA Direct.")
     endif()
     get_filename_component(ASCEND_FFTS_INCLUDE_PARENT "${ASCEND_FFTS_INCLUDE_DIR}" DIRECTORY)
     set(ASCEND_FFTS_INCLUDE_DIRS "${ASCEND_FFTS_INCLUDE_DIR}")
@@ -50,12 +50,9 @@ if(UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D)
         "${ASCEND_ROOT}/aarch64-linux/pkg_inc/profiling"
     )
     list(REMOVE_DUPLICATES ASCEND_FFTS_INCLUDE_DIRS)
-    target_sources(trans PRIVATE ffts_d2d_dispatcher.cc)
+    target_sources(trans PRIVATE ffts_sdma_dispatcher.cc)
     target_include_directories(trans PUBLIC ${ASCEND_FFTS_INCLUDE_DIRS})
-    target_compile_definitions(trans PUBLIC UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D=1)
     target_link_libraries(trans PUBLIC ${ASCEND_RUNTIME_LIBRARY})
-else()
-    target_compile_definitions(trans PUBLIC UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D=0)
 endif()
 target_link_libraries(trans PUBLIC
     fmt

@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "ffts_d2d_dispatcher.h"
+#include "ffts_sdma_dispatcher.h"
 #include <algorithm>
 #include <limits>
 #include "logger/logger.h"
@@ -24,13 +24,13 @@ uint64_t PtrToU64(const void* ptr)
 }
 }  // namespace
 
-void FftsD2DDispatcher::Reset()
+void FftsSdmaDispatcher::Reset()
 {
     contexts_.clear();
     completed_ = false;
 }
 
-Status FftsD2DDispatcher::AddMemcpy(void* dst, const void* src, size_t size)
+Status FftsSdmaDispatcher::AddMemcpy(void* dst, const void* src, size_t size)
 {
     if (completed_) { return Status::Error("FFTS dispatcher already launched"); }
     if (dst == nullptr || src == nullptr || size == 0) {
@@ -50,7 +50,7 @@ Status FftsD2DDispatcher::AddMemcpy(void* dst, const void* src, size_t size)
     return Status::OK();
 }
 
-Status FftsD2DDispatcher::AddDependency(uint32_t predecessorId, uint32_t successorId)
+Status FftsSdmaDispatcher::AddDependency(uint32_t predecessorId, uint32_t successorId)
 {
     if (predecessorId >= contexts_.size() || successorId >= contexts_.size()) {
         return Status::InvalidParam("invalid FFTS dependency({},{})", predecessorId, successorId);
@@ -69,8 +69,8 @@ Status FftsD2DDispatcher::AddDependency(uint32_t predecessorId, uint32_t success
     return Status::OK();
 }
 
-Status FftsD2DDispatcher::BuildCopies(const std::vector<AscendFftsCopySpec>& copies,
-                                      uint16_t maxReadyLanes, uint16_t& readyContextNum)
+Status FftsSdmaDispatcher::BuildCopies(const std::vector<AscendFftsCopySpec>& copies,
+                                       uint16_t maxReadyLanes, uint16_t& readyContextNum)
 {
     readyContextNum = 0;
     Reset();
@@ -98,7 +98,7 @@ Status FftsD2DDispatcher::BuildCopies(const std::vector<AscendFftsCopySpec>& cop
     return Status::OK();
 }
 
-Status FftsD2DDispatcher::Launch(aclrtStream stream, uint16_t readyContextNum)
+Status FftsSdmaDispatcher::Launch(aclrtStream stream, uint16_t readyContextNum)
 {
     if (stream == nullptr) { return Status::InvalidParam("invalid FFTS stream"); }
     if (contexts_.empty()) { return Status::InvalidParam("empty FFTS contexts"); }
@@ -129,8 +129,8 @@ Status FftsD2DDispatcher::Launch(aclrtStream stream, uint16_t readyContextNum)
     return Status{static_cast<int32_t>(ret), "rtFftsPlusTaskLaunchWithFlag failed"};
 }
 
-void FftsD2DDispatcher::BuildSdmaCtx(void* dst, const void* src, size_t size,
-                                     rtFftsPlusSdmaCtx_t* ctx)
+void FftsSdmaDispatcher::BuildSdmaCtx(void* dst, const void* src, size_t size,
+                                      rtFftsPlusSdmaCtx_t* ctx)
 {
     constexpr uint32_t kShift = 32;
     constexpr uint64_t kLowMask = 0xFFFFFFFFULL;

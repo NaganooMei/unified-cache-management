@@ -503,7 +503,7 @@ Status TransBuffer::Setup(const Config& config)
         if (!config.shareBufferEnable) {
             strategy_ = std::make_shared<LocalBufferStrategy>(
                 config.deviceId, config.shardSize, config.bufferCapacity,
-                config.loadExclusiveBufferNumber, config.ioDirect, config.cacheFftsDirectH2D);
+                config.loadExclusiveBufferNumber, config.ioDirect, config.cacheSdmaDirect);
         } else if (config.deviceId >= 0) {
             strategy_ = std::make_shared<SharedBufferStrategy>(
                 config.uniqueId, config.deviceId, config.shardSize, config.bufferCapacity,
