@@ -54,7 +54,7 @@ struct Config {
     bool cacheSdmaDirect{false};
     std::string sdmaDirectLaunchMode{"shard"};
     size_t sdmaDirectMaxReadyLanes{8};
-    bool sdmaDirectAliasConflict{false};
+    bool deprecatedSdmaDirectConfig{false};
 };
 
 }  // namespace UC::CacheStore

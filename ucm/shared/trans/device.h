@@ -34,6 +34,7 @@ public:
     Status Setup(int32_t deviceId);
     std::unique_ptr<Stream> MakeStream();
     std::shared_ptr<Stream> MakeSharedStream();
+    std::shared_ptr<Stream> MakeSharedStream(const StreamOptions& options);
     std::unique_ptr<Stream> MakeGdrStream();
     std::unique_ptr<Stream> MakeSMStream();
     std::unique_ptr<Buffer> MakeBuffer();
