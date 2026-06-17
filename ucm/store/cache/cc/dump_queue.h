@@ -58,9 +58,9 @@ private:
     std::vector<size_t> tensorSizes_{};
     size_t streamNumber_{1};
     bool useGdr_{false};
-    bool cacheFftsDirectH2D_{false};
-    std::string fftsDirectH2DLaunchMode_{"shard"};
-    size_t fftsDirectH2DMaxReadyLanes_{8};
+    bool cacheSdmaDirect_{false};
+    std::string sdmaDirectLaunchMode_{"shard"};
+    size_t sdmaDirectMaxReadyLanes_{8};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<DumpCtx> dumping_;

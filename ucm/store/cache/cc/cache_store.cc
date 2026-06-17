@@ -29,8 +29,8 @@
 #include "trans/cuda/gdr/gdr_config.h"
 #include "trans_manager.h"
 
-#ifndef UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
-#define UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D 0
+#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
 #endif
 
 namespace UC::CacheStore {
@@ -150,11 +150,55 @@ private:
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
-        config.Get("cache_ffts_direct_h2d", param.cacheFftsDirectH2D);
-        config.Get("cache_ffts_direct_h2d_launch_mode", param.fftsDirectH2DLaunchMode);
-        config.GetNumber("cache_ffts_direct_h2d_max_ready_lanes",
-                         param.fftsDirectH2DMaxReadyLanes);
+        ReadSdmaDirectAliases(config, param);
         return param;
+    }
+    void ReadSdmaDirectAliases(const Detail::Dictionary& config, Config& param)
+    {
+        const auto hasDirect = config.Contains("cache_sdma_direct");
+        const auto hasDirectAlias = config.Contains("cache_ffts_direct_h2d");
+        if (hasDirect) { config.Get("cache_sdma_direct", param.cacheSdmaDirect); }
+        if (hasDirectAlias) {
+            bool aliasValue = false;
+            config.Get("cache_ffts_direct_h2d", aliasValue);
+            if (hasDirect && aliasValue != param.cacheSdmaDirect) {
+                param.sdmaDirectAliasConflict = true;
+            } else if (!hasDirect) {
+                param.cacheSdmaDirect = aliasValue;
+            }
+        }
+
+        const auto hasLaunchMode = config.Contains("cache_sdma_direct_launch_mode");
+        const auto hasLaunchModeAlias = config.Contains("cache_ffts_direct_h2d_launch_mode");
+        if (hasLaunchMode) {
+            config.Get("cache_sdma_direct_launch_mode", param.sdmaDirectLaunchMode);
+        }
+        if (hasLaunchModeAlias) {
+            std::string aliasValue;
+            config.Get("cache_ffts_direct_h2d_launch_mode", aliasValue);
+            if (hasLaunchMode && aliasValue != param.sdmaDirectLaunchMode) {
+                param.sdmaDirectAliasConflict = true;
+            } else if (!hasLaunchMode) {
+                param.sdmaDirectLaunchMode = aliasValue;
+            }
+        }
+
+        const auto hasMaxReadyLanes = config.Contains("cache_sdma_direct_max_ready_lanes");
+        const auto hasMaxReadyLanesAlias =
+            config.Contains("cache_ffts_direct_h2d_max_ready_lanes");
+        if (hasMaxReadyLanes) {
+            config.GetNumber("cache_sdma_direct_max_ready_lanes",
+                             param.sdmaDirectMaxReadyLanes);
+        }
+        if (hasMaxReadyLanesAlias) {
+            size_t aliasValue = 0;
+            config.GetNumber("cache_ffts_direct_h2d_max_ready_lanes", aliasValue);
+            if (hasMaxReadyLanes && aliasValue != param.sdmaDirectMaxReadyLanes) {
+                param.sdmaDirectAliasConflict = true;
+            } else if (!hasMaxReadyLanes) {
+                param.sdmaDirectMaxReadyLanes = aliasValue;
+            }
+        }
     }
     Status CheckSizeConfig(const Config& config)
     {
@@ -185,26 +229,29 @@ private:
                 return Status::InvalidParam("invalid cpu core({})", core);
             }
         }
+        if (config.sdmaDirectAliasConflict) {
+            return Status::InvalidParam("conflicting Cache SDMA Direct config aliases");
+        }
         if (config.deviceId == -1) { return Status::OK(); }
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
-#if !UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
-        if (config.cacheFftsDirectH2D) {
-            return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
+#if !UCM_RUNTIME_ASCEND_SDMA_DIRECT
+        if (config.cacheSdmaDirect) {
+            return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
         }
 #endif
-        if (config.cacheFftsDirectH2D) {
-            if (config.fftsDirectH2DLaunchMode != "shard" &&
-                config.fftsDirectH2DLaunchMode != "task") {
-                return Status::InvalidParam("invalid Cache FFTS direct H2D/D2H launch mode({})",
-                                            config.fftsDirectH2DLaunchMode);
+        if (config.cacheSdmaDirect) {
+            if (config.sdmaDirectLaunchMode != "shard" &&
+                config.sdmaDirectLaunchMode != "task") {
+                return Status::InvalidParam("invalid Cache SDMA Direct launch mode({})",
+                                            config.sdmaDirectLaunchMode);
             }
-            if (config.fftsDirectH2DMaxReadyLanes == 0) {
-                return Status::InvalidParam("invalid Cache FFTS direct H2D/D2H max ready lanes");
+            if (config.sdmaDirectMaxReadyLanes == 0) {
+                return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes");
             }
-            if (config.fftsDirectH2DMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
-                return Status::InvalidParam("too many Cache FFTS direct H2D/D2H ready lanes({})",
-                                            config.fftsDirectH2DMaxReadyLanes);
+            if (config.sdmaDirectMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
+                return Status::InvalidParam("too many Cache SDMA Direct ready lanes({})",
+                                            config.sdmaDirectMaxReadyLanes);
             }
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
@@ -249,10 +296,9 @@ private:
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, config.runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
-        UC_INFO("Set {}::CacheFftsDirectH2D to {}.", ns, config.cacheFftsDirectH2D);
-        UC_INFO("Set {}::FftsDirectH2DLaunchMode to {}.", ns, config.fftsDirectH2DLaunchMode);
-        UC_INFO("Set {}::FftsDirectH2DMaxReadyLanes to {}.", ns,
-                config.fftsDirectH2DMaxReadyLanes);
+        UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
+        UC_INFO("Set {}::SdmaDirectLaunchMode to {}.", ns, config.sdmaDirectLaunchMode);
+        UC_INFO("Set {}::SdmaDirectMaxReadyLanes to {}.", ns, config.sdmaDirectMaxReadyLanes);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

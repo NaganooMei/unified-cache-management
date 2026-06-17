@@ -17,8 +17,8 @@ public:
     virtual ~CacheIOExecutor() = default;
     virtual Status Setup(const Config& config) = 0;
     virtual Status WaitEvent(void* event) = 0;
-    virtual Status HostToDevice(void* host, void** devices, const void* deviceHost) = 0;
-    virtual Status DeviceToHost(void** devices, void* host, void* deviceHost) = 0;
+    virtual Status HostToDevice(void* host, void** devices, const void* hostDevicePtr) = 0;
+    virtual Status DeviceToHost(void** devices, void* host, void* hostDevicePtr) = 0;
     virtual Status Synchronize() = 0;
 };
 

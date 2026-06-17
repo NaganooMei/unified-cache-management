@@ -44,9 +44,9 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     tensorSizes_ = config.tensorSizes;
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
-    cacheFftsDirectH2D_ = config.cacheFftsDirectH2D;
-    fftsDirectH2DLaunchMode_ = config.fftsDirectH2DLaunchMode;
-    fftsDirectH2DMaxReadyLanes_ = config.fftsDirectH2DMaxReadyLanes;
+    cacheSdmaDirect_ = config.cacheSdmaDirect;
+    sdmaDirectLaunchMode_ = config.sdmaDirectLaunchMode;
+    sdmaDirectMaxReadyLanes_ = config.sdmaDirectMaxReadyLanes;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -75,9 +75,9 @@ void DumpQueue::DispatchStage(std::promise<Status>& started)
     transferConfig.tensorSizes = tensorSizes_;
     transferConfig.streamNumber = streamNumber_;
     transferConfig.useGdr = useGdr_;
-    transferConfig.cacheFftsDirectH2D = cacheFftsDirectH2D_;
-    transferConfig.fftsDirectH2DLaunchMode = fftsDirectH2DLaunchMode_;
-    transferConfig.fftsDirectH2DMaxReadyLanes = fftsDirectH2DMaxReadyLanes_;
+    transferConfig.cacheSdmaDirect = cacheSdmaDirect_;
+    transferConfig.sdmaDirectLaunchMode = sdmaDirectLaunchMode_;
+    transferConfig.sdmaDirectMaxReadyLanes = sdmaDirectMaxReadyLanes_;
 
     auto executor = MakeCacheIOExecutor(transferConfig);
     auto s = executor->Setup(transferConfig);

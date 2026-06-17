@@ -13,13 +13,13 @@
 #include "copy_stream.h"
 #include "logger/logger.h"
 
-#ifndef UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
-#define UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D 0
+#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
 #endif
 
-#if UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
 #include <acl/acl.h>
-#include "trans/ascend/ffts_d2d_dispatcher.h"
+#include "trans/ascend/ffts_sdma_dispatcher.h"
 #endif
 
 namespace UC::CacheStore {
@@ -72,15 +72,14 @@ public:
     Status Synchronize() override { return stream_.Synchronize(); }
 };
 
-#if UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
-class FftsDirectIOExecutor : public CacheIOExecutor {
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+class FftsSdmaDirectIOExecutor : public CacheIOExecutor {
     enum class LaunchMode { SHARD, TASK };
     struct InFlightObject {
         std::vector<Trans::AscendFftsCopySpec> specs;
-        Trans::FftsD2DDispatcher dispatcher;
+        Trans::FftsSdmaDispatcher dispatcher;
     };
 
-    CopyStream copyStream_;
     int32_t deviceId_{-1};
     aclrtStream fftsStream_{nullptr};
     std::vector<size_t> tensorSizes_{};
@@ -91,53 +90,49 @@ class FftsDirectIOExecutor : public CacheIOExecutor {
     bool setup_{false};
 
 public:
-    ~FftsDirectIOExecutor() override { Cleanup(); }
+    ~FftsSdmaDirectIOExecutor() override { Cleanup(); }
 
     Status Setup(const Config& config) override
     {
         Cleanup();
         if (config.deviceId < 0) { return Status::InvalidParam("invalid device id"); }
-        if (config.fftsDirectH2DMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
-            return Status::InvalidParam("too many FFTS direct H2D/D2H ready lanes({})",
-                                        config.fftsDirectH2DMaxReadyLanes);
+        if (config.sdmaDirectMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
+            return Status::InvalidParam("too many Cache SDMA Direct ready lanes({})",
+                                        config.sdmaDirectMaxReadyLanes);
         }
         tensorSizes_ = config.tensorSizes;
-        maxReadyLanes_ = static_cast<uint16_t>(config.fftsDirectH2DMaxReadyLanes);
-        launchMode_ = config.fftsDirectH2DLaunchMode == "task" ? LaunchMode::TASK
-                                                               : LaunchMode::SHARD;
+        maxReadyLanes_ = static_cast<uint16_t>(config.sdmaDirectMaxReadyLanes);
+        launchMode_ =
+            config.sdmaDirectLaunchMode == "task" ? LaunchMode::TASK : LaunchMode::SHARD;
 
-        auto s = copyStream_.Setup(config.deviceId, config.streamNumber, config.useGdr);
+        auto s = AclStatus(aclrtSetDevice(config.deviceId), "aclrtSetDevice");
         if (s.Failure()) { return s; }
-        s = AclStatus(aclrtSetDevice(config.deviceId), "aclrtSetDevice");
-        if (s.Failure()) { return s; }
-        s = AclStatus(aclrtCreateStream(&fftsStream_), "aclrtCreateStream(ffts-direct-io)");
+        s = AclStatus(aclrtCreateStream(&fftsStream_), "aclrtCreateStream(sdma-direct-io)");
         if (s.Failure()) { return s; }
 
         deviceId_ = config.deviceId;
         setup_ = true;
         const auto objectBytes =
             std::accumulate(tensorSizes_.begin(), tensorSizes_.end(), static_cast<size_t>(0));
-        UC_INFO("Set Cache FFTS direct H2D/D2H mode={}, streams={}, objectBytes={}, tensors={}, "
+        UC_INFO("Set Cache SDMA Direct mode={}, objectBytes={}, tensors={}, "
                 "maxReadyLanes={}.",
-                config.fftsDirectH2DLaunchMode, config.streamNumber, objectBytes,
-                tensorSizes_.size(), maxReadyLanes_);
+                config.sdmaDirectLaunchMode, objectBytes, tensorSizes_.size(), maxReadyLanes_);
         return Status::OK();
     }
 
     Status WaitEvent(void* event) override
     {
-        auto s = copyStream_.WaitEvent(event);
-        if (s.Failure() || event == nullptr) { return s; }
-        s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+        if (event == nullptr) { return Status::OK(); }
+        auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
         if (s.Failure()) { return s; }
         return AclStatus(aclrtStreamWaitEvent(fftsStream_, static_cast<aclrtEvent>(event)),
-                         "aclrtStreamWaitEvent(ffts-direct-io)");
+                         "aclrtStreamWaitEvent(sdma-direct-io)");
     }
 
-    Status HostToDevice(void*, void** devices, const void* deviceHost) override
+    Status HostToDevice(void*, void** devices, const void* hostDevicePtr) override
     {
         std::vector<Trans::AscendFftsCopySpec> specs;
-        auto s = BuildHostToDeviceSpecs(deviceHost, devices, specs);
+        auto s = BuildHostToDeviceSpecs(hostDevicePtr, devices, specs);
         if (s.Failure()) { return s; }
         if (launchMode_ == LaunchMode::TASK) {
             pendingSpecs_.insert(pendingSpecs_.end(), specs.begin(), specs.end());
@@ -146,10 +141,10 @@ public:
         return LaunchSpecs(std::move(specs));
     }
 
-    Status DeviceToHost(void** devices, void*, void* deviceHost) override
+    Status DeviceToHost(void** devices, void*, void* hostDevicePtr) override
     {
         std::vector<Trans::AscendFftsCopySpec> specs;
-        auto s = BuildDeviceToHostSpecs(devices, deviceHost, specs);
+        auto s = BuildDeviceToHostSpecs(devices, hostDevicePtr, specs);
         if (s.Failure()) { return s; }
         if (launchMode_ == LaunchMode::TASK) {
             pendingSpecs_.insert(pendingSpecs_.end(), specs.begin(), specs.end());
@@ -162,15 +157,14 @@ public:
     {
         auto s = LaunchPendingTask();
         if (s.Failure()) { return s; }
-        if (fftsStream_ != nullptr) {
-            s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
-            if (s.Failure()) { return s; }
-            s = AclStatus(aclrtSynchronizeStream(fftsStream_),
-                          "aclrtSynchronizeStream(ffts-direct-io)");
-            if (s.Failure()) { return s; }
-            inFlight_.clear();
-        }
-        return copyStream_.Synchronize();
+        if (fftsStream_ == nullptr) { return Status::OK(); }
+        s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+        if (s.Failure()) { return s; }
+        s = AclStatus(aclrtSynchronizeStream(fftsStream_),
+                      "aclrtSynchronizeStream(sdma-direct-io)");
+        if (s.Failure()) { return s; }
+        inFlight_.clear();
+        return Status::OK();
     }
 
 private:
@@ -181,38 +175,38 @@ private:
         return Status{static_cast<int32_t>(ret), expr};
     }
 
-    Status BuildHostToDeviceSpecs(const void* deviceHost, void** devices,
+    Status BuildHostToDeviceSpecs(const void* hostDevicePtr, void** devices,
                                   std::vector<Trans::AscendFftsCopySpec>& specs)
     {
-        if (!setup_) { return Status::Error("FFTS direct H2D/D2H executor is not setup"); }
-        if (deviceHost == nullptr || devices == nullptr) {
-            return Status::InvalidParam("invalid FFTS direct H2D pointers");
+        if (!setup_) { return Status::Error("Cache SDMA Direct executor is not setup"); }
+        if (hostDevicePtr == nullptr || devices == nullptr) {
+            return Status::InvalidParam("invalid Cache SDMA Direct H2D pointers");
         }
 
         const auto number = tensorSizes_.size();
         specs.reserve(number);
         for (size_t i = 0, offset = 0; i < number; i++) {
             auto size = tensorSizes_[i];
-            auto* src = static_cast<const std::byte*>(deviceHost) + offset;
+            auto* src = static_cast<const std::byte*>(hostDevicePtr) + offset;
             specs.push_back({devices[i], src, size});
             offset += size;
         }
         return Status::OK();
     }
 
-    Status BuildDeviceToHostSpecs(void** devices, void* deviceHost,
+    Status BuildDeviceToHostSpecs(void** devices, void* hostDevicePtr,
                                   std::vector<Trans::AscendFftsCopySpec>& specs)
     {
-        if (!setup_) { return Status::Error("FFTS direct H2D/D2H executor is not setup"); }
-        if (deviceHost == nullptr || devices == nullptr) {
-            return Status::InvalidParam("invalid FFTS direct D2H pointers");
+        if (!setup_) { return Status::Error("Cache SDMA Direct executor is not setup"); }
+        if (hostDevicePtr == nullptr || devices == nullptr) {
+            return Status::InvalidParam("invalid Cache SDMA Direct D2H pointers");
         }
 
         const auto number = tensorSizes_.size();
         specs.reserve(number);
         for (size_t i = 0, offset = 0; i < number; i++) {
             auto size = tensorSizes_[i];
-            auto* dst = static_cast<std::byte*>(deviceHost) + offset;
+            auto* dst = static_cast<std::byte*>(hostDevicePtr) + offset;
             specs.push_back({dst, devices[i], size});
             offset += size;
         }
@@ -257,38 +251,38 @@ private:
     }
 };
 #else
-class UnavailableFftsDirectIOExecutor : public CacheIOExecutor {
+class UnavailableFftsSdmaDirectIOExecutor : public CacheIOExecutor {
 public:
     Status Setup(const Config&) override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
+        return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
     }
     Status WaitEvent(void*) override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
+        return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
     }
     Status HostToDevice(void*, void**, const void*) override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
+        return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
     }
     Status DeviceToHost(void**, void*, void*) override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
+        return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
     }
     Status Synchronize() override
     {
-        return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
+        return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
     }
 };
 #endif
 
 std::unique_ptr<CacheIOExecutor> MakeCacheIOExecutor(const Config& config)
 {
-    if (config.cacheFftsDirectH2D) {
-#if UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
-        return std::make_unique<FftsDirectIOExecutor>();
+    if (config.cacheSdmaDirect) {
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+        return std::make_unique<FftsSdmaDirectIOExecutor>();
 #else
-        return std::make_unique<UnavailableFftsDirectIOExecutor>();
+        return std::make_unique<UnavailableFftsSdmaDirectIOExecutor>();
 #endif
     }
     return std::make_unique<TensorIOExecutor>();
