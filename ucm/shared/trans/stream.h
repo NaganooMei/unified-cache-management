@@ -24,15 +24,45 @@
 #ifndef UNIFIEDCACHE_TRANS_STREAM_H
 #define UNIFIEDCACHE_TRANS_STREAM_H
 
+#include <cstdint>
 #include <functional>
+#include <vector>
 #include "status/status.h"
 
+#ifndef UCM_RUNTIME_ASCEND_IO_AGGREGATION
+#define UCM_RUNTIME_ASCEND_IO_AGGREGATION 0
+#endif
+#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
+#endif
+
 namespace UC::Trans {
+
+struct StreamOptions {
+    int32_t deviceId{-1};
+    size_t streamNumber{1};
+    std::vector<size_t> tensorSizes{};
+    bool cacheIOAggregation{false};
+    size_t ioAggregationPipelineDepth{2};
+    size_t ioAggregationMaxReadyLanes{8};
+    bool cacheSdmaDirect{false};
+    size_t sdmaDirectMaxReadyLanes{8};
+};
+
+struct ResolvedStreamOptions {
+    size_t submitterNumber{1};
+    StreamOptions streamOptions{};
+};
 
 class Stream {
 public:
     virtual ~Stream() = default;
     virtual Status Setup() = 0;
+    virtual Status Setup(const StreamOptions& options)
+    {
+        (void)options;
+        return Setup();
+    }
 
     virtual Status DeviceToHost(void* device, void* host, size_t size) = 0;
     virtual Status DeviceToHost(void* device[], void* host[], size_t size, size_t number) = 0;
@@ -47,11 +77,56 @@ public:
     virtual Status HostToDeviceAsync(void* host, void* device, size_t size) = 0;
     virtual Status HostToDeviceAsync(void* host[], void* device[], size_t size, size_t number) = 0;
     virtual Status HostToDeviceAsync(void* host, void* device[], size_t size, size_t number) = 0;
+    virtual Status HostToDeviceScatterAsync(void* host, void* hostDevicePtr, void** device,
+                                            const std::vector<size_t>& sizes)
+    {
+        (void)hostDevicePtr;
+        size_t offset = 0;
+        for (size_t i = 0; i < sizes.size(); ++i) {
+            auto* pHost = static_cast<void*>(static_cast<int8_t*>(host) + offset);
+            auto s = HostToDeviceAsync(pHost, device[i], sizes[i]);
+            if (s.Failure()) [[unlikely]] { return s; }
+            offset += sizes[i];
+        }
+        return Status::OK();
+    }
+    virtual Status DeviceToHostGatherAsync(void** device, void* host, void* hostDevicePtr,
+                                           const std::vector<size_t>& sizes)
+    {
+        (void)hostDevicePtr;
+        size_t offset = 0;
+        for (size_t i = 0; i < sizes.size(); ++i) {
+            auto* pHost = static_cast<void*>(static_cast<int8_t*>(host) + offset);
+            auto s = DeviceToHostAsync(device[i], pHost, sizes[i]);
+            if (s.Failure()) [[unlikely]] { return s; }
+            offset += sizes[i];
+        }
+        return Status::OK();
+    }
 
     virtual Status AppendCallback(std::function<void(bool)> cb) = 0;
     virtual Status Synchronized() = 0;
     virtual Status WaitEvent(void* event) = 0;
 };
+
+inline Status ResolveStreamOptions(const StreamOptions& options, ResolvedStreamOptions& resolved)
+{
+    if (options.streamNumber == 0) { return Status::InvalidParam("invalid stream number"); }
+    if (options.cacheIOAggregation && options.cacheSdmaDirect) {
+        return Status::InvalidParam("conflicting Ascend copy options");
+    }
+    if (options.cacheIOAggregation && !UCM_RUNTIME_ASCEND_IO_AGGREGATION) {
+        return Status::InvalidParam("Cache IO aggregation is not compiled");
+    }
+    if (options.cacheSdmaDirect && !UCM_RUNTIME_ASCEND_SDMA_DIRECT) {
+        return Status::InvalidParam("Cache SDMA Direct is not compiled");
+    }
+
+    resolved.streamOptions = options;
+    resolved.submitterNumber =
+        (options.cacheIOAggregation || options.cacheSdmaDirect) ? 1 : options.streamNumber;
+    return Status::OK();
+}
 
 }  // namespace UC::Trans
 

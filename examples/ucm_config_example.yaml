@@ -28,6 +28,8 @@ ucm_connectors:
       # This aggregates one shard into one IO object to reduce many small transfers.
       # This requires building UCM with PLATFORM=ascend.
       cache_io_aggregation: false
+      cache_io_aggregation_pipeline_depth: 2
+      cache_io_aggregation_max_ready_lanes: 8
 
 # When you use UcmNfsStore, you should set enable_event_sync to false.
 enable_event_sync: true

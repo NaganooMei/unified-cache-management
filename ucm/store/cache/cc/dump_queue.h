@@ -26,7 +26,7 @@
 
 #include <future>
 #include <thread>
-#include "cache_io_executor.h"
+#include "copy_stream.h"
 #include "template/hashset.h"
 #include "template/spsc_ring_queue.h"
 #include "thread/latch.h"
@@ -73,8 +73,10 @@ public:
 
 private:
     void DispatchStage(std::promise<Status>& started);
-    void DispatchOneTask(CacheIOExecutor& executor, TaskPair&& pair);
-    Status DumpOneTask(CacheIOExecutor& executor, TaskPtr task);
+    void DispatchOneTask(CopyStream& stream, TaskPair&& pair);
+    Status DumpOneTask(CopyStream& stream, TaskPtr task);
+    Status DeviceToHostGatherAsync(CopyStream& stream, void** device, void* host,
+                                   void* hostDevicePtr);
     void BackendDumpStage();
 };
 

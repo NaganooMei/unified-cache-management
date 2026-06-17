@@ -23,6 +23,7 @@
  * */
 #include <memory>
 #include <numeric>
+#include <limits>
 #include "buffer_manager.h"
 #include "logger/logger.h"
 #include "trans/cuda/gdr/gdr_config.h"
@@ -150,6 +151,10 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_io_aggregation", param.cacheIOAggregation);
+        config.GetNumber("cache_io_aggregation_pipeline_depth",
+                         param.ioAggregationPipelineDepth);
+        config.GetNumber("cache_io_aggregation_max_ready_lanes",
+                         param.ioAggregationMaxReadyLanes);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -193,6 +198,12 @@ private:
         if (config.cacheIOAggregation &&
             (config.ioAggregationPipelineDepth == 0 || config.ioAggregationMaxReadyLanes == 0)) {
             return Status::InvalidParam("invalid Cache IO aggregation config");
+        }
+        if (config.cacheIOAggregation &&
+            config.ioAggregationMaxReadyLanes >
+                static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
+            return Status::InvalidParam("invalid Cache IO aggregation max ready lanes({})",
+                                        config.ioAggregationMaxReadyLanes);
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
         if (bufferNumber < 1024 || bufferNumber < config.loadExclusiveBufferNumber * 2) {
@@ -239,6 +250,10 @@ private:
         UC_INFO("Set {}::CacheIOAggregation to {}.", ns, config.cacheIOAggregation);
         if (config.cacheIOAggregation) {
             UC_INFO("Set {}::AggregationObject to CacheStoreShard.", ns);
+            UC_INFO("Set {}::IOAggregationPipelineDepth to {}.", ns,
+                    config.ioAggregationPipelineDepth);
+            UC_INFO("Set {}::IOAggregationMaxReadyLanes to {}.", ns,
+                    config.ioAggregationMaxReadyLanes);
         }
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());

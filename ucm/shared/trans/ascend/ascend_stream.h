@@ -26,20 +26,30 @@
 
 #include <acl/acl.h>
 #include <atomic>
+#include <memory>
 #include <thread>
 #include "trans/stream.h"
 
 namespace UC::Trans {
+
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+class AscendShardIOAggregator;
+#endif
 
 class AscendStream : public Stream {
 protected:
     aclrtStream stream_{nullptr};
     std::atomic_bool stop_{false};
     std::thread cbThread_;
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+    bool ioAggregation_{false};
+    std::unique_ptr<AscendShardIOAggregator> ioAggregator_{nullptr};
+#endif
 
 public:
     ~AscendStream() override;
     Status Setup() override;
+    Status Setup(const StreamOptions& options) override;
 
     Status DeviceToHost(void* device, void* host, size_t size) override;
     Status DeviceToHost(void* device[], void* host[], size_t size, size_t number) override;
@@ -54,6 +64,10 @@ public:
     Status HostToDeviceAsync(void* host, void* device, size_t size) override;
     Status HostToDeviceAsync(void* host[], void* device[], size_t size, size_t number) override;
     Status HostToDeviceAsync(void* host, void* device[], size_t size, size_t number) override;
+    Status HostToDeviceScatterAsync(void* host, void* hostDevicePtr, void** device,
+                                    const std::vector<size_t>& sizes) override;
+    Status DeviceToHostGatherAsync(void** device, void* host, void* hostDevicePtr,
+                                   const std::vector<size_t>& sizes) override;
 
     Status AppendCallback(std::function<void(bool)> cb) override;
     Status Synchronized() override;

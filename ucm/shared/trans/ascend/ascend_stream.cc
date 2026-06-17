@@ -22,6 +22,11 @@
  * SOFTWARE.
  * */
 #include "ascend_stream.h"
+#include <numeric>
+
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+#include "ascend_shard_io_aggregator.h"
+#endif
 
 namespace UC::Trans {
 
@@ -51,6 +56,41 @@ Status AscendStream::Setup()
     ret = aclrtSubscribeReport(tid, stream_);
     if (ret != ACL_SUCCESS) [[unlikely]] { return Status{ret, std::to_string(ret)}; }
     return Status::OK();
+}
+
+Status AscendStream::Setup(const StreamOptions& options)
+{
+    ResolvedStreamOptions resolved;
+    auto s = ResolveStreamOptions(options, resolved);
+    if (s.Failure()) [[unlikely]] { return s; }
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+    if (resolved.streamOptions.cacheIOAggregation) {
+        if (resolved.streamOptions.tensorSizes.empty()) {
+            return Status::InvalidParam("invalid tensor sizes for Cache IO aggregation");
+        }
+        const auto objectBytes = std::accumulate(resolved.streamOptions.tensorSizes.begin(),
+                                                resolved.streamOptions.tensorSizes.end(),
+                                                static_cast<size_t>(0));
+        AscendShardIOAggregatorConfig config;
+        config.deviceId = resolved.streamOptions.deviceId;
+        config.streamNumber = resolved.streamOptions.streamNumber;
+        config.pipelineDepth = resolved.streamOptions.ioAggregationPipelineDepth;
+        config.maxReadyLanes =
+            static_cast<uint16_t>(resolved.streamOptions.ioAggregationMaxReadyLanes);
+        config.objectBytes = objectBytes;
+        config.maxFragments = resolved.streamOptions.tensorSizes.size();
+        ioAggregator_ = std::make_unique<AscendShardIOAggregator>();
+        s = ioAggregator_->Setup(config);
+        if (s.Failure()) [[unlikely]] {
+            ioAggregator_.reset();
+            ioAggregation_ = false;
+            return s;
+        }
+        ioAggregation_ = true;
+        return Status::OK();
+    }
+#endif
+    return Setup();
 }
 
 Status AscendStream::DeviceToHost(void* device, void* host, size_t size)
@@ -147,6 +187,26 @@ Status AscendStream::HostToDeviceAsync(void* host, void* device[], size_t size, 
     return Status::OK();
 }
 
+Status AscendStream::HostToDeviceScatterAsync(void* host, void* hostDevicePtr, void** device,
+                                              const std::vector<size_t>& sizes)
+{
+    (void)hostDevicePtr;
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+    if (ioAggregation_) { return ioAggregator_->SubmitLoadObject(host, device, sizes); }
+#endif
+    return Stream::HostToDeviceScatterAsync(host, hostDevicePtr, device, sizes);
+}
+
+Status AscendStream::DeviceToHostGatherAsync(void** device, void* host, void* hostDevicePtr,
+                                             const std::vector<size_t>& sizes)
+{
+    (void)hostDevicePtr;
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+    if (ioAggregation_) { return ioAggregator_->SubmitDumpObject(device, host, sizes); }
+#endif
+    return Stream::DeviceToHostGatherAsync(device, host, hostDevicePtr, sizes);
+}
+
 using Closure = std::function<void(bool)>;
 
 static void Trampoline(void* data)
@@ -158,6 +218,9 @@ static void Trampoline(void* data)
 
 Status Trans::AscendStream::AppendCallback(std::function<void(bool)> cb)
 {
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+    if (ioAggregation_) { return Status::InvalidParam("Cache IO aggregation callback unsupported"); }
+#endif
     auto c = new (std::nothrow) Closure{std::move(cb)};
     if (!c) [[unlikely]] { return Status::Error("out of memory for appending callback"); }
     auto ret = aclrtLaunchCallback(Trampoline, (void*)c, ACL_CALLBACK_NO_BLOCK, stream_);
@@ -170,6 +233,9 @@ Status Trans::AscendStream::AppendCallback(std::function<void(bool)> cb)
 
 Status AscendStream::Synchronized()
 {
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+    if (ioAggregation_) { return ioAggregator_->Synchronize(); }
+#endif
     auto ret = aclrtSynchronizeStream(stream_);
     if (ret == ACL_SUCCESS) { return Status::OK(); }
     return Status{ret, std::to_string(ret)};
@@ -177,6 +243,9 @@ Status AscendStream::Synchronized()
 
 Status AscendStream::WaitEvent(void* event)
 {
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+    if (ioAggregation_) { return ioAggregator_->WaitEvent(event); }
+#endif
     if (event == nullptr) { return Status::OK(); }
     auto ret = aclrtStreamWaitEvent(stream_, static_cast<aclrtEvent>(event));
     if (ret != ACL_SUCCESS) [[unlikely]] { return Status{ret, std::to_string(ret)}; }
