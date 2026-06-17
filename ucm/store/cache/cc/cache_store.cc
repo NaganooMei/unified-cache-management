@@ -21,12 +21,17 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <limits>
 #include <memory>
 #include <numeric>
 #include "buffer_manager.h"
 #include "logger/logger.h"
 #include "trans/cuda/gdr/gdr_config.h"
 #include "trans_manager.h"
+
+#ifndef UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
+#define UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D 0
+#endif
 
 namespace UC::CacheStore {
 
@@ -145,6 +150,10 @@ private:
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
+        config.Get("cache_ffts_direct_h2d", param.cacheFftsDirectH2D);
+        config.Get("cache_ffts_direct_h2d_launch_mode", param.fftsDirectH2DLaunchMode);
+        config.GetNumber("cache_ffts_direct_h2d_max_ready_lanes",
+                         param.fftsDirectH2DMaxReadyLanes);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -179,6 +188,25 @@ private:
         if (config.deviceId == -1) { return Status::OK(); }
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
+#if !UCM_ENABLE_ASCEND_FFTS_DIRECT_H2D
+        if (config.cacheFftsDirectH2D) {
+            return Status::InvalidParam("Cache FFTS direct H2D/D2H is not compiled");
+        }
+#endif
+        if (config.cacheFftsDirectH2D) {
+            if (config.fftsDirectH2DLaunchMode != "shard" &&
+                config.fftsDirectH2DLaunchMode != "task") {
+                return Status::InvalidParam("invalid Cache FFTS direct H2D/D2H launch mode({})",
+                                            config.fftsDirectH2DLaunchMode);
+            }
+            if (config.fftsDirectH2DMaxReadyLanes == 0) {
+                return Status::InvalidParam("invalid Cache FFTS direct H2D/D2H max ready lanes");
+            }
+            if (config.fftsDirectH2DMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
+                return Status::InvalidParam("too many Cache FFTS direct H2D/D2H ready lanes({})",
+                                            config.fftsDirectH2DMaxReadyLanes);
+            }
+        }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
         if (bufferNumber < 1024 || bufferNumber < config.loadExclusiveBufferNumber * 2) {
             return Status::InvalidParam("too small buffer({}) on shard({})", config.bufferCapacity,
@@ -221,6 +249,10 @@ private:
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, config.runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
+        UC_INFO("Set {}::CacheFftsDirectH2D to {}.", ns, config.cacheFftsDirectH2D);
+        UC_INFO("Set {}::FftsDirectH2DLaunchMode to {}.", ns, config.fftsDirectH2DLaunchMode);
+        UC_INFO("Set {}::FftsDirectH2DMaxReadyLanes to {}.", ns,
+                config.fftsDirectH2DMaxReadyLanes);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

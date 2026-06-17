@@ -44,6 +44,9 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     tensorSizes_ = config.tensorSizes;
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
+    cacheFftsDirectH2D_ = config.cacheFftsDirectH2D;
+    fftsDirectH2DLaunchMode_ = config.fftsDirectH2DLaunchMode;
+    fftsDirectH2DMaxReadyLanes_ = config.fftsDirectH2DMaxReadyLanes;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
@@ -129,18 +132,27 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
 
 void LoadQueue::TransferStage(std::promise<Status>& started)
 {
-    CopyStream stream;
-    auto s = stream.Setup(deviceId_, streamNumber_, useGdr_);
+    Config transferConfig;
+    transferConfig.deviceId = deviceId_;
+    transferConfig.tensorSizes = tensorSizes_;
+    transferConfig.streamNumber = streamNumber_;
+    transferConfig.useGdr = useGdr_;
+    transferConfig.cacheFftsDirectH2D = cacheFftsDirectH2D_;
+    transferConfig.fftsDirectH2DLaunchMode = fftsDirectH2DLaunchMode_;
+    transferConfig.fftsDirectH2DMaxReadyLanes = fftsDirectH2DMaxReadyLanes_;
+
+    auto executor = MakeCacheIOExecutor(transferConfig);
+    auto s = executor->Setup(transferConfig);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {
         s = CpuAffinity::SetCpuAffinity4CurrentThread(cpuAffinityCores_);
         if (s.Failure()) { UC_WARN("Failed({}) to set affinity.", s); }
     }
-    running_.ConsumerLoop(stop_, &LoadQueue::TransferOneTask, this, stream);
+    running_.ConsumerLoop(stop_, &LoadQueue::TransferOneTask, this, *executor);
 }
 
-void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
+void LoadQueue::TransferOneTask(CacheIOExecutor& executor, ShardTask&& task)
 {
     if (failureSet_->Contains(task.taskHandle)) {
         if (task.waiter) { task.waiter->Done(); }
@@ -152,10 +164,10 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
-        s = HostToDeviceScatterAsync(stream.NextStream(), task.bufferHandle.Data(),
-                                     task.shard.addrs.data());
+        s = executor.HostToDevice(task.bufferHandle.Data(), task.shard.addrs.data(),
+                                  task.bufferHandle.DeviceData());
         if (s.Failure()) [[unlikely]] {
-            UC_ERROR("Failed({}) to do H2D batch async for task({}).", s, task.taskHandle);
+            UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
@@ -168,7 +180,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             holder_.push_back(std::move(task));
             return;
         }
-        s = stream.Synchronize();
+        s = executor.Synchronize();
         holder_.clear();
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);
@@ -197,24 +209,6 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
     while (!task.bufferHandle.Ready()) {
         if (failureSet_->Contains(task.taskHandle)) { return Status::Error(); }
         std::this_thread::yield();
-    }
-    return Status::OK();
-}
-
-Status LoadQueue::HostToDeviceScatterAsync(std::shared_ptr<Trans::Stream> stream, void* host,
-                                           void** device)
-{
-    const auto number = tensorSizes_.size();
-    for (size_t i = 0, offset = 0; i < number; i++) {
-        auto pHost = (void*)(((int8_t*)host) + offset);
-        auto pDevice = device[i];
-        auto size = tensorSizes_[i];
-        auto s = stream->HostToDeviceAsync(pHost, pDevice, size);
-        if (s.Failure()) [[unlikely]] {
-            UC_ERROR("Failed({}) to do H2D({}) batch({}/{}) async.", s, size, i, number);
-            return s;
-        }
-        offset += size;
     }
     return Status::OK();
 }
