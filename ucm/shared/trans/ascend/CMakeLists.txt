@@ -15,6 +15,8 @@ endif()
 if(UCM_RUNTIME_ASCEND_IO_AGGREGATION)
     set(ASCEND_ARCH_DIR "${ASCEND_ROOT}/aarch64-linux" CACHE PATH
         "Path to Ascend architecture-specific directory")
+    set(ASCEND_PKG_INCLUDE_DIR "${ASCEND_ARCH_DIR}/pkg_inc" CACHE PATH
+        "Path to Ascend package include directory")
     set(ASCEND_FFTS_INCLUDE_DIR "${ASCEND_ARCH_DIR}/pkg_inc/runtime" CACHE PATH
         "Path to Ascend FFTS include directory")
     set(ASCEND_RUNTIME_LIBRARY "${ASCEND_ARCH_DIR}/lib64/libruntime.so" CACHE FILEPATH
@@ -28,12 +30,19 @@ if(UCM_RUNTIME_ASCEND_IO_AGGREGATION)
         message(FATAL_ERROR
             "RUNTIME_ENVIRONMENT=ascend requires FFTS headers in: ${ASCEND_FFTS_INCLUDE_DIR}")
     endif()
+    if(NOT EXISTS "${ASCEND_PKG_INCLUDE_DIR}/toolchain/prof_api.h")
+        message(FATAL_ERROR
+            "RUNTIME_ENVIRONMENT=ascend requires Ascend toolchain headers in: ${ASCEND_PKG_INCLUDE_DIR}")
+    endif()
     target_sources(trans PRIVATE
         ascend_io_aggregation_stream.cc
         ascend_shard_io_aggregator.cc
         ffts_sdma_dispatcher.cc
     )
-    target_include_directories(trans PUBLIC "${ASCEND_FFTS_INCLUDE_DIR}")
+    target_include_directories(trans PUBLIC
+        "${ASCEND_FFTS_INCLUDE_DIR}"
+        "${ASCEND_PKG_INCLUDE_DIR}"
+    )
     target_link_libraries(trans PUBLIC "${ASCEND_RUNTIME_LIBRARY}")
 endif()
 target_link_libraries(trans PUBLIC
