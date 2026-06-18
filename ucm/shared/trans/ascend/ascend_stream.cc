@@ -147,20 +147,6 @@ Status AscendStream::HostToDeviceAsync(void* host, void* device[], size_t size, 
     return Status::OK();
 }
 
-Status AscendStream::HostToDeviceScatterAsync(void* host, void* hostDevicePtr, void** device,
-                                              const std::vector<size_t>& sizes)
-{
-    (void)hostDevicePtr;
-    return Stream::HostToDeviceScatterAsync(host, hostDevicePtr, device, sizes);
-}
-
-Status AscendStream::DeviceToHostGatherAsync(void** device, void* host, void* hostDevicePtr,
-                                             const std::vector<size_t>& sizes)
-{
-    (void)hostDevicePtr;
-    return Stream::DeviceToHostGatherAsync(device, host, hostDevicePtr, sizes);
-}
-
 using Closure = std::function<void(bool)>;
 
 static void Trampoline(void* data)

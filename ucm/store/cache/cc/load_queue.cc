@@ -163,8 +163,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
-        s = HostToDeviceScatterAsync(stream, task.bufferHandle.Data(), nullptr,
-                                     task.shard.addrs.data());
+        s = HostToDeviceAsync(stream, task.bufferHandle.Data(), nullptr, task.shard.addrs.data());
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
@@ -212,10 +211,10 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
     return Status::OK();
 }
 
-Status LoadQueue::HostToDeviceScatterAsync(CopyStream& stream, void* host, void* hostDevicePtr,
-                                           void** device)
+Status LoadQueue::HostToDeviceAsync(CopyStream& stream, void* host, void* mappedHost,
+                                    void** device)
 {
-    return stream.HostToDeviceScatterAsync(host, hostDevicePtr, device, tensorSizes_);
+    return stream.HostToDeviceAsync(host, device, tensorSizes_, mappedHost);
 }
 
 }  // namespace UC::CacheStore

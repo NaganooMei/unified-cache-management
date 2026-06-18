@@ -75,8 +75,7 @@ private:
     void DispatchStage(std::promise<Status>& started);
     void DispatchOneTask(CopyStream& stream, TaskPair&& pair);
     Status DumpOneTask(CopyStream& stream, TaskPtr task);
-    Status DeviceToHostGatherAsync(CopyStream& stream, void** device, void* host,
-                                   void* hostDevicePtr);
+    Status DeviceToHostAsync(CopyStream& stream, void** device, void* host, void* mappedHost);
     void BackendDumpStage();
 };
 
