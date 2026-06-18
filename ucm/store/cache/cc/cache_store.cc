@@ -151,12 +151,8 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
-        config.Get("cache_sdma_direct_launch_mode", param.sdmaDirectLaunchMode);
         config.GetNumber("cache_sdma_direct_max_ready_lanes",
                          param.sdmaDirectMaxReadyLanes);
-        param.deprecatedSdmaDirectConfig = config.Contains("cache_ffts_direct_h2d") ||
-                                           config.Contains("cache_ffts_direct_h2d_launch_mode") ||
-                                           config.Contains("cache_ffts_direct_h2d_max_ready_lanes");
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -188,10 +184,6 @@ private:
                 return Status::InvalidParam("invalid cpu core({})", core);
             }
         }
-        if (config.deprecatedSdmaDirectConfig) {
-            return Status::InvalidParam(
-                "cache_ffts_direct_h2d config is no longer supported");
-        }
         if (config.deviceId == -1) { return Status::OK(); }
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
@@ -201,11 +193,6 @@ private:
         }
 #endif
         if (config.cacheSdmaDirect) {
-            if (config.sdmaDirectLaunchMode != "shard" &&
-                config.sdmaDirectLaunchMode != "task") {
-                return Status::InvalidParam("invalid Cache SDMA Direct launch mode({})",
-                                            config.sdmaDirectLaunchMode);
-            }
             if (config.sdmaDirectMaxReadyLanes == 0) {
                 return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes");
             }
@@ -257,7 +244,6 @@ private:
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
-        UC_INFO("Set {}::SdmaDirectLaunchMode to {}.", ns, config.sdmaDirectLaunchMode);
         UC_INFO("Set {}::SdmaDirectMaxReadyLanes to {}.", ns, config.sdmaDirectMaxReadyLanes);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());

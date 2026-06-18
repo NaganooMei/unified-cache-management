@@ -35,10 +35,6 @@ Status AscendSdmaDirectStream::Setup(const StreamOptions& options)
     if (options.tensorSizes.empty()) {
         return Status::InvalidParam("invalid tensor sizes for Cache SDMA Direct");
     }
-    if (options.sdmaDirectLaunchMode != "shard" && options.sdmaDirectLaunchMode != "task") {
-        return Status::InvalidParam("invalid Cache SDMA Direct launch mode({})",
-                                    options.sdmaDirectLaunchMode);
-    }
     if (options.sdmaDirectMaxReadyLanes == 0 ||
         options.sdmaDirectMaxReadyLanes >
             static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
@@ -49,7 +45,6 @@ Status AscendSdmaDirectStream::Setup(const StreamOptions& options)
     AscendSdmaDirectCopyConfig config;
     config.deviceId = options.deviceId;
     config.streamNumber = options.streamNumber;
-    config.launchMode = options.sdmaDirectLaunchMode;
     config.maxReadyLanes = static_cast<uint16_t>(options.sdmaDirectMaxReadyLanes);
     auto copier = std::make_unique<AscendSdmaDirectCopier>();
     s = copier->Setup(config);

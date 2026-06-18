@@ -25,7 +25,6 @@
 #define UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 
 #include <future>
-#include <string>
 #include <thread>
 #include "copy_stream.h"
 #include "template/hashset.h"
@@ -60,7 +59,6 @@ private:
     size_t streamNumber_{1};
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
-    std::string sdmaDirectLaunchMode_{"shard"};
     size_t sdmaDirectMaxReadyLanes_{8};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;

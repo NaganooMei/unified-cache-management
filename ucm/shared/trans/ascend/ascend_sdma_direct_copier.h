@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <string>
 #include <vector>
 #include "ffts_sdma_dispatcher.h"
 #include "status/status.h"
@@ -20,12 +19,10 @@ namespace UC::Trans {
 struct AscendSdmaDirectCopyConfig {
     int32_t deviceId{-1};
     size_t streamNumber{1};
-    std::string launchMode{"shard"};
     uint16_t maxReadyLanes{8};
 };
 
 class AscendSdmaDirectCopier {
-    enum class LaunchMode { SHARD, TASK };
     struct InFlightObject {
         std::vector<AscendFftsCopySpec> specs;
         FftsSdmaDispatcher dispatcher;
@@ -57,15 +54,12 @@ private:
                                   const std::vector<size_t>& sizes,
                                   std::vector<AscendFftsCopySpec>& specs) const;
     Status LaunchSpecs(std::vector<AscendFftsCopySpec>&& specs, Lane& lane);
-    Status LaunchPendingTask();
     Lane& NextLane();
     static Status AclStatus(aclError ret, const char* expr);
 
     int32_t deviceId_{-1};
     size_t nextLaneIndex_{0};
     uint16_t maxReadyLanes_{8};
-    LaunchMode launchMode_{LaunchMode::SHARD};
-    std::vector<AscendFftsCopySpec> pendingSpecs_{};
     std::vector<Lane> lanes_{};
     bool setup_{false};
 };
