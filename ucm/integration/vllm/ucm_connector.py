@@ -1014,7 +1014,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
         if is_save:
             event_handle = 0
-            save_start_time = time.perf_counter() * 1000
             try:
                 total_ptrs = self.kv_cache_layout.extract_block_addrs(
                     total_vllm_block_ids
@@ -1026,14 +1025,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     total_ucm_block_ids, shard_indexs, total_ptrs, event_handle
                 )
                 dump_tasks.append(task)
-                save_end_time = time.perf_counter() * 1000
-                saved_bytes = len(total_ucm_block_ids) * self.block_data_size
-                logger.info(
-                    f"[UCM_DUMP_PY] mode=direct "
-                    f"bytes={saved_bytes} "
-                    f"submit_ms={save_end_time - save_start_time:.3f} "
-                    f"speed_gbps={_trace_speed_gbps(saved_bytes, save_end_time - save_start_time):.3f}"
-                )
             except Exception as e:
                 logger.error(f"dump kv cache failed. {type(e).__name__}: {e}")
                 if self.enable_event_sync and event_handle and self.device is not None:
