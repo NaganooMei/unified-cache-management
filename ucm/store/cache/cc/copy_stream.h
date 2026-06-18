@@ -85,19 +85,19 @@ public:
         streamIndex_ = (streamIndex_ + 1) % streamNumber_;
         return stream;
     }
-    Status HostToDeviceScatterAsync(void* host, void* hostDevicePtr, void** device,
-                                    const std::vector<size_t>& sizes) noexcept
+    Status HostToDeviceAsync(void* host, void** device, const std::vector<size_t>& sizes,
+                             void* mappedHost = nullptr) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
-        return stream->HostToDeviceScatterAsync(host, hostDevicePtr, device, sizes);
+        return stream->HostToDeviceAsync(host, device, sizes, mappedHost);
     }
-    Status DeviceToHostGatherAsync(void** device, void* host, void* hostDevicePtr,
-                                   const std::vector<size_t>& sizes) noexcept
+    Status DeviceToHostAsync(void** device, void* host, const std::vector<size_t>& sizes,
+                             void* mappedHost = nullptr) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
-        return stream->DeviceToHostGatherAsync(device, host, hostDevicePtr, sizes);
+        return stream->DeviceToHostAsync(device, host, sizes, mappedHost);
     }
     Status WaitEvent(void* event) noexcept
     {

@@ -80,8 +80,7 @@ private:
     void TransferStage(std::promise<Status>& started);
     void TransferOneTask(CopyStream& stream, ShardTask&& task);
     Status WaitBackendTaskReady(ShardTask& task);
-    Status HostToDeviceScatterAsync(CopyStream& stream, void* host, void* hostDevicePtr,
-                                    void** device);
+    Status HostToDeviceAsync(CopyStream& stream, void* host, void* mappedHost, void** device);
 };
 
 }  // namespace UC::CacheStore
