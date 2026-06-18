@@ -15,6 +15,7 @@ class AscendShardIOAggregator;
 
 class AscendIoAggregationStream : public Stream {
 public:
+    AscendIoAggregationStream();
     ~AscendIoAggregationStream() override;
     Status Setup() override;
     Status Setup(const StreamOptions& options) override;

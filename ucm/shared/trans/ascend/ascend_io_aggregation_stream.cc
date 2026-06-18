@@ -19,6 +19,8 @@ Status Unsupported(const char* op)
 
 }  // namespace
 
+AscendIoAggregationStream::AscendIoAggregationStream() = default;
+
 AscendIoAggregationStream::~AscendIoAggregationStream() = default;
 
 Status AscendIoAggregationStream::Setup()
