@@ -7,6 +7,7 @@
 #define UNIFIEDCACHE_TRANS_ASCEND_SDMA_DIRECT_COPIER_H
 
 #include <acl/acl.h>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -18,6 +19,7 @@ namespace UC::Trans {
 
 struct AscendSdmaDirectCopyConfig {
     int32_t deviceId{-1};
+    size_t streamNumber{1};
     std::string launchMode{"shard"};
     uint16_t maxReadyLanes{8};
 };
@@ -27,6 +29,10 @@ class AscendSdmaDirectCopier {
     struct InFlightObject {
         std::vector<AscendFftsCopySpec> specs;
         FftsSdmaDispatcher dispatcher;
+    };
+    struct Lane {
+        aclrtStream fftsStream{nullptr};
+        std::vector<std::unique_ptr<InFlightObject>> inFlight{};
     };
 
 public:
@@ -50,16 +56,17 @@ private:
     Status BuildDeviceToHostSpecs(void** devices, void* hostDevicePtr,
                                   const std::vector<size_t>& sizes,
                                   std::vector<AscendFftsCopySpec>& specs) const;
-    Status LaunchSpecs(std::vector<AscendFftsCopySpec>&& specs);
+    Status LaunchSpecs(std::vector<AscendFftsCopySpec>&& specs, Lane& lane);
     Status LaunchPendingTask();
+    Lane& NextLane();
     static Status AclStatus(aclError ret, const char* expr);
 
     int32_t deviceId_{-1};
-    aclrtStream fftsStream_{nullptr};
+    size_t nextLaneIndex_{0};
     uint16_t maxReadyLanes_{8};
     LaunchMode launchMode_{LaunchMode::SHARD};
     std::vector<AscendFftsCopySpec> pendingSpecs_{};
-    std::vector<std::unique_ptr<InFlightObject>> inFlight_{};
+    std::vector<Lane> lanes_{};
     bool setup_{false};
 };
 

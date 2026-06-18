@@ -53,21 +53,20 @@ public:
             UC_ERROR("Failed({}) to setup device({}).", s, deviceId);
             return s;
         }
-        Trans::ResolvedStreamOptions resolved;
-        s = Trans::ResolveStreamOptions(options, resolved);
+        size_t streamPoolSize = 0;
+        s = Trans::ResolveCopyStreamPoolSize(options, streamPoolSize);
         if (s.Failure()) [[unlikely]] { return s; }
-        if (useGdr &&
-            (resolved.streamOptions.cacheIOAggregation || resolved.streamOptions.cacheSdmaDirect)) {
+        if (useGdr && (options.cacheIOAggregation || options.cacheSdmaDirect)) {
             return Status::InvalidParam("GDR stream is incompatible with cache copy strategy");
         }
         streams_.clear();
-        streams_.reserve(resolved.submitterNumber);
-        for (size_t i = 0; i < resolved.submitterNumber; ++i) {
+        streams_.reserve(streamPoolSize);
+        for (size_t i = 0; i < streamPoolSize; ++i) {
             std::shared_ptr<Trans::Stream> stream;
             if (useGdr) {
                 stream = device.MakeGdrStream();
             } else {
-                stream = device.MakeSharedStream(resolved.streamOptions);
+                stream = device.MakeSharedStream(options);
             }
             if (!stream) [[unlikely]] {
                 UC_ERROR("Failed to make stream on device({}).", deviceId);
@@ -76,7 +75,7 @@ public:
             streams_.push_back(std::move(stream));
         }
         deviceId_ = deviceId;
-        streamNumber_ = resolved.submitterNumber;
+        streamNumber_ = streamPoolSize;
         return Status::OK();
     }
     std::shared_ptr<Trans::Stream> NextStream() noexcept
