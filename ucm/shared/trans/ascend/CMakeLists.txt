@@ -51,6 +51,7 @@ if(UCM_RUNTIME_ASCEND_IO_AGGREGATION)
     )
     list(REMOVE_DUPLICATES ASCEND_FFTS_INCLUDE_DIRS)
     target_sources(trans PRIVATE
+        ascend_io_aggregation_stream.cc
         ascend_shard_io_aggregator.cc
         ffts_sdma_dispatcher.cc
     )

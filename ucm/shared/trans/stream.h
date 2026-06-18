@@ -49,11 +49,6 @@ struct StreamOptions {
     size_t sdmaDirectMaxReadyLanes{8};
 };
 
-struct ResolvedStreamOptions {
-    size_t submitterNumber{1};
-    StreamOptions streamOptions{};
-};
-
 class Stream {
 public:
     virtual ~Stream() = default;
@@ -109,7 +104,7 @@ public:
     virtual Status WaitEvent(void* event) = 0;
 };
 
-inline Status ResolveStreamOptions(const StreamOptions& options, ResolvedStreamOptions& resolved)
+inline Status ValidateStreamOptions(const StreamOptions& options)
 {
     if (options.streamNumber == 0) { return Status::InvalidParam("invalid stream number"); }
     if (options.cacheIOAggregation && options.cacheSdmaDirect) {
@@ -121,9 +116,14 @@ inline Status ResolveStreamOptions(const StreamOptions& options, ResolvedStreamO
     if (options.cacheSdmaDirect && !UCM_RUNTIME_ASCEND_SDMA_DIRECT) {
         return Status::InvalidParam("Cache SDMA Direct is not compiled");
     }
+    return Status::OK();
+}
 
-    resolved.streamOptions = options;
-    resolved.submitterNumber =
+inline Status ResolveCopyStreamPoolSize(const StreamOptions& options, size_t& streamPoolSize)
+{
+    auto s = ValidateStreamOptions(options);
+    if (s.Failure()) [[unlikely]] { return s; }
+    streamPoolSize =
         (options.cacheIOAggregation || options.cacheSdmaDirect) ? 1 : options.streamNumber;
     return Status::OK();
 }

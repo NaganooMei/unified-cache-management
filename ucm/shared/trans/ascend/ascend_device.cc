@@ -23,6 +23,9 @@
  * */
 #include <acl/acl.h>
 #include "ascend_buffer.h"
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+#include "ascend_io_aggregation_stream.h"
+#endif
 #include "ascend_stream.h"
 #include "trans/device.h"
 
@@ -62,8 +65,15 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
 
 std::shared_ptr<Stream> Device::MakeSharedStream(const StreamOptions& options)
 {
+    auto s = ValidateStreamOptions(options);
+    if (s.Failure()) [[unlikely]] { return nullptr; }
     std::shared_ptr<Stream> stream = nullptr;
     try {
+#if UCM_RUNTIME_ASCEND_IO_AGGREGATION
+        if (options.cacheIOAggregation) {
+            stream = std::make_shared<AscendIoAggregationStream>();
+        } else
+#endif
         stream = std::make_shared<AscendStream>();
     } catch (...) {
         return nullptr;
