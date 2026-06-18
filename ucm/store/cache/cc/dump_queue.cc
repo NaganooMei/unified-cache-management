@@ -45,7 +45,6 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
-    sdmaDirectLaunchMode_ = config.sdmaDirectLaunchMode;
     sdmaDirectMaxReadyLanes_ = config.sdmaDirectMaxReadyLanes;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
@@ -75,7 +74,6 @@ void DumpQueue::DispatchStage(std::promise<Status>& started)
     options.tensorSizes = tensorSizes_;
     options.streamNumber = streamNumber_;
     options.cacheSdmaDirect = cacheSdmaDirect_;
-    options.sdmaDirectLaunchMode = sdmaDirectLaunchMode_;
     options.sdmaDirectMaxReadyLanes = sdmaDirectMaxReadyLanes_;
 
     CopyStream stream;

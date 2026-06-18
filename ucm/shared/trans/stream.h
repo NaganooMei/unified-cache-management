@@ -26,7 +26,6 @@
 
 #include <cstdint>
 #include <functional>
-#include <string>
 #include <vector>
 #include "status/status.h"
 
@@ -47,7 +46,6 @@ struct StreamOptions {
     size_t ioAggregationPipelineDepth{2};
     size_t ioAggregationMaxReadyLanes{8};
     bool cacheSdmaDirect{false};
-    std::string sdmaDirectLaunchMode{"shard"};
     size_t sdmaDirectMaxReadyLanes{8};
 };
 

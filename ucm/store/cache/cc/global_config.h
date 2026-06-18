@@ -52,9 +52,7 @@ struct Config {
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
     bool cacheSdmaDirect{false};
-    std::string sdmaDirectLaunchMode{"shard"};
     size_t sdmaDirectMaxReadyLanes{8};
-    bool deprecatedSdmaDirectConfig{false};
 };
 
 }  // namespace UC::CacheStore

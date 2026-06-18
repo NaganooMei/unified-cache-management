@@ -20,10 +20,6 @@ Status AscendSdmaDirectCopier::Setup(const AscendSdmaDirectCopyConfig& config)
     if (config.maxReadyLanes == 0) {
         return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes");
     }
-    if (config.launchMode != "shard" && config.launchMode != "task") {
-        return Status::InvalidParam("invalid Cache SDMA Direct launch mode({})",
-                                    config.launchMode);
-    }
 
     auto s = AclStatus(aclrtSetDevice(config.deviceId), "aclrtSetDevice");
     if (s.Failure()) { return s; }
@@ -38,7 +34,6 @@ Status AscendSdmaDirectCopier::Setup(const AscendSdmaDirectCopyConfig& config)
 
     deviceId_ = config.deviceId;
     maxReadyLanes_ = config.maxReadyLanes;
-    launchMode_ = config.launchMode == "task" ? LaunchMode::TASK : LaunchMode::SHARD;
     setup_ = true;
     return Status::OK();
 }
@@ -63,10 +58,6 @@ Status AscendSdmaDirectCopier::SubmitLoadObject(const void* hostDevicePtr, void*
     std::vector<AscendFftsCopySpec> specs;
     auto s = BuildHostToDeviceSpecs(hostDevicePtr, devices, sizes, specs);
     if (s.Failure()) { return s; }
-    if (launchMode_ == LaunchMode::TASK) {
-        pendingSpecs_.insert(pendingSpecs_.end(), specs.begin(), specs.end());
-        return Status::OK();
-    }
     return LaunchSpecs(std::move(specs), NextLane());
 }
 
@@ -76,19 +67,13 @@ Status AscendSdmaDirectCopier::SubmitDumpObject(void** devices, void* hostDevice
     std::vector<AscendFftsCopySpec> specs;
     auto s = BuildDeviceToHostSpecs(devices, hostDevicePtr, sizes, specs);
     if (s.Failure()) { return s; }
-    if (launchMode_ == LaunchMode::TASK) {
-        pendingSpecs_.insert(pendingSpecs_.end(), specs.begin(), specs.end());
-        return Status::OK();
-    }
     return LaunchSpecs(std::move(specs), NextLane());
 }
 
 Status AscendSdmaDirectCopier::Synchronize()
 {
-    auto s = LaunchPendingTask();
-    if (s.Failure()) { return s; }
     if (!setup_) { return Status::OK(); }
-    s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+    auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
     if (s.Failure()) { return s; }
     for (auto& lane : lanes_) {
         s = AclStatus(aclrtSynchronizeStream(lane.fftsStream),
@@ -110,7 +95,6 @@ void AscendSdmaDirectCopier::Cleanup() noexcept
         lane.inFlight.clear();
     }
     lanes_.clear();
-    pendingSpecs_.clear();
     setup_ = false;
     deviceId_ = -1;
     nextLaneIndex_ = 0;
@@ -174,14 +158,6 @@ Status AscendSdmaDirectCopier::LaunchSpecs(std::vector<AscendFftsCopySpec>&& spe
     if (s.Failure()) { return s; }
     lane.inFlight.push_back(std::move(object));
     return Status::OK();
-}
-
-Status AscendSdmaDirectCopier::LaunchPendingTask()
-{
-    if (pendingSpecs_.empty()) { return Status::OK(); }
-    std::vector<AscendFftsCopySpec> specs;
-    specs.swap(pendingSpecs_);
-    return LaunchSpecs(std::move(specs), NextLane());
 }
 
 AscendSdmaDirectCopier::Lane& AscendSdmaDirectCopier::NextLane()
