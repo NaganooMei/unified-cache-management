@@ -51,6 +51,7 @@ if(UCM_RUNTIME_ASCEND_SDMA_DIRECT)
     )
     list(REMOVE_DUPLICATES ASCEND_FFTS_INCLUDE_DIRS)
     target_sources(trans PRIVATE
+        ascend_sdma_direct_stream.cc
         ascend_sdma_direct_copier.cc
         ffts_sdma_dispatcher.cc
     )
