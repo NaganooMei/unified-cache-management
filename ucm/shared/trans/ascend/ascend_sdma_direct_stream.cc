@@ -18,6 +18,8 @@ Status Unsupported(const char* op)
 
 }  // namespace
 
+AscendSdmaDirectStream::AscendSdmaDirectStream() = default;
+
 AscendSdmaDirectStream::~AscendSdmaDirectStream() = default;
 
 Status AscendSdmaDirectStream::Setup()

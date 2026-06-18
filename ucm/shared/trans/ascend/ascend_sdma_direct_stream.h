@@ -15,6 +15,7 @@ class AscendSdmaDirectCopier;
 
 class AscendSdmaDirectStream : public Stream {
 public:
+    AscendSdmaDirectStream();
     ~AscendSdmaDirectStream() override;
     Status Setup() override;
     Status Setup(const StreamOptions& options) override;
