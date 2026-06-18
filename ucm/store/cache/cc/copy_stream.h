@@ -92,12 +92,30 @@ public:
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         return stream->HostToDeviceAsync(host, device, sizes, mappedHost);
     }
+    Status HostToDeviceAsync(const std::vector<void*>& hosts,
+                             const std::vector<void*>& mappedHosts,
+                             const std::vector<void**>& devices,
+                             const std::vector<size_t>& sizes) noexcept
+    {
+        auto stream = NextStream();
+        if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
+        return stream->HostToDeviceAsync(hosts, mappedHosts, devices, sizes);
+    }
     Status DeviceToHostAsync(void** device, void* host, const std::vector<size_t>& sizes,
                              void* mappedHost = nullptr) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         return stream->DeviceToHostAsync(device, host, sizes, mappedHost);
+    }
+    Status DeviceToHostAsync(const std::vector<void**>& devices,
+                             const std::vector<void*>& hosts,
+                             const std::vector<void*>& mappedHosts,
+                             const std::vector<size_t>& sizes) noexcept
+    {
+        auto stream = NextStream();
+        if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
+        return stream->DeviceToHostAsync(devices, hosts, mappedHosts, sizes);
     }
     Status WaitEvent(void* event) noexcept
     {

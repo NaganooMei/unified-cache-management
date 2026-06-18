@@ -127,6 +127,18 @@ Status AscendSdmaDirectStream::HostToDeviceAsync(void* host, void* device[],
     return copier_->SubmitLoadObject(mappedHost, device, sizes);
 }
 
+Status AscendSdmaDirectStream::HostToDeviceAsync(const std::vector<void*>& hosts,
+                                                 const std::vector<void*>& mappedHosts,
+                                                 const std::vector<void**>& devices,
+                                                 const std::vector<size_t>& sizes)
+{
+    if (!copier_) [[unlikely]] { return Status::Error("Cache SDMA Direct stream is not setup"); }
+    if (hosts.size() != devices.size() || mappedHosts.size() != devices.size()) [[unlikely]] {
+        return Status::InvalidParam("invalid Cache SDMA Direct H2D task inputs");
+    }
+    return copier_->SubmitLoadTask(mappedHosts, devices, sizes);
+}
+
 Status AscendSdmaDirectStream::DeviceToHostAsync(void* device[], void* host,
                                                  const std::vector<size_t>& sizes,
                                                  void* mappedHost)
@@ -137,6 +149,18 @@ Status AscendSdmaDirectStream::DeviceToHostAsync(void* device[], void* host,
         return Status::InvalidParam("Cache SDMA Direct requires mapped host buffer");
     }
     return copier_->SubmitDumpObject(device, mappedHost, sizes);
+}
+
+Status AscendSdmaDirectStream::DeviceToHostAsync(const std::vector<void**>& devices,
+                                                 const std::vector<void*>& hosts,
+                                                 const std::vector<void*>& mappedHosts,
+                                                 const std::vector<size_t>& sizes)
+{
+    if (!copier_) [[unlikely]] { return Status::Error("Cache SDMA Direct stream is not setup"); }
+    if (hosts.size() != devices.size() || mappedHosts.size() != devices.size()) [[unlikely]] {
+        return Status::InvalidParam("invalid Cache SDMA Direct D2H task inputs");
+    }
+    return copier_->SubmitDumpTask(devices, mappedHosts, sizes);
 }
 
 Status AscendSdmaDirectStream::AppendCallback(std::function<void(bool)> cb)

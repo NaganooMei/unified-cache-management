@@ -25,6 +25,7 @@
 #define UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 
 #include <future>
+#include <string>
 #include <thread>
 #include "copy_stream.h"
 #include "template/hashset.h"
@@ -60,6 +61,7 @@ private:
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
     size_t sdmaDirectMaxReadyLanes_{8};
+    std::string sdmaDirectLaunchGranularity_{"shard"};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;
@@ -79,6 +81,8 @@ private:
     void TransferOneTask(CopyStream& stream, ShardTask&& task);
     Status WaitBackendTaskReady(ShardTask& task);
     Status HostToDeviceAsync(CopyStream& stream, void* host, void* mappedHost, void** device);
+    Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
+    bool UseSdmaDirectTaskGranularity() const noexcept;
 };
 
 }  // namespace UC::CacheStore

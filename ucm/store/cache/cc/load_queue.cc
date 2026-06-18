@@ -46,6 +46,7 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     useGdr_ = config.useGdr;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
     sdmaDirectMaxReadyLanes_ = config.sdmaDirectMaxReadyLanes;
+    sdmaDirectLaunchGranularity_ = config.sdmaDirectLaunchGranularity;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
@@ -152,15 +153,44 @@ void LoadQueue::TransferStage(std::promise<Status>& started)
 void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
 {
     if (failureSet_->Contains(task.taskHandle)) {
-        if (task.waiter) { task.waiter->Done(); }
+        if (task.waiter) {
+            holder_.clear();
+            task.waiter->Done();
+        }
         return;
     }
     auto s = Status::OK();
+    const auto taskHandle = task.taskHandle;
+    auto waiter = task.waiter;
     do {
         auto tpBackendWait = NowTime::Now();
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
+        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
+                                 (tpBackendReady - tpBackendWait) * 1e3);
+        if (UseSdmaDirectTaskGranularity()) {
+            holder_.push_back(std::move(task));
+            if (!waiter) { return; }
+            s = HostToDeviceTaskAsync(stream, holder_);
+            if (s.Failure()) [[unlikely]] {
+                UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
+                UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
+                break;
+            }
+            auto tpH2dSubmitted = NowTime::Now();
+            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
+                                     (tpH2dSubmitted - tpBackendReady) * 1e3);
+            s = stream.Synchronize();
+            holder_.clear();
+            if (s.Failure()) [[unlikely]] {
+                UC_ERROR("Failed({}) to sync on stream for task({}).", s, taskHandle);
+                UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
+                break;
+            }
+            waiter->Done();
+            return;
+        }
         s = HostToDeviceAsync(stream, task.bufferHandle.Data(), task.bufferHandle.DeviceData(),
                               task.shard.addrs.data());
         if (s.Failure()) [[unlikely]] {
@@ -169,8 +199,6 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             break;
         }
         auto tpH2dSubmitted = NowTime::Now();
-        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
-                                 (tpBackendReady - tpBackendWait) * 1e3);
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
                                  (tpH2dSubmitted - tpBackendReady) * 1e3);
         if (!task.waiter) {
@@ -185,8 +213,9 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             break;
         }
     } while (0);
-    if (s.Failure()) [[unlikely]] { failureSet_->Insert(task.taskHandle); }
-    if (task.waiter) { task.waiter->Done(); }
+    if (s.Failure()) [[unlikely]] { failureSet_->Insert(taskHandle); }
+    if (UseSdmaDirectTaskGranularity()) { holder_.clear(); }
+    if (waiter) { waiter->Done(); }
 }
 
 Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
@@ -214,6 +243,27 @@ Status LoadQueue::HostToDeviceAsync(CopyStream& stream, void* host, void* mapped
                                     void** device)
 {
     return stream.HostToDeviceAsync(host, device, tensorSizes_, mappedHost);
+}
+
+Status LoadQueue::HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks)
+{
+    std::vector<void*> hosts;
+    std::vector<void*> mappedHosts;
+    std::vector<void**> devices;
+    hosts.reserve(tasks.size());
+    mappedHosts.reserve(tasks.size());
+    devices.reserve(tasks.size());
+    for (auto& task : tasks) {
+        hosts.push_back(task.bufferHandle.Data());
+        mappedHosts.push_back(task.bufferHandle.DeviceData());
+        devices.push_back(task.shard.addrs.data());
+    }
+    return stream.HostToDeviceAsync(hosts, mappedHosts, devices, tensorSizes_);
+}
+
+bool LoadQueue::UseSdmaDirectTaskGranularity() const noexcept
+{
+    return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == "task";
 }
 
 }  // namespace UC::CacheStore

@@ -85,6 +85,22 @@ public:
         }
         return Status::OK();
     }
+    virtual Status HostToDeviceAsync(const std::vector<void*>& hosts,
+                                     const std::vector<void*>& mappedHosts,
+                                     const std::vector<void**>& devices,
+                                     const std::vector<size_t>& sizes)
+    {
+        if (hosts.size() != devices.size() ||
+            (!mappedHosts.empty() && mappedHosts.size() != hosts.size())) {
+            return Status::InvalidParam("invalid H2D task copy inputs");
+        }
+        for (size_t i = 0; i < hosts.size(); ++i) {
+            void* mappedHost = mappedHosts.empty() ? nullptr : mappedHosts[i];
+            auto s = HostToDeviceAsync(hosts[i], devices[i], sizes, mappedHost);
+            if (s.Failure()) [[unlikely]] { return s; }
+        }
+        return Status::OK();
+    }
     virtual Status DeviceToHostAsync(void* device[], void* host, const std::vector<size_t>& sizes,
                                      void* mappedHost = nullptr)
     {
@@ -95,6 +111,22 @@ public:
             auto s = DeviceToHostAsync(device[i], pHost, sizes[i]);
             if (s.Failure()) [[unlikely]] { return s; }
             offset += sizes[i];
+        }
+        return Status::OK();
+    }
+    virtual Status DeviceToHostAsync(const std::vector<void**>& devices,
+                                     const std::vector<void*>& hosts,
+                                     const std::vector<void*>& mappedHosts,
+                                     const std::vector<size_t>& sizes)
+    {
+        if (hosts.size() != devices.size() ||
+            (!mappedHosts.empty() && mappedHosts.size() != hosts.size())) {
+            return Status::InvalidParam("invalid D2H task copy inputs");
+        }
+        for (size_t i = 0; i < hosts.size(); ++i) {
+            void* mappedHost = mappedHosts.empty() ? nullptr : mappedHosts[i];
+            auto s = DeviceToHostAsync(devices[i], hosts[i], sizes, mappedHost);
+            if (s.Failure()) [[unlikely]] { return s; }
         }
         return Status::OK();
     }

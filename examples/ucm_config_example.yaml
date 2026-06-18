@@ -29,6 +29,8 @@ ucm_connectors:
       # This replaces the normal per-tensor aclrtMemcpyAsync path with FFTS SDMA descriptors.
       cache_sdma_direct: false
       cache_sdma_direct_max_ready_lanes: 8
+      # Experimental: shard keeps one FFTS launch per shard; task uses one launch per CacheStore task.
+      cache_sdma_direct_launch_granularity: shard
 
 # When you use UcmNfsStore, you should set enable_event_sync to false.
 enable_event_sync: true

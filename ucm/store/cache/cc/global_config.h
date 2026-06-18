@@ -53,6 +53,7 @@ struct Config {
     bool useGdr{false};
     bool cacheSdmaDirect{false};
     size_t sdmaDirectMaxReadyLanes{8};
+    std::string sdmaDirectLaunchGranularity{"shard"};
 };
 
 }  // namespace UC::CacheStore

@@ -153,6 +153,8 @@ private:
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
         config.GetNumber("cache_sdma_direct_max_ready_lanes",
                          param.sdmaDirectMaxReadyLanes);
+        config.Get("cache_sdma_direct_launch_granularity",
+                   param.sdmaDirectLaunchGranularity);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -192,6 +194,11 @@ private:
             return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
         }
 #endif
+        if (config.sdmaDirectLaunchGranularity != "shard" &&
+            config.sdmaDirectLaunchGranularity != "task") {
+            return Status::InvalidParam("invalid Cache SDMA Direct launch granularity({})",
+                                        config.sdmaDirectLaunchGranularity);
+        }
         if (config.cacheSdmaDirect) {
             if (config.sdmaDirectMaxReadyLanes == 0) {
                 return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes");
@@ -245,6 +252,8 @@ private:
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
         UC_INFO("Set {}::SdmaDirectMaxReadyLanes to {}.", ns, config.sdmaDirectMaxReadyLanes);
+        UC_INFO("Set {}::SdmaDirectLaunchGranularity to {}.", ns,
+                config.sdmaDirectLaunchGranularity);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

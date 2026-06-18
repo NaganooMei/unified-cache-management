@@ -46,6 +46,7 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     useGdr_ = config.useGdr;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
     sdmaDirectMaxReadyLanes_ = config.sdmaDirectMaxReadyLanes;
+    sdmaDirectLaunchGranularity_ = config.sdmaDirectLaunchGranularity;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -110,6 +111,9 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     UC_DEBUG("Try to dump ({}) shards.", nShard);
     DumpCtx dumpCtx;
     dumpCtx.taskHandle = task->id;
+    std::vector<void**> taskDevices;
+    std::vector<void*> taskHosts;
+    std::vector<void*> taskMappedHosts;
     if (task->desc.prerequisiteHandle != 0) {
         auto s = stream.WaitEvent(reinterpret_cast<void*>(task->desc.prerequisiteHandle));
         if (s.Failure()) [[unlikely]] {
@@ -123,16 +127,30 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         auto handle = buffer_->Get(shard.owner, shard.index);
         if (!handle.Owner()) { continue; }
         if (!handle.Ready()) {
-            auto s =
-                DeviceToHostAsync(stream, shard.addrs.data(), handle.Data(), handle.DeviceData());
-            if (s.Failure()) [[unlikely]] {
-                UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
-                UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
-                return s;
+            if (UseSdmaDirectTaskGranularity()) {
+                taskDevices.push_back(shard.addrs.data());
+                taskHosts.push_back(handle.Data());
+                taskMappedHosts.push_back(handle.DeviceData());
+            } else {
+                auto s = DeviceToHostAsync(stream, shard.addrs.data(), handle.Data(),
+                                           handle.DeviceData());
+                if (s.Failure()) [[unlikely]] {
+                    UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
+                    UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
+                    return s;
+                }
             }
         }
         backendTaskDesc.push_back(Detail::Shard{shard.owner, shard.index, {handle.Data()}});
         dumpCtx.bufferHandles.push_back(std::move(handle));
+    }
+    if (!taskDevices.empty()) {
+        auto s = DeviceToHostTaskAsync(stream, taskDevices, taskHosts, taskMappedHosts);
+        if (s.Failure()) [[unlikely]] {
+            UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
+            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
+            return s;
+        }
     }
     auto tpMakeBuffer = NowTime::Now();
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_dump_shards_total"),
@@ -173,6 +191,18 @@ Status DumpQueue::DeviceToHostAsync(CopyStream& stream, void** device, void* hos
                                     void* mappedHost)
 {
     return stream.DeviceToHostAsync(device, host, tensorSizes_, mappedHost);
+}
+
+Status DumpQueue::DeviceToHostTaskAsync(CopyStream& stream, const std::vector<void**>& devices,
+                                        const std::vector<void*>& hosts,
+                                        const std::vector<void*>& mappedHosts)
+{
+    return stream.DeviceToHostAsync(devices, hosts, mappedHosts, tensorSizes_);
+}
+
+bool DumpQueue::UseSdmaDirectTaskGranularity() const noexcept
+{
+    return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == "task";
 }
 
 void DumpQueue::BackendDumpStage()

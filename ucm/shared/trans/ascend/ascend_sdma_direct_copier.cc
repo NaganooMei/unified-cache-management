@@ -61,12 +61,44 @@ Status AscendSdmaDirectCopier::SubmitLoadObject(const void* hostDevicePtr, void*
     return LaunchSpecs(std::move(specs), NextLane());
 }
 
+Status AscendSdmaDirectCopier::SubmitLoadTask(const std::vector<void*>& hostDevicePtrs,
+                                              const std::vector<void**>& devices,
+                                              const std::vector<size_t>& sizes)
+{
+    if (hostDevicePtrs.size() != devices.size()) {
+        return Status::InvalidParam("invalid Cache SDMA Direct H2D task inputs");
+    }
+    std::vector<AscendFftsCopySpec> specs;
+    specs.reserve(hostDevicePtrs.size() * sizes.size());
+    for (size_t i = 0; i < hostDevicePtrs.size(); ++i) {
+        auto s = BuildHostToDeviceSpecs(hostDevicePtrs[i], devices[i], sizes, specs);
+        if (s.Failure()) { return s; }
+    }
+    return LaunchSpecs(std::move(specs), NextLane());
+}
+
 Status AscendSdmaDirectCopier::SubmitDumpObject(void** devices, void* hostDevicePtr,
                                                 const std::vector<size_t>& sizes)
 {
     std::vector<AscendFftsCopySpec> specs;
     auto s = BuildDeviceToHostSpecs(devices, hostDevicePtr, sizes, specs);
     if (s.Failure()) { return s; }
+    return LaunchSpecs(std::move(specs), NextLane());
+}
+
+Status AscendSdmaDirectCopier::SubmitDumpTask(const std::vector<void**>& devices,
+                                              const std::vector<void*>& hostDevicePtrs,
+                                              const std::vector<size_t>& sizes)
+{
+    if (hostDevicePtrs.size() != devices.size()) {
+        return Status::InvalidParam("invalid Cache SDMA Direct D2H task inputs");
+    }
+    std::vector<AscendFftsCopySpec> specs;
+    specs.reserve(hostDevicePtrs.size() * sizes.size());
+    for (size_t i = 0; i < hostDevicePtrs.size(); ++i) {
+        auto s = BuildDeviceToHostSpecs(devices[i], hostDevicePtrs[i], sizes, specs);
+        if (s.Failure()) { return s; }
+    }
     return LaunchSpecs(std::move(specs), NextLane());
 }
 
@@ -109,7 +141,7 @@ Status AscendSdmaDirectCopier::BuildHostToDeviceSpecs(
         return Status::InvalidParam("invalid Cache SDMA Direct H2D pointers");
     }
 
-    specs.reserve(sizes.size());
+    specs.reserve(specs.size() + sizes.size());
     size_t offset = 0;
     for (size_t i = 0; i < sizes.size(); ++i) {
         if (sizes[i] == 0 || devices[i] == nullptr) {
@@ -131,7 +163,7 @@ Status AscendSdmaDirectCopier::BuildDeviceToHostSpecs(
         return Status::InvalidParam("invalid Cache SDMA Direct D2H pointers");
     }
 
-    specs.reserve(sizes.size());
+    specs.reserve(specs.size() + sizes.size());
     size_t offset = 0;
     for (size_t i = 0; i < sizes.size(); ++i) {
         if (sizes[i] == 0 || devices[i] == nullptr) {
