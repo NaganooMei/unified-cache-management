@@ -19,6 +19,10 @@ if(UCM_RUNTIME_ASCEND_SDMA_DIRECT)
         "Path to Ascend package include directory")
     set(ASCEND_FFTS_INCLUDE_DIR "${ASCEND_ARCH_DIR}/pkg_inc/runtime" CACHE PATH
         "Path to Ascend FFTS include directory")
+    set(ASCEND_TOOLCHAIN_INCLUDE_DIR "${ASCEND_ARCH_DIR}/pkg_inc/toolchain" CACHE PATH
+        "Path to Ascend toolchain include directory")
+    set(ASCEND_PROFILING_INCLUDE_DIR "${ASCEND_ARCH_DIR}/pkg_inc/profiling" CACHE PATH
+        "Path to Ascend profiling include directory")
     set(ASCEND_RUNTIME_LIBRARY "${ASCEND_ARCH_DIR}/lib64/libruntime.so" CACHE FILEPATH
         "Path to Ascend runtime library")
     if(NOT EXISTS "${ASCEND_RUNTIME_LIBRARY}")
@@ -30,9 +34,13 @@ if(UCM_RUNTIME_ASCEND_SDMA_DIRECT)
         message(FATAL_ERROR
             "RUNTIME_ENVIRONMENT=ascend-a3 requires FFTS headers in: ${ASCEND_FFTS_INCLUDE_DIR}")
     endif()
-    if(NOT EXISTS "${ASCEND_PKG_INCLUDE_DIR}/toolchain/prof_api.h")
+    if(NOT EXISTS "${ASCEND_TOOLCHAIN_INCLUDE_DIR}/prof_api.h")
         message(FATAL_ERROR
-            "RUNTIME_ENVIRONMENT=ascend-a3 requires Ascend toolchain headers in: ${ASCEND_PKG_INCLUDE_DIR}")
+            "RUNTIME_ENVIRONMENT=ascend-a3 requires Ascend toolchain headers in: ${ASCEND_TOOLCHAIN_INCLUDE_DIR}")
+    endif()
+    if(NOT EXISTS "${ASCEND_PROFILING_INCLUDE_DIR}/prof_common.h")
+        message(FATAL_ERROR
+            "RUNTIME_ENVIRONMENT=ascend-a3 requires Ascend profiling headers in: ${ASCEND_PROFILING_INCLUDE_DIR}")
     endif()
     target_sources(trans PRIVATE
         ascend_sdma_direct_stream.cc
@@ -42,6 +50,8 @@ if(UCM_RUNTIME_ASCEND_SDMA_DIRECT)
     target_include_directories(trans PUBLIC
         "${ASCEND_FFTS_INCLUDE_DIR}"
         "${ASCEND_PKG_INCLUDE_DIR}"
+        "${ASCEND_TOOLCHAIN_INCLUDE_DIR}"
+        "${ASCEND_PROFILING_INCLUDE_DIR}"
     )
     target_link_libraries(trans PUBLIC "${ASCEND_RUNTIME_LIBRARY}")
 endif()
