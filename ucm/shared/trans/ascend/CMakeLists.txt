@@ -13,50 +13,28 @@ if(ASCEND_SUPPORTS_REGISTER_PIN)
     target_compile_definitions(trans PRIVATE ASCEND_SUPPORTS_REGISTER_PIN=1)
 endif()
 if(UCM_RUNTIME_ASCEND_IO_AGGREGATION)
-    find_library(ASCEND_RUNTIME_LIBRARY runtime
-        PATHS
-            "${ASCEND_ROOT}/lib64"
-            "${ASCEND_ROOT}/lib"
-            "${ASCEND_ROOT}/runtime/lib64"
-            "${ASCEND_ROOT}/runtime/lib"
-            "${ASCEND_ROOT}/aarch64-linux/lib64"
-            "${ASCEND_ROOT}/aarch64-linux/lib"
-        NO_DEFAULT_PATH
-    )
-    find_path(ASCEND_FFTS_INCLUDE_DIR
-        NAMES runtime/rt_ffts_plus.h rt_external_ffts.h
-        PATHS
-            "${ASCEND_ROOT}/include"
-            "${ASCEND_ROOT}/pkg_inc"
-            "${ASCEND_ROOT}/pkg_inc/runtime"
-            "${ASCEND_ROOT}/aarch64-linux/pkg_inc"
-            "${ASCEND_ROOT}/aarch64-linux/pkg_inc/runtime"
-        NO_DEFAULT_PATH
-    )
-    if(NOT ASCEND_RUNTIME_LIBRARY OR NOT ASCEND_FFTS_INCLUDE_DIR)
-        message(FATAL_ERROR "RUNTIME_ENVIRONMENT=ascend requires FFTS headers and libruntime for Cache IO aggregation.")
+    set(ASCEND_ARCH_DIR "${ASCEND_ROOT}/aarch64-linux" CACHE PATH
+        "Path to Ascend architecture-specific directory")
+    set(ASCEND_FFTS_INCLUDE_DIR "${ASCEND_ARCH_DIR}/pkg_inc/runtime" CACHE PATH
+        "Path to Ascend FFTS include directory")
+    set(ASCEND_RUNTIME_LIBRARY "${ASCEND_ARCH_DIR}/lib64/libruntime.so" CACHE FILEPATH
+        "Path to Ascend runtime library")
+    if(NOT EXISTS "${ASCEND_RUNTIME_LIBRARY}")
+        message(FATAL_ERROR
+            "RUNTIME_ENVIRONMENT=ascend requires libruntime: ${ASCEND_RUNTIME_LIBRARY}")
     endif()
-    get_filename_component(ASCEND_FFTS_INCLUDE_PARENT "${ASCEND_FFTS_INCLUDE_DIR}" DIRECTORY)
-    set(ASCEND_FFTS_INCLUDE_DIRS "${ASCEND_FFTS_INCLUDE_DIR}")
-    if(ASCEND_FFTS_INCLUDE_DIR MATCHES "/runtime$" AND EXISTS "${ASCEND_FFTS_INCLUDE_PARENT}")
-        list(APPEND ASCEND_FFTS_INCLUDE_DIRS "${ASCEND_FFTS_INCLUDE_PARENT}")
+    if(NOT EXISTS "${ASCEND_FFTS_INCLUDE_DIR}/runtime/rt_ffts_plus.h"
+        AND NOT EXISTS "${ASCEND_FFTS_INCLUDE_DIR}/rt_external_ffts.h")
+        message(FATAL_ERROR
+            "RUNTIME_ENVIRONMENT=ascend requires FFTS headers in: ${ASCEND_FFTS_INCLUDE_DIR}")
     endif()
-    list(APPEND ASCEND_FFTS_INCLUDE_DIRS
-        "${ASCEND_ROOT}/pkg_inc"
-        "${ASCEND_ROOT}/pkg_inc/toolchain"
-        "${ASCEND_ROOT}/pkg_inc/profiling"
-        "${ASCEND_ROOT}/aarch64-linux/pkg_inc"
-        "${ASCEND_ROOT}/aarch64-linux/pkg_inc/toolchain"
-        "${ASCEND_ROOT}/aarch64-linux/pkg_inc/profiling"
-    )
-    list(REMOVE_DUPLICATES ASCEND_FFTS_INCLUDE_DIRS)
     target_sources(trans PRIVATE
         ascend_io_aggregation_stream.cc
         ascend_shard_io_aggregator.cc
         ffts_sdma_dispatcher.cc
     )
-    target_include_directories(trans PUBLIC ${ASCEND_FFTS_INCLUDE_DIRS})
-    target_link_libraries(trans PUBLIC ${ASCEND_RUNTIME_LIBRARY})
+    target_include_directories(trans PUBLIC "${ASCEND_FFTS_INCLUDE_DIR}")
+    target_link_libraries(trans PUBLIC "${ASCEND_RUNTIME_LIBRARY}")
 endif()
 target_link_libraries(trans PUBLIC
     fmt
