@@ -93,6 +93,12 @@ def _record_counter(name: str, value: float = 1.0) -> None:
     ucmmetrics.update_stats({name: value})
 
 
+def _trace_speed_gbps(byte_count: int, duration_ms: float) -> float:
+    if duration_ms <= 0:
+        return 0.0
+    return byte_count / duration_ms / 1024 / 1024
+
+
 @dataclass
 class RequestMeta:
     ucm_block_ids: list[bytes] = field(default_factory=list)
@@ -862,6 +868,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
         load_speed = (
             load_bytes / (load_end_time - load_start_time) / 1024 / 1024
         )  # GB/s
+        logger.info(
+            f"[UCM_LOAD_PY] mode=direct "
+            f"bytes={load_bytes} "
+            f"total_ms={load_end_time - load_start_time:.3f} "
+            f"speed_gbps={_trace_speed_gbps(load_bytes, load_end_time - load_start_time):.3f}"
+        )
         if is_load:
             ucmmetrics.update_stats(
                 {
@@ -1002,6 +1014,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
         if is_save:
             event_handle = 0
+            save_start_time = time.perf_counter() * 1000
             try:
                 total_ptrs = self.kv_cache_layout.extract_block_addrs(
                     total_vllm_block_ids
@@ -1013,6 +1026,14 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     total_ucm_block_ids, shard_indexs, total_ptrs, event_handle
                 )
                 dump_tasks.append(task)
+                save_end_time = time.perf_counter() * 1000
+                saved_bytes = len(total_ucm_block_ids) * self.block_data_size
+                logger.info(
+                    f"[UCM_DUMP_PY] mode=direct "
+                    f"bytes={saved_bytes} "
+                    f"submit_ms={save_end_time - save_start_time:.3f} "
+                    f"speed_gbps={_trace_speed_gbps(saved_bytes, save_end_time - save_start_time):.3f}"
+                )
             except Exception as e:
                 logger.error(f"dump kv cache failed. {type(e).__name__}: {e}")
                 if self.enable_event_sync and event_handle and self.device is not None:

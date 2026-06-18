@@ -1,6 +1,7 @@
 import copy
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 
@@ -15,7 +16,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from ucm.integration.vllm.device import create_device
-from ucm.integration.vllm.ucm_connector import UCMDirectConnector
+from ucm.integration.vllm.ucm_connector import UCMDirectConnector, _trace_speed_gbps
 from ucm.logger import init_logger
 from ucm.sparse.utils import round_up
 from ucm.store.factory_v1 import UcmConnectorFactoryV1
@@ -1096,6 +1097,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         if not isinstance(metadata, UCMFAWAConnectorMetadata):
             raise RuntimeError(f"Unexpected FAWA metadata type: {type(metadata)}")
 
+        load_start_time = time.perf_counter() * 1000
         tasks: list[FAWALoadTask] = []
         for request_id, request in metadata.request_meta.items():
             if not request.load_keys:
@@ -1152,6 +1154,16 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
 
         for load_task in tasks:
             self._wait_load_task(load_task)
+        load_end_time = time.perf_counter() * 1000
+        total_bytes = sum(
+            task.key_count * self.file_size.get(task.label, 0) for task in tasks
+        )
+        logger.info(
+            f"[UCM_LOAD_PY] mode=fawa "
+            f"bytes={total_bytes} "
+            f"total_ms={load_end_time - load_start_time:.3f} "
+            f"speed_gbps={_trace_speed_gbps(total_bytes, load_end_time - load_start_time):.3f}"
+        )
 
     def wait_for_save(self) -> None:
         metadata = self._get_connector_metadata()
