@@ -868,13 +868,13 @@ class UCMDirectConnector(KVConnectorBase_V1):
         load_speed = (
             load_bytes / (load_end_time - load_start_time) / 1024 / 1024
         )  # GB/s
-        logger.info(
-            f"[UCM_LOAD_PY] mode=direct "
-            f"bytes={load_bytes} "
-            f"total_ms={load_end_time - load_start_time:.3f} "
-            f"speed_gbps={_trace_speed_gbps(load_bytes, load_end_time - load_start_time):.3f}"
-        )
         if is_load:
+            logger.info(
+                f"[UCM_LOAD_PY] mode=direct "
+                f"bytes={load_bytes} "
+                f"total_ms={load_end_time - load_start_time:.3f} "
+                f"speed_gbps={_trace_speed_gbps(load_bytes, load_end_time - load_start_time):.3f}"
+            )
             ucmmetrics.update_stats(
                 {
                     "load_requests_num": num_loaded_request,

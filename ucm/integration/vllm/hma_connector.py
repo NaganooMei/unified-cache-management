@@ -1158,12 +1158,13 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         total_bytes = sum(
             task.key_count * self.file_size.get(task.label, 0) for task in tasks
         )
-        logger.info(
-            f"[UCM_LOAD_PY] mode=fawa "
-            f"bytes={total_bytes} "
-            f"total_ms={load_end_time - load_start_time:.3f} "
-            f"speed_gbps={_trace_speed_gbps(total_bytes, load_end_time - load_start_time):.3f}"
-        )
+        if tasks:
+            logger.info(
+                f"[UCM_LOAD_PY] mode=fawa "
+                f"bytes={total_bytes} "
+                f"total_ms={load_end_time - load_start_time:.3f} "
+                f"speed_gbps={_trace_speed_gbps(total_bytes, load_end_time - load_start_time):.3f}"
+            )
 
     def wait_for_save(self) -> None:
         metadata = self._get_connector_metadata()
