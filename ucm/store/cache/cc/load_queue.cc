@@ -169,7 +169,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         auto tpBackendReady = NowTime::Now();
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
                                  (tpBackendReady - tpBackendWait) * 1e3);
-        if (UseSdmaDirectTaskGranularity()) {
+        if (UseSdmaDirectTaskLaunch()) {
             holder_.push_back(std::move(task));
             if (!waiter) { return; }
             s = HostToDeviceTaskAsync(stream, holder_);
@@ -214,7 +214,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         }
     } while (0);
     if (s.Failure()) [[unlikely]] { failureSet_->Insert(taskHandle); }
-    if (UseSdmaDirectTaskGranularity()) { holder_.clear(); }
+    if (UseSdmaDirectTaskLaunch()) { holder_.clear(); }
     if (waiter) { waiter->Done(); }
 }
 
@@ -261,7 +261,7 @@ Status LoadQueue::HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTas
     return stream.HostToDeviceAsync(hosts, mappedHosts, devices, tensorSizes_);
 }
 
-bool LoadQueue::UseSdmaDirectTaskGranularity() const noexcept
+bool LoadQueue::UseSdmaDirectTaskLaunch() const noexcept
 {
     return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == "task";
 }

@@ -60,7 +60,7 @@ private:
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
     size_t sdmaDirectMaxReadyLanes_{8};
-    std::string sdmaDirectLaunchGranularity_{"shard"};
+    std::string sdmaDirectLaunchGranularity_{"task"};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<DumpCtx> dumping_;
@@ -80,7 +80,7 @@ private:
     Status DeviceToHostTaskAsync(CopyStream& stream, const std::vector<void**>& devices,
                                  const std::vector<void*>& hosts,
                                  const std::vector<void*>& mappedHosts);
-    bool UseSdmaDirectTaskGranularity() const noexcept;
+    bool UseSdmaDirectTaskLaunch() const noexcept;
     void BackendDumpStage();
 };
 

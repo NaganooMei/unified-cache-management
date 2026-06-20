@@ -127,7 +127,7 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         auto handle = buffer_->Get(shard.owner, shard.index);
         if (!handle.Owner()) { continue; }
         if (!handle.Ready()) {
-            if (UseSdmaDirectTaskGranularity()) {
+            if (UseSdmaDirectTaskLaunch()) {
                 taskDevices.push_back(shard.addrs.data());
                 taskHosts.push_back(handle.Data());
                 taskMappedHosts.push_back(handle.DeviceData());
@@ -200,7 +200,7 @@ Status DumpQueue::DeviceToHostTaskAsync(CopyStream& stream, const std::vector<vo
     return stream.DeviceToHostAsync(devices, hosts, mappedHosts, tensorSizes_);
 }
 
-bool DumpQueue::UseSdmaDirectTaskGranularity() const noexcept
+bool DumpQueue::UseSdmaDirectTaskLaunch() const noexcept
 {
     return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == "task";
 }
