@@ -70,15 +70,11 @@ void DumpQueue::Submit(TaskPtr task, WaiterPtr waiter)
 
 void DumpQueue::DispatchStage(std::promise<Status>& started)
 {
-    Trans::StreamOptions options;
-    options.deviceId = deviceId_;
-    options.tensorSizes = tensorSizes_;
-    options.streamNumber = streamNumber_;
-    options.cacheSdmaDirect = cacheSdmaDirect_;
-    options.sdmaDirectMaxReadyLanes = sdmaDirectMaxReadyLanes_;
-
     CopyStream stream;
-    auto s = stream.Setup(deviceId_, options, useGdr_);
+    auto s = cacheSdmaDirect_
+                 ? stream.SetupSdmaDirect(deviceId_, streamNumber_, useGdr_,
+                                          sdmaDirectMaxReadyLanes_)
+                 : stream.Setup(deviceId_, streamNumber_, useGdr_);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {

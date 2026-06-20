@@ -7,6 +7,7 @@
 #define UNIFIEDCACHE_TRANS_ASCEND_SDMA_DIRECT_STREAM_H
 
 #include <memory>
+#include "trans/device.h"
 #include "trans/stream.h"
 
 namespace UC::Trans {
@@ -18,7 +19,7 @@ public:
     AscendSdmaDirectStream();
     ~AscendSdmaDirectStream() override;
     Status Setup() override;
-    Status Setup(const StreamOptions& options) override;
+    Status Setup(const SdmaDirectStreamConfig& config);
 
     Status DeviceToHost(void* device, void* host, size_t size) override;
     Status DeviceToHost(void* device[], void* host[], size_t size, size_t number) override;

@@ -39,34 +39,21 @@ class CopyStream {
 public:
     Status Setup(const int32_t deviceId, const size_t streamNumber, const bool useGdr)
     {
-        Trans::StreamOptions options;
-        options.deviceId = deviceId;
-        options.streamNumber = streamNumber;
-        return Setup(deviceId, options, useGdr);
-    }
-
-    Status Setup(const int32_t deviceId, const Trans::StreamOptions& options, const bool useGdr)
-    {
+        if (streamNumber == 0) { return Status::InvalidParam("invalid stream number"); }
         Trans::Device device;
         auto s = device.Setup(deviceId);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to setup device({}).", s, deviceId);
             return s;
         }
-        size_t streamPoolSize = 0;
-        s = Trans::ResolveCopyStreamPoolSize(options, streamPoolSize);
-        if (s.Failure()) [[unlikely]] { return s; }
-        if (useGdr && (options.cacheIOAggregation || options.cacheSdmaDirect)) {
-            return Status::InvalidParam("GDR stream is incompatible with cache copy strategy");
-        }
         streams_.clear();
-        streams_.reserve(streamPoolSize);
-        for (size_t i = 0; i < streamPoolSize; ++i) {
+        streams_.reserve(streamNumber);
+        for (size_t i = 0; i < streamNumber; ++i) {
             std::shared_ptr<Trans::Stream> stream;
             if (useGdr) {
                 stream = device.MakeGdrStream();
             } else {
-                stream = device.MakeSharedStream(options);
+                stream = device.MakeSharedStream();
             }
             if (!stream) [[unlikely]] {
                 UC_ERROR("Failed to make stream on device({}).", deviceId);
@@ -75,7 +62,38 @@ public:
             streams_.push_back(std::move(stream));
         }
         deviceId_ = deviceId;
-        streamNumber_ = streamPoolSize;
+        streamNumber_ = streamNumber;
+        streamIndex_ = 0;
+        return Status::OK();
+    }
+
+    Status SetupSdmaDirect(const int32_t deviceId, const size_t laneNumber,
+                           const bool useGdr, const size_t maxReadyLanes)
+    {
+        if (laneNumber == 0) { return Status::InvalidParam("invalid SDMA Direct lane number"); }
+        if (useGdr) {
+            return Status::InvalidParam("GDR stream is incompatible with cache SDMA Direct");
+        }
+        Trans::Device device;
+        auto s = device.Setup(deviceId);
+        if (s.Failure()) [[unlikely]] {
+            UC_ERROR("Failed({}) to setup device({}).", s, deviceId);
+            return s;
+        }
+        Trans::SdmaDirectStreamConfig config;
+        config.deviceId = deviceId;
+        config.laneNumber = laneNumber;
+        config.maxReadyLanes = maxReadyLanes;
+        auto stream = device.MakeSdmaDirectStream(config);
+        if (!stream) [[unlikely]] {
+            UC_ERROR("Failed to make cache SDMA Direct stream on device({}).", deviceId);
+            return Status::Error();
+        }
+        streams_.clear();
+        streams_.push_back(std::move(stream));
+        deviceId_ = deviceId;
+        streamNumber_ = 1;
+        streamIndex_ = 0;
         return Status::OK();
     }
     std::shared_ptr<Trans::Stream> NextStream() noexcept

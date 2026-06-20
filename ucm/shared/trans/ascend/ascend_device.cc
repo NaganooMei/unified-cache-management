@@ -63,22 +63,20 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
     return nullptr;
 }
 
-std::shared_ptr<Stream> Device::MakeSharedStream(const StreamOptions& options)
+std::shared_ptr<Stream> Device::MakeSdmaDirectStream(
+    const SdmaDirectStreamConfig& config)
 {
-    auto s = ValidateStreamOptions(options);
-    if (s.Failure()) [[unlikely]] { return nullptr; }
-    std::shared_ptr<Stream> stream = nullptr;
-    try {
 #if UCM_RUNTIME_ASCEND_SDMA_DIRECT
-        if (options.cacheSdmaDirect) {
-            stream = std::make_shared<AscendSdmaDirectStream>();
-        } else
-#endif
-        stream = std::make_shared<AscendStream>();
+    std::shared_ptr<AscendSdmaDirectStream> stream = nullptr;
+    try {
+        stream = std::make_shared<AscendSdmaDirectStream>();
     } catch (...) {
         return nullptr;
     }
-    if (stream->Setup(options).Success()) { return stream; }
+    if (stream->Setup(config).Success()) { return stream; }
+#else
+    (void)config;
+#endif
     return nullptr;
 }
 

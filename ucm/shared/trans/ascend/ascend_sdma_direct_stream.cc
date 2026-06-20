@@ -24,32 +24,23 @@ AscendSdmaDirectStream::~AscendSdmaDirectStream() = default;
 
 Status AscendSdmaDirectStream::Setup()
 {
-    return Status::InvalidParam("Cache SDMA Direct stream requires stream options");
+    return Status::InvalidParam("Cache SDMA Direct stream requires config");
 }
 
-Status AscendSdmaDirectStream::Setup(const StreamOptions& options)
+Status AscendSdmaDirectStream::Setup(const SdmaDirectStreamConfig& config)
 {
-    auto s = ValidateStreamOptions(options);
-    if (s.Failure()) [[unlikely]] { return s; }
-    if (!options.cacheSdmaDirect) {
-        return Status::InvalidParam("Cache SDMA Direct option is not enabled");
-    }
-    if (options.tensorSizes.empty()) {
-        return Status::InvalidParam("invalid tensor sizes for Cache SDMA Direct");
-    }
-    if (options.sdmaDirectMaxReadyLanes == 0 ||
-        options.sdmaDirectMaxReadyLanes >
-            static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
+    if (config.maxReadyLanes == 0 ||
+        config.maxReadyLanes > static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
         return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes({})",
-                                    options.sdmaDirectMaxReadyLanes);
+                                    config.maxReadyLanes);
     }
 
-    AscendSdmaDirectCopyConfig config;
-    config.deviceId = options.deviceId;
-    config.streamNumber = options.streamNumber;
-    config.maxReadyLanes = static_cast<uint16_t>(options.sdmaDirectMaxReadyLanes);
+    AscendSdmaDirectCopyConfig copyConfig;
+    copyConfig.deviceId = config.deviceId;
+    copyConfig.streamNumber = config.laneNumber;
+    copyConfig.maxReadyLanes = static_cast<uint16_t>(config.maxReadyLanes);
     auto copier = std::make_unique<AscendSdmaDirectCopier>();
-    s = copier->Setup(config);
+    auto s = copier->Setup(copyConfig);
     if (s.Failure()) [[unlikely]] { return s; }
     copier_ = std::move(copier);
     return Status::OK();

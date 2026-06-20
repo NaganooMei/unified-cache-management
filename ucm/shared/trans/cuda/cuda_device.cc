@@ -64,15 +64,10 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
     return nullptr;
 }
 
-std::shared_ptr<Stream> Device::MakeSharedStream(const StreamOptions& options)
+std::shared_ptr<Stream> Device::MakeSdmaDirectStream(
+    const SdmaDirectStreamConfig& config)
 {
-    std::shared_ptr<Stream> stream = nullptr;
-    try {
-        stream = std::make_shared<CudaStream>();
-    } catch (...) {
-        return nullptr;
-    }
-    if (stream->Setup(options).Success()) { return stream; }
+    (void)config;
     return nullptr;
 }
 
