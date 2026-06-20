@@ -70,16 +70,12 @@ void DumpQueue::Submit(TaskPtr task, WaiterPtr waiter)
 
 void DumpQueue::DispatchStage(std::promise<Status>& started)
 {
-    Trans::StreamOptions options;
-    options.deviceId = deviceId_;
-    options.tensorSizes = tensorSizes_;
-    options.streamNumber = streamNumber_;
-    options.cacheIOAggregation = cacheIOAggregation_;
-    options.ioAggregationPipelineDepth = ioAggregationPipelineDepth_;
-    options.ioAggregationMaxReadyLanes = ioAggregationMaxReadyLanes_;
-
     CopyStream stream;
-    auto s = stream.Setup(deviceId_, options, useGdr_);
+    auto s = cacheIOAggregation_
+                 ? stream.SetupIoAggregation(deviceId_, streamNumber_, useGdr_, tensorSizes_,
+                                             ioAggregationPipelineDepth_,
+                                             ioAggregationMaxReadyLanes_)
+                 : stream.Setup(deviceId_, streamNumber_, useGdr_);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {

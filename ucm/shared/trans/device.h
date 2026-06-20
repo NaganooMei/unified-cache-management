@@ -24,17 +24,28 @@
 #ifndef UNIFIEDCACHE_TRANS_DEVICE_H
 #define UNIFIEDCACHE_TRANS_DEVICE_H
 
+#include <cstddef>
+#include <cstdint>
 #include "buffer.h"
 #include "stream.h"
 
 namespace UC::Trans {
+
+struct IoAggregationStreamConfig {
+    int32_t deviceId{-1};
+    size_t laneNumber{1};
+    size_t objectBytes{0};
+    size_t maxFragments{0};
+    size_t pipelineDepth{2};
+    size_t maxReadyLanes{8};
+};
 
 class Device {
 public:
     Status Setup(int32_t deviceId);
     std::unique_ptr<Stream> MakeStream();
     std::shared_ptr<Stream> MakeSharedStream();
-    std::shared_ptr<Stream> MakeSharedStream(const StreamOptions& options);
+    std::shared_ptr<Stream> MakeIoAggregationStream(const IoAggregationStreamConfig& config);
     std::unique_ptr<Stream> MakeGdrStream();
     std::unique_ptr<Stream> MakeSMStream();
     std::unique_ptr<Buffer> MakeBuffer();

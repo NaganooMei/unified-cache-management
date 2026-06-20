@@ -29,35 +29,12 @@
 #include <vector>
 #include "status/status.h"
 
-#ifndef UCM_RUNTIME_ASCEND_IO_AGGREGATION
-#define UCM_RUNTIME_ASCEND_IO_AGGREGATION 0
-#endif
-#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
-#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
-#endif
-
 namespace UC::Trans {
-
-struct StreamOptions {
-    int32_t deviceId{-1};
-    size_t streamNumber{1};
-    std::vector<size_t> tensorSizes{};
-    bool cacheIOAggregation{false};
-    size_t ioAggregationPipelineDepth{2};
-    size_t ioAggregationMaxReadyLanes{8};
-    bool cacheSdmaDirect{false};
-    size_t sdmaDirectMaxReadyLanes{8};
-};
 
 class Stream {
 public:
     virtual ~Stream() = default;
     virtual Status Setup() = 0;
-    virtual Status Setup(const StreamOptions& options)
-    {
-        (void)options;
-        return Setup();
-    }
 
     virtual Status DeviceToHost(void* device, void* host, size_t size) = 0;
     virtual Status DeviceToHost(void* device[], void* host[], size_t size, size_t number) = 0;
@@ -103,30 +80,6 @@ public:
     virtual Status Synchronized() = 0;
     virtual Status WaitEvent(void* event) = 0;
 };
-
-inline Status ValidateStreamOptions(const StreamOptions& options)
-{
-    if (options.streamNumber == 0) { return Status::InvalidParam("invalid stream number"); }
-    if (options.cacheIOAggregation && options.cacheSdmaDirect) {
-        return Status::InvalidParam("conflicting Ascend copy options");
-    }
-    if (options.cacheIOAggregation && !UCM_RUNTIME_ASCEND_IO_AGGREGATION) {
-        return Status::InvalidParam("Cache IO aggregation is not compiled");
-    }
-    if (options.cacheSdmaDirect && !UCM_RUNTIME_ASCEND_SDMA_DIRECT) {
-        return Status::InvalidParam("Cache SDMA Direct is not compiled");
-    }
-    return Status::OK();
-}
-
-inline Status ResolveCopyStreamPoolSize(const StreamOptions& options, size_t& streamPoolSize)
-{
-    auto s = ValidateStreamOptions(options);
-    if (s.Failure()) [[unlikely]] { return s; }
-    streamPoolSize =
-        (options.cacheIOAggregation || options.cacheSdmaDirect) ? 1 : options.streamNumber;
-    return Status::OK();
-}
 
 }  // namespace UC::Trans
 

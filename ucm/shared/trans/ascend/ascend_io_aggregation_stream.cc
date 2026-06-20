@@ -5,7 +5,6 @@
  */
 #include "ascend_io_aggregation_stream.h"
 #include <limits>
-#include <numeric>
 #include "ascend_shard_io_aggregator.h"
 
 namespace UC::Trans {
@@ -25,37 +24,26 @@ AscendIoAggregationStream::~AscendIoAggregationStream() = default;
 
 Status AscendIoAggregationStream::Setup()
 {
-    return Status::InvalidParam("Cache IO aggregation stream requires stream options");
+    return Status::InvalidParam("Cache IO aggregation stream requires config");
 }
 
-Status AscendIoAggregationStream::Setup(const StreamOptions& options)
+Status AscendIoAggregationStream::Setup(const IoAggregationStreamConfig& config)
 {
-    auto s = ValidateStreamOptions(options);
-    if (s.Failure()) [[unlikely]] { return s; }
-    if (!options.cacheIOAggregation) {
-        return Status::InvalidParam("Cache IO aggregation option is not enabled");
-    }
-    if (options.tensorSizes.empty()) {
-        return Status::InvalidParam("invalid tensor sizes for Cache IO aggregation");
-    }
-    if (options.ioAggregationMaxReadyLanes == 0 ||
-        options.ioAggregationMaxReadyLanes >
-            static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
+    if (config.maxReadyLanes == 0 ||
+        config.maxReadyLanes > static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
         return Status::InvalidParam("invalid Cache IO aggregation max ready lanes({})",
-                                    options.ioAggregationMaxReadyLanes);
+                                    config.maxReadyLanes);
     }
 
-    const auto objectBytes =
-        std::accumulate(options.tensorSizes.begin(), options.tensorSizes.end(), size_t{0});
-    AscendShardIOAggregatorConfig config;
-    config.deviceId = options.deviceId;
-    config.streamNumber = options.streamNumber;
-    config.pipelineDepth = options.ioAggregationPipelineDepth;
-    config.maxReadyLanes = static_cast<uint16_t>(options.ioAggregationMaxReadyLanes);
-    config.objectBytes = objectBytes;
-    config.maxFragments = options.tensorSizes.size();
+    AscendShardIOAggregatorConfig aggregatorConfig;
+    aggregatorConfig.deviceId = config.deviceId;
+    aggregatorConfig.streamNumber = config.laneNumber;
+    aggregatorConfig.pipelineDepth = config.pipelineDepth;
+    aggregatorConfig.maxReadyLanes = static_cast<uint16_t>(config.maxReadyLanes);
+    aggregatorConfig.objectBytes = config.objectBytes;
+    aggregatorConfig.maxFragments = config.maxFragments;
     auto aggregator = std::make_unique<AscendShardIOAggregator>();
-    s = aggregator->Setup(config);
+    auto s = aggregator->Setup(aggregatorConfig);
     if (s.Failure()) [[unlikely]] { return s; }
     aggregator_ = std::move(aggregator);
     return Status::OK();
