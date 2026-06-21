@@ -24,7 +24,7 @@
 #include <acl/acl.h>
 #include "ascend_buffer.h"
 #if UCM_RUNTIME_ASCEND_IO_AGGREGATION
-#include "ascend_io_aggregation_stream.h"
+#include "io_aggregation/ascend_io_aggregation_stream.h"
 #endif
 #include "ascend_stream.h"
 #include "trans/device.h"

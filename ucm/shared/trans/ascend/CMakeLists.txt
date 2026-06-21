@@ -43,9 +43,9 @@ if(UCM_RUNTIME_ASCEND_IO_AGGREGATION)
             "RUNTIME_ENVIRONMENT=ascend requires Ascend profiling headers in: ${ASCEND_PROFILING_INCLUDE_DIR}")
     endif()
     target_sources(trans PRIVATE
-        ascend_io_aggregation_stream.cc
-        ascend_shard_io_aggregator.cc
-        ffts_sdma_dispatcher.cc
+        io_aggregation/ascend_io_aggregation_stream.cc
+        io_aggregation/ascend_shard_io_aggregator.cc
+        ffts/ffts_sdma_dispatcher.cc
     )
     target_include_directories(trans PUBLIC
         "${ASCEND_FFTS_INCLUDE_DIR}"
