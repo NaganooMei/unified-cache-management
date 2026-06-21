@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
-#include "ffts_sdma_dispatcher.h"
+#include "../ffts/ffts_sdma_dispatcher.h"
 #include "status/status.h"
 
 namespace UC::Trans {

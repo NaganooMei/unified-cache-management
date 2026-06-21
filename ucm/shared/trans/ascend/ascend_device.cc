@@ -24,7 +24,7 @@
 #include <acl/acl.h>
 #include "ascend_buffer.h"
 #if UCM_RUNTIME_ASCEND_SDMA_DIRECT
-#include "ascend_sdma_direct_stream.h"
+#include "sdma_direct/ascend_sdma_direct_stream.h"
 #endif
 #include "ascend_stream.h"
 #include "trans/device.h"

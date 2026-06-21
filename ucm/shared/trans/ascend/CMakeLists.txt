@@ -43,9 +43,9 @@ if(UCM_RUNTIME_ASCEND_SDMA_DIRECT)
             "RUNTIME_ENVIRONMENT=ascend-a3 requires Ascend profiling headers in: ${ASCEND_PROFILING_INCLUDE_DIR}")
     endif()
     target_sources(trans PRIVATE
-        ascend_sdma_direct_stream.cc
-        ascend_sdma_direct_copier.cc
-        ffts_sdma_dispatcher.cc
+        sdma_direct/ascend_sdma_direct_stream.cc
+        sdma_direct/ascend_sdma_direct_copier.cc
+        ffts/ffts_sdma_dispatcher.cc
     )
     target_include_directories(trans PUBLIC
         "${ASCEND_FFTS_INCLUDE_DIR}"
