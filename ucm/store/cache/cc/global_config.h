@@ -29,6 +29,10 @@
 #include <string>
 #include "ucmstore_v1.h"
 
+#ifndef UCM_RUNTIME_ASCEND_IO_AGGREGATION
+#define UCM_RUNTIME_ASCEND_IO_AGGREGATION 0
+#endif
+
 namespace UC::CacheStore {
 
 struct Config {
@@ -51,7 +55,7 @@ struct Config {
     std::vector<uintptr_t> gpuKvBufferAddrs{};
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
-    bool cacheIOAggregation{false};
+    bool cacheIOAggregation{UCM_RUNTIME_ASCEND_IO_AGGREGATION};
     size_t ioAggregationPipelineDepth{2};
     size_t ioAggregationMaxReadyLanes{8};
 };
