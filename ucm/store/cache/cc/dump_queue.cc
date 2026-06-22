@@ -109,7 +109,6 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     dumpCtx.taskHandle = task->id;
     std::vector<void**> taskDevices;
     std::vector<void*> taskHosts;
-    std::vector<void*> taskMappedHosts;
     if (task->desc.prerequisiteHandle != 0) {
         auto s = stream.WaitEvent(reinterpret_cast<void*>(task->desc.prerequisiteHandle));
         if (s.Failure()) [[unlikely]] {
@@ -125,11 +124,10 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         if (!handle.Ready()) {
             if (UseSdmaDirectTaskLaunch()) {
                 taskDevices.push_back(shard.addrs.data());
-                taskHosts.push_back(handle.Data());
-                taskMappedHosts.push_back(handle.DeviceData());
+                taskHosts.push_back(handle.DeviceData());
             } else {
-                auto s = DeviceToHostAsync(stream, shard.addrs.data(), handle.Data(),
-                                           handle.DeviceData());
+                auto* host = cacheSdmaDirect_ ? handle.DeviceData() : handle.Data();
+                auto s = DeviceToHostAsync(stream, shard.addrs.data(), host);
                 if (s.Failure()) [[unlikely]] {
                     UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
                     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
@@ -141,7 +139,7 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         dumpCtx.bufferHandles.push_back(std::move(handle));
     }
     if (!taskDevices.empty()) {
-        auto s = DeviceToHostTaskAsync(stream, taskDevices, taskHosts, taskMappedHosts);
+        auto s = DeviceToHostTaskAsync(stream, taskDevices, taskHosts);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
@@ -183,17 +181,15 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     return Status::OK();
 }
 
-Status DumpQueue::DeviceToHostAsync(CopyStream& stream, void** device, void* host,
-                                    void* mappedHost)
+Status DumpQueue::DeviceToHostAsync(CopyStream& stream, void** device, void* host)
 {
-    return stream.DeviceToHostAsync(device, host, tensorSizes_, mappedHost);
+    return stream.DeviceToHostAsync(device, host, tensorSizes_);
 }
 
 Status DumpQueue::DeviceToHostTaskAsync(CopyStream& stream, const std::vector<void**>& devices,
-                                        const std::vector<void*>& hosts,
-                                        const std::vector<void*>& mappedHosts)
+                                        const std::vector<void*>& hosts)
 {
-    return stream.DeviceToHostAsync(devices, hosts, mappedHosts, tensorSizes_);
+    return stream.DeviceToHostAsync(devices, hosts, tensorSizes_);
 }
 
 bool DumpQueue::UseSdmaDirectTaskLaunch() const noexcept

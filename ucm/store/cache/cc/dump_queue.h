@@ -76,10 +76,9 @@ private:
     void DispatchStage(std::promise<Status>& started);
     void DispatchOneTask(CopyStream& stream, TaskPair&& pair);
     Status DumpOneTask(CopyStream& stream, TaskPtr task);
-    Status DeviceToHostAsync(CopyStream& stream, void** device, void* host, void* mappedHost);
+    Status DeviceToHostAsync(CopyStream& stream, void** device, void* host);
     Status DeviceToHostTaskAsync(CopyStream& stream, const std::vector<void**>& devices,
-                                 const std::vector<void*>& hosts,
-                                 const std::vector<void*>& mappedHosts);
+                                 const std::vector<void*>& hosts);
     bool UseSdmaDirectTaskLaunch() const noexcept;
     void BackendDumpStage();
 };

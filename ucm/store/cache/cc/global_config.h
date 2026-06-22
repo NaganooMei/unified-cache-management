@@ -29,6 +29,10 @@
 #include <string>
 #include "ucmstore_v1.h"
 
+#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
+#endif
+
 namespace UC::CacheStore {
 
 struct Config {
@@ -51,7 +55,7 @@ struct Config {
     std::vector<uintptr_t> gpuKvBufferAddrs{};
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
-    bool cacheSdmaDirect{false};
+    bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
     size_t sdmaDirectMaxReadyLanes{8};
     std::string sdmaDirectLaunchGranularity{"task"};
 };

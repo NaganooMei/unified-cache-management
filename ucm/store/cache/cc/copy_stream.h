@@ -103,37 +103,33 @@ public:
         streamIndex_ = (streamIndex_ + 1) % streamNumber_;
         return stream;
     }
-    Status HostToDeviceAsync(void* host, void** device, const std::vector<size_t>& sizes,
-                             void* mappedHost = nullptr) noexcept
+    Status HostToDeviceAsync(void* host, void** device, const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
-        return stream->HostToDeviceAsync(host, device, sizes, mappedHost);
+        return stream->HostToDeviceAsync(host, device, sizes);
     }
     Status HostToDeviceAsync(const std::vector<void*>& hosts,
-                             const std::vector<void*>& mappedHosts,
                              const std::vector<void**>& devices,
                              const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
-        return stream->HostToDeviceAsync(hosts, mappedHosts, devices, sizes);
+        return stream->HostToDeviceAsync(hosts, devices, sizes);
     }
-    Status DeviceToHostAsync(void** device, void* host, const std::vector<size_t>& sizes,
-                             void* mappedHost = nullptr) noexcept
+    Status DeviceToHostAsync(void** device, void* host, const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
-        return stream->DeviceToHostAsync(device, host, sizes, mappedHost);
+        return stream->DeviceToHostAsync(device, host, sizes);
     }
     Status DeviceToHostAsync(const std::vector<void**>& devices,
                              const std::vector<void*>& hosts,
-                             const std::vector<void*>& mappedHosts,
                              const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
-        return stream->DeviceToHostAsync(devices, hosts, mappedHosts, sizes);
+        return stream->DeviceToHostAsync(devices, hosts, sizes);
     }
     Status WaitEvent(void* event) noexcept
     {

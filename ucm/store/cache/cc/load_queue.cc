@@ -187,8 +187,8 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             waiter->Done();
             return;
         }
-        s = HostToDeviceAsync(stream, task.bufferHandle.Data(), task.bufferHandle.DeviceData(),
-                              task.shard.addrs.data());
+        auto* host = cacheSdmaDirect_ ? task.bufferHandle.DeviceData() : task.bufferHandle.Data();
+        s = HostToDeviceAsync(stream, host, task.shard.addrs.data());
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
@@ -235,26 +235,23 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
     return Status::OK();
 }
 
-Status LoadQueue::HostToDeviceAsync(CopyStream& stream, void* host, void* mappedHost,
-                                    void** device)
+Status LoadQueue::HostToDeviceAsync(CopyStream& stream, void* host, void** device)
 {
-    return stream.HostToDeviceAsync(host, device, tensorSizes_, mappedHost);
+    return stream.HostToDeviceAsync(host, device, tensorSizes_);
 }
 
 Status LoadQueue::HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks)
 {
     std::vector<void*> hosts;
-    std::vector<void*> mappedHosts;
     std::vector<void**> devices;
     hosts.reserve(tasks.size());
-    mappedHosts.reserve(tasks.size());
     devices.reserve(tasks.size());
     for (auto& task : tasks) {
-        hosts.push_back(task.bufferHandle.Data());
-        mappedHosts.push_back(task.bufferHandle.DeviceData());
+        hosts.push_back(cacheSdmaDirect_ ? task.bufferHandle.DeviceData()
+                                         : task.bufferHandle.Data());
         devices.push_back(task.shard.addrs.data());
     }
-    return stream.HostToDeviceAsync(hosts, mappedHosts, devices, tensorSizes_);
+    return stream.HostToDeviceAsync(hosts, devices, tensorSizes_);
 }
 
 bool LoadQueue::UseSdmaDirectTaskLaunch() const noexcept

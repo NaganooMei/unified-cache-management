@@ -107,51 +107,45 @@ Status AscendSdmaDirectStream::HostToDeviceAsync(void*, void*[], size_t, size_t)
 }
 
 Status AscendSdmaDirectStream::HostToDeviceAsync(void* host, void* device[],
-                                                 const std::vector<size_t>& sizes,
-                                                 void* mappedHost)
+                                                 const std::vector<size_t>& sizes)
 {
-    (void)host;
     if (!copier_) [[unlikely]] { return Status::Error("Cache SDMA Direct stream is not setup"); }
-    if (mappedHost == nullptr) [[unlikely]] {
-        return Status::InvalidParam("Cache SDMA Direct requires mapped host buffer");
+    if (host == nullptr) [[unlikely]] {
+        return Status::InvalidParam("Cache SDMA Direct requires host device pointer");
     }
-    return copier_->SubmitLoadObject(mappedHost, device, sizes);
+    return copier_->SubmitLoadObject(host, device, sizes);
 }
 
 Status AscendSdmaDirectStream::HostToDeviceAsync(const std::vector<void*>& hosts,
-                                                 const std::vector<void*>& mappedHosts,
                                                  const std::vector<void**>& devices,
                                                  const std::vector<size_t>& sizes)
 {
     if (!copier_) [[unlikely]] { return Status::Error("Cache SDMA Direct stream is not setup"); }
-    if (hosts.size() != devices.size() || mappedHosts.size() != devices.size()) [[unlikely]] {
+    if (hosts.size() != devices.size()) [[unlikely]] {
         return Status::InvalidParam("invalid Cache SDMA Direct H2D task inputs");
     }
-    return copier_->SubmitLoadTask(mappedHosts, devices, sizes);
+    return copier_->SubmitLoadTask(hosts, devices, sizes);
 }
 
 Status AscendSdmaDirectStream::DeviceToHostAsync(void* device[], void* host,
-                                                 const std::vector<size_t>& sizes,
-                                                 void* mappedHost)
+                                                 const std::vector<size_t>& sizes)
 {
-    (void)host;
     if (!copier_) [[unlikely]] { return Status::Error("Cache SDMA Direct stream is not setup"); }
-    if (mappedHost == nullptr) [[unlikely]] {
-        return Status::InvalidParam("Cache SDMA Direct requires mapped host buffer");
+    if (host == nullptr) [[unlikely]] {
+        return Status::InvalidParam("Cache SDMA Direct requires host device pointer");
     }
-    return copier_->SubmitDumpObject(device, mappedHost, sizes);
+    return copier_->SubmitDumpObject(device, host, sizes);
 }
 
 Status AscendSdmaDirectStream::DeviceToHostAsync(const std::vector<void**>& devices,
                                                  const std::vector<void*>& hosts,
-                                                 const std::vector<void*>& mappedHosts,
                                                  const std::vector<size_t>& sizes)
 {
     if (!copier_) [[unlikely]] { return Status::Error("Cache SDMA Direct stream is not setup"); }
-    if (hosts.size() != devices.size() || mappedHosts.size() != devices.size()) [[unlikely]] {
+    if (hosts.size() != devices.size()) [[unlikely]] {
         return Status::InvalidParam("invalid Cache SDMA Direct D2H task inputs");
     }
-    return copier_->SubmitDumpTask(devices, mappedHosts, sizes);
+    return copier_->SubmitDumpTask(devices, hosts, sizes);
 }
 
 Status AscendSdmaDirectStream::AppendCallback(std::function<void(bool)> cb)

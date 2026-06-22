@@ -80,7 +80,7 @@ private:
     void TransferStage(std::promise<Status>& started);
     void TransferOneTask(CopyStream& stream, ShardTask&& task);
     Status WaitBackendTaskReady(ShardTask& task);
-    Status HostToDeviceAsync(CopyStream& stream, void* host, void* mappedHost, void** device);
+    Status HostToDeviceAsync(CopyStream& stream, void* host, void** device);
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
     bool UseSdmaDirectTaskLaunch() const noexcept;
 };
