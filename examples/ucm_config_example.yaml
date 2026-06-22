@@ -19,16 +19,6 @@ ucm_connectors:
       # cache_buffer_capacity_gb: 256
       # posix_capacity_gb: 1024
 
-      # Enable GPUDirect RDMA transfers for CacheStore/PcStore H2D and D2H copies.
-      # This requires an RDMA-capable NIC, a working GPUDirect RDMA environment,
-      # and building UCM with ENABLE_GDR=1.
-      use_gdr: false
-
-      # Enable direct Ascend FFTS SDMA for CacheStore load H2D and dump D2H copies.
-      # This requires building UCM with PLATFORM=ascend-a3.
-      # This replaces the normal per-tensor aclrtMemcpyAsync path with FFTS SDMA descriptors.
-      cache_sdma_direct: false
-
 # When you use UcmNfsStore, you should set enable_event_sync to false.
 enable_event_sync: true
 # Enable UCM metrics so they can be monitored online via Grafana and Prometheus.
