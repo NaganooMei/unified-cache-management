@@ -27,6 +27,7 @@
 #include <future>
 #include <string>
 #include <thread>
+#include <vector>
 #include "copy_stream.h"
 #include "template/hashset.h"
 #include "template/spsc_ring_queue.h"
@@ -47,9 +48,15 @@ class LoadQueue {
         Detail::Shard shard;
         TransBuffer::Handle bufferHandle;
         Detail::TaskHandle backendTaskHandle;
+        double backendReadyTp{0.0};
         WaiterPtr waiter;
     };
     struct LoadPipelineTrace {
+        struct BackendWaitSpan {
+            double startTp{0.0};
+            double endTp{0.0};
+            bool backendLoad{false};
+        };
         bool active{false};
         Detail::TaskHandle taskHandle{0};
         size_t shardCount{0};
@@ -60,7 +67,14 @@ class LoadQueue {
         double startTp{0.0};
         double firstH2dSubmitStartTp{0.0};
         double backendWaitMs{0.0};
+        double backendLoadWaitMs{0.0};
+        double cacheBufferWaitMs{0.0};
         double h2dSubmitMs{0.0};
+        std::vector<BackendWaitSpan> backendWaitSpans{};
+        std::vector<double> backendLoadReadyTps{};
+        std::vector<double> allReadyTps{};
+        std::vector<double> h2dSubmitStartTps{};
+        std::vector<double> readyToH2dGapMs{};
     };
 
 private:
@@ -99,10 +113,12 @@ private:
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
     Status FlushSdmaDirectBatch(CopyStream& stream);
     void ClearSdmaDirectHolders() noexcept;
-    void ResetPipelineTrace(Detail::TaskHandle taskHandle) noexcept;
-    void RecordBackendWait(const ShardTask& task, double waitMs) noexcept;
+    void ResetPipelineTrace(Detail::TaskHandle taskHandle);
+    void RecordBackendWait(const ShardTask& task, double waitStartTp,
+                           double readyTp);
     void RecordH2dLaunch(double submitStartTp, double submitEndTp,
-                         size_t shardCount) noexcept;
+                         const std::vector<double>& backendReadyTps);
+    static std::vector<double> CollectBackendReadyTps(const std::vector<ShardTask>& tasks);
     void LogPipelineTrace(double syncStartTp, double syncEndTp) const;
     bool UseSdmaDirectTaskLaunch() const noexcept;
     bool UseSdmaDirectBatchLaunch() const noexcept;
