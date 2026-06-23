@@ -49,6 +49,19 @@ class LoadQueue {
         Detail::TaskHandle backendTaskHandle;
         WaiterPtr waiter;
     };
+    struct LoadPipelineTrace {
+        bool active{false};
+        Detail::TaskHandle taskHandle{0};
+        size_t shardCount{0};
+        size_t backendLoadShardCount{0};
+        size_t cacheBufferShardCount{0};
+        size_t h2dLaunchCount{0};
+        size_t h2dShardCount{0};
+        double startTp{0.0};
+        double firstH2dSubmitStartTp{0.0};
+        double backendWaitMs{0.0};
+        double h2dSubmitMs{0.0};
+    };
 
 private:
     alignas(64) std::atomic_bool stop_{false};
@@ -69,6 +82,7 @@ private:
     std::thread transfer_;
     std::vector<ShardTask> holder_;
     std::vector<ShardTask> sdmaDirectBatchHolder_;
+    LoadPipelineTrace pipelineTrace_;
 
 public:
     ~LoadQueue();
@@ -85,6 +99,11 @@ private:
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
     Status FlushSdmaDirectBatch(CopyStream& stream);
     void ClearSdmaDirectHolders() noexcept;
+    void ResetPipelineTrace(Detail::TaskHandle taskHandle) noexcept;
+    void RecordBackendWait(const ShardTask& task, double waitMs) noexcept;
+    void RecordH2dLaunch(double submitStartTp, double submitEndTp,
+                         size_t shardCount) noexcept;
+    void LogPipelineTrace(double syncStartTp, double syncEndTp) const;
     bool UseSdmaDirectTaskLaunch() const noexcept;
     bool UseSdmaDirectBatchLaunch() const noexcept;
 };

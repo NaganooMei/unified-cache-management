@@ -119,12 +119,16 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
         running_.Push(std::move(shardTask));
     }
     auto tpDispatch = NowTime::Now();
+    auto dispatchMs = (tpDispatch - tpWait) * 1e3;
+    auto queueWaitMs = (tpWait - tp) * 1e3;
+    auto cacheBufferCount = nShard - backendSubmitCount;
     UC_DEBUG("Cache task({}) dispatch shards({}), wait={:.3f}ms, cost={:.3f}ms.", task->id, nShard,
-             (tpWait - tp) * 1e3, (tpDispatch - tpWait) * 1e3);
-    UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_queue_wait_duration_ms"),
-                             (tpWait - tp) * 1e3);
-    UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_dispatch_duration_ms"),
-                             (tpDispatch - tpWait) * 1e3);
+             queueWaitMs, dispatchMs);
+    UC_INFO("[UCM_LOAD_DISPATCH] task={} shards={} backend_load_shards={} "
+            "cache_buffer_shards={} queue_wait_ms={:.3f} dispatch_ms={:.3f}.",
+            task->id, nShard, backendSubmitCount, cacheBufferCount, queueWaitMs, dispatchMs);
+    UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_queue_wait_duration_ms"), queueWaitMs);
+    UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_dispatch_duration_ms"), dispatchMs);
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_backend_shards_total"),
                              static_cast<double>(backendSubmitCount));
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_shards_total"),
@@ -149,6 +153,9 @@ void LoadQueue::TransferStage(std::promise<Status>& started)
 
 void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
 {
+    if (!pipelineTrace_.active || pipelineTrace_.taskHandle != task.taskHandle) {
+        ResetPipelineTrace(task.taskHandle);
+    }
     if (failureSet_->Contains(task.taskHandle)) {
         if (task.waiter) {
             ClearSdmaDirectHolders();
@@ -164,27 +171,34 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
+        RecordBackendWait(task, (tpBackendReady - tpBackendWait) * 1e3);
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
                                  (tpBackendReady - tpBackendWait) * 1e3);
         if (UseSdmaDirectTaskLaunch()) {
             holder_.push_back(std::move(task));
             if (!waiter) { return; }
+            const auto launchShardCount = holder_.size();
+            auto tpH2dSubmitStart = NowTime::Now();
             s = HostToDeviceTaskAsync(stream, holder_);
+            auto tpH2dSubmitted = NowTime::Now();
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
-            auto tpH2dSubmitted = NowTime::Now();
+            RecordH2dLaunch(tpH2dSubmitStart, tpH2dSubmitted, launchShardCount);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
                                      (tpH2dSubmitted - tpBackendReady) * 1e3);
+            auto tpSyncStart = NowTime::Now();
             s = stream.Synchronize();
+            auto tpSyncEnd = NowTime::Now();
             ClearSdmaDirectHolders();
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to sync on stream for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
+            LogPipelineTrace(tpSyncStart, tpSyncEnd);
             waiter->Done();
             return;
         }
@@ -193,47 +207,58 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             const bool shouldFlush =
                 waiter || sdmaDirectBatchHolder_.size() >= kSdmaDirectLaunchBatchSize;
             if (!shouldFlush) { return; }
+            const auto launchShardCount = sdmaDirectBatchHolder_.size();
+            auto tpH2dSubmitStart = NowTime::Now();
             s = FlushSdmaDirectBatch(stream);
+            auto tpH2dSubmitted = NowTime::Now();
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
-            auto tpH2dSubmitted = NowTime::Now();
+            RecordH2dLaunch(tpH2dSubmitStart, tpH2dSubmitted, launchShardCount);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
                                      (tpH2dSubmitted - tpBackendReady) * 1e3);
             if (!waiter) { return; }
+            auto tpSyncStart = NowTime::Now();
             s = stream.Synchronize();
+            auto tpSyncEnd = NowTime::Now();
             ClearSdmaDirectHolders();
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to sync on stream for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
+            LogPipelineTrace(tpSyncStart, tpSyncEnd);
             waiter->Done();
             return;
         }
         auto* host = cacheSdmaDirect_ ? task.bufferHandle.DeviceData() : task.bufferHandle.Data();
+        auto tpH2dSubmitStart = NowTime::Now();
         s = HostToDeviceAsync(stream, host, task.shard.addrs.data());
+        auto tpH2dSubmitted = NowTime::Now();
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
-        auto tpH2dSubmitted = NowTime::Now();
+        RecordH2dLaunch(tpH2dSubmitStart, tpH2dSubmitted, 1);
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
                                  (tpH2dSubmitted - tpBackendReady) * 1e3);
         if (!task.waiter) {
             holder_.push_back(std::move(task));
             return;
         }
+        auto tpSyncStart = NowTime::Now();
         s = stream.Synchronize();
+        auto tpSyncEnd = NowTime::Now();
         holder_.clear();
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
+        LogPipelineTrace(tpSyncStart, tpSyncEnd);
     } while (0);
     if (s.Failure()) [[unlikely]] {
         if (UseSdmaDirectBatchLaunch() && !holder_.empty()) {
@@ -305,6 +330,62 @@ void LoadQueue::ClearSdmaDirectHolders() noexcept
 {
     holder_.clear();
     sdmaDirectBatchHolder_.clear();
+}
+
+void LoadQueue::ResetPipelineTrace(Detail::TaskHandle taskHandle) noexcept
+{
+    pipelineTrace_ = {};
+    pipelineTrace_.active = true;
+    pipelineTrace_.taskHandle = taskHandle;
+    pipelineTrace_.startTp = NowTime::Now();
+}
+
+void LoadQueue::RecordBackendWait(const ShardTask& task, double waitMs) noexcept
+{
+    pipelineTrace_.shardCount++;
+    if (task.backendTaskHandle != 0) {
+        pipelineTrace_.backendLoadShardCount++;
+    } else {
+        pipelineTrace_.cacheBufferShardCount++;
+    }
+    pipelineTrace_.backendWaitMs += waitMs;
+}
+
+void LoadQueue::RecordH2dLaunch(double submitStartTp, double submitEndTp,
+                                size_t shardCount) noexcept
+{
+    pipelineTrace_.h2dLaunchCount++;
+    pipelineTrace_.h2dShardCount += shardCount;
+    pipelineTrace_.h2dSubmitMs += (submitEndTp - submitStartTp) * 1e3;
+    if (pipelineTrace_.firstH2dSubmitStartTp <= 0.0) {
+        pipelineTrace_.firstH2dSubmitStartTp = submitStartTp;
+    }
+}
+
+void LoadQueue::LogPipelineTrace(double syncStartTp, double syncEndTp) const
+{
+    const auto totalMs = (syncEndTp - pipelineTrace_.startTp) * 1e3;
+    const auto firstH2dDelayMs = pipelineTrace_.firstH2dSubmitStartTp > 0.0
+                                     ? (pipelineTrace_.firstH2dSubmitStartTp -
+                                        pipelineTrace_.startTp) *
+                                           1e3
+                                     : 0.0;
+    const auto tailSyncMs = (syncEndTp - syncStartTp) * 1e3;
+    const auto backendWaitRatio =
+        totalMs > 0 ? pipelineTrace_.backendWaitMs / totalMs : 0.0;
+    const auto tailSyncRatio = totalMs > 0 ? tailSyncMs / totalMs : 0.0;
+    const std::string launchGranularity =
+        cacheSdmaDirect_ ? sdmaDirectLaunchGranularity_ : "copy";
+    UC_INFO("[UCM_LOAD_PIPELINE] task={} granularity={} shards={} backend_load_shards={} "
+            "cache_buffer_shards={} h2d_launches={} h2d_shards={} transfer_total_ms={:.3f} "
+            "backend_wait_visible_ms={:.3f} backend_wait_visible_ratio={:.3f} "
+            "h2d_submit_ms={:.3f} first_h2d_delay_ms={:.3f} h2d_tail_sync_ms={:.3f} "
+            "h2d_tail_sync_ratio={:.3f}.",
+            pipelineTrace_.taskHandle, launchGranularity, pipelineTrace_.shardCount,
+            pipelineTrace_.backendLoadShardCount, pipelineTrace_.cacheBufferShardCount,
+            pipelineTrace_.h2dLaunchCount, pipelineTrace_.h2dShardCount, totalMs,
+            pipelineTrace_.backendWaitMs, backendWaitRatio, pipelineTrace_.h2dSubmitMs,
+            firstH2dDelayMs, tailSyncMs, tailSyncRatio);
 }
 
 bool LoadQueue::UseSdmaDirectTaskLaunch() const noexcept
