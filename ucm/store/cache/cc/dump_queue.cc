@@ -133,7 +133,7 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         auto handle = buffer_->Get(shard.owner, shard.index);
         if (!handle.Owner()) { continue; }
         if (!handle.Ready()) {
-            auto s = DeviceToHostAsync(stream, shard.addrs.data(), handle.Data(), nullptr);
+            auto s = DeviceToHostAsync(stream, shard.addrs.data(), handle.Data());
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
@@ -194,10 +194,9 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     return Status::OK();
 }
 
-Status DumpQueue::DeviceToHostAsync(CopyStream& stream, void** device, void* host,
-                                    void* mappedHost)
+Status DumpQueue::DeviceToHostAsync(CopyStream& stream, void** device, void* host)
 {
-    return stream.DeviceToHostAsync(device, host, tensorSizes_, mappedHost);
+    return stream.DeviceToHostAsync(device, host, tensorSizes_);
 }
 
 void DumpQueue::BackendDumpStage()

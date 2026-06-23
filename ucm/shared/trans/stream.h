@@ -49,10 +49,8 @@ public:
     virtual Status HostToDeviceAsync(void* host, void* device, size_t size) = 0;
     virtual Status HostToDeviceAsync(void* host[], void* device[], size_t size, size_t number) = 0;
     virtual Status HostToDeviceAsync(void* host, void* device[], size_t size, size_t number) = 0;
-    virtual Status HostToDeviceAsync(void* host, void* device[], const std::vector<size_t>& sizes,
-                                     void* mappedHost = nullptr)
+    virtual Status HostToDeviceAsync(void* host, void* device[], const std::vector<size_t>& sizes)
     {
-        (void)mappedHost;
         size_t offset = 0;
         for (size_t i = 0; i < sizes.size(); ++i) {
             auto* pHost = static_cast<void*>(static_cast<int8_t*>(host) + offset);
@@ -62,10 +60,8 @@ public:
         }
         return Status::OK();
     }
-    virtual Status DeviceToHostAsync(void* device[], void* host, const std::vector<size_t>& sizes,
-                                     void* mappedHost = nullptr)
+    virtual Status DeviceToHostAsync(void* device[], void* host, const std::vector<size_t>& sizes)
     {
-        (void)mappedHost;
         size_t offset = 0;
         for (size_t i = 0; i < sizes.size(); ++i) {
             auto* pHost = static_cast<void*>(static_cast<int8_t*>(host) + offset);

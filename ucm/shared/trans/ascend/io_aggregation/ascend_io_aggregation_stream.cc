@@ -110,10 +110,8 @@ Status AscendIoAggregationStream::HostToDeviceAsync(void*, void*[], size_t, size
 }
 
 Status AscendIoAggregationStream::HostToDeviceAsync(void* host, void* device[],
-                                                    const std::vector<size_t>& sizes,
-                                                    void* mappedHost)
+                                                    const std::vector<size_t>& sizes)
 {
-    (void)mappedHost;
     if (!aggregator_) [[unlikely]] {
         return Status::Error("Cache IO aggregation stream is not setup");
     }
@@ -121,10 +119,8 @@ Status AscendIoAggregationStream::HostToDeviceAsync(void* host, void* device[],
 }
 
 Status AscendIoAggregationStream::DeviceToHostAsync(void* device[], void* host,
-                                                    const std::vector<size_t>& sizes,
-                                                    void* mappedHost)
+                                                    const std::vector<size_t>& sizes)
 {
-    (void)mappedHost;
     if (!aggregator_) [[unlikely]] {
         return Status::Error("Cache IO aggregation stream is not setup");
     }
