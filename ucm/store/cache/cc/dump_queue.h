@@ -60,7 +60,6 @@ private:
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
     size_t sdmaDirectMaxReadyLanes_{8};
-    std::string sdmaDirectLaunchGranularity_{kSdmaDirectLaunchTask};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<DumpCtx> dumping_;
@@ -77,9 +76,6 @@ private:
     void DispatchOneTask(CopyStream& stream, TaskPair&& pair);
     Status DumpOneTask(CopyStream& stream, TaskPtr task);
     Status DeviceToHostAsync(CopyStream& stream, void** device, void* host);
-    Status DeviceToHostTaskAsync(CopyStream& stream, const std::vector<void**>& devices,
-                                 const std::vector<void*>& hosts);
-    bool UseSdmaDirectTaskLaunch() const noexcept;
     void BackendDumpStage();
 };
 
