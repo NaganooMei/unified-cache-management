@@ -40,7 +40,7 @@ namespace UC::CacheStore {
 inline constexpr const char* kSdmaDirectLaunchShard = "shard";
 inline constexpr const char* kSdmaDirectLaunchTask = "task";
 inline constexpr const char* kSdmaDirectLaunchBatch = "batch";
-inline constexpr size_t kSdmaDirectLaunchBatchSize = 64;
+inline constexpr size_t kSdmaDirectLaunchBatchSize = 32;
 
 struct Config {
     StoreV1* storeBackend{};
