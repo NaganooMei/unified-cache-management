@@ -109,6 +109,15 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     dumpCtx.taskHandle = task->id;
     std::vector<void**> taskDevices;
     std::vector<void*> taskHosts;
+    auto flushSdmaDirectBatch = [&]() {
+        if (taskDevices.empty()) { return Status::OK(); }
+        auto s = DeviceToHostTaskAsync(stream, taskDevices, taskHosts);
+        if (s.Success()) {
+            taskDevices.clear();
+            taskHosts.clear();
+        }
+        return s;
+    };
     if (task->desc.prerequisiteHandle != 0) {
         auto s = stream.WaitEvent(reinterpret_cast<void*>(task->desc.prerequisiteHandle));
         if (s.Failure()) [[unlikely]] {
@@ -122,9 +131,19 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         auto handle = buffer_->Get(shard.owner, shard.index);
         if (!handle.Owner()) { continue; }
         if (!handle.Ready()) {
-            if (UseSdmaDirectTaskLaunch()) {
+            if (UseSdmaDirectTaskLaunch() || UseSdmaDirectBatchLaunch()) {
                 taskDevices.push_back(shard.addrs.data());
                 taskHosts.push_back(handle.DeviceData());
+                if (UseSdmaDirectBatchLaunch() &&
+                    taskDevices.size() >= kSdmaDirectLaunchBatchSize) {
+                    auto s = flushSdmaDirectBatch();
+                    if (s.Failure()) [[unlikely]] {
+                        UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
+                        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"),
+                                                 1.0);
+                        return s;
+                    }
+                }
             } else {
                 auto* host = cacheSdmaDirect_ ? handle.DeviceData() : handle.Data();
                 auto s = DeviceToHostAsync(stream, shard.addrs.data(), host);
@@ -138,13 +157,11 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         backendTaskDesc.push_back(Detail::Shard{shard.owner, shard.index, {handle.Data()}});
         dumpCtx.bufferHandles.push_back(std::move(handle));
     }
-    if (!taskDevices.empty()) {
-        auto s = DeviceToHostTaskAsync(stream, taskDevices, taskHosts);
-        if (s.Failure()) [[unlikely]] {
-            UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
-            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
-            return s;
-        }
+    auto s = flushSdmaDirectBatch();
+    if (s.Failure()) [[unlikely]] {
+        UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
+        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
+        return s;
     }
     auto tpMakeBuffer = NowTime::Now();
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_dump_shards_total"),
@@ -152,7 +169,7 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_dump_backend_shards_total"),
                              static_cast<double>(backendTaskDesc.size()));
     if (backendTaskDesc.empty()) { return Status::OK(); }
-    auto s = stream.Synchronize();
+    s = stream.Synchronize();
     if (s.Failure()) [[unlikely]] {
         UC_ERROR("Failed({}) to sync on stream for task({}).", s, task->id);
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
@@ -194,7 +211,12 @@ Status DumpQueue::DeviceToHostTaskAsync(CopyStream& stream, const std::vector<vo
 
 bool DumpQueue::UseSdmaDirectTaskLaunch() const noexcept
 {
-    return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == "task";
+    return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == kSdmaDirectLaunchTask;
+}
+
+bool DumpQueue::UseSdmaDirectBatchLaunch() const noexcept
+{
+    return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == kSdmaDirectLaunchBatch;
 }
 
 void DumpQueue::BackendDumpStage()

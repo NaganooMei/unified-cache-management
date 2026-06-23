@@ -61,13 +61,14 @@ private:
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
     size_t sdmaDirectMaxReadyLanes_{8};
-    std::string sdmaDirectLaunchGranularity_{"task"};
+    std::string sdmaDirectLaunchGranularity_{kSdmaDirectLaunchTask};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;
     std::thread dispatcher_;
     std::thread transfer_;
     std::vector<ShardTask> holder_;
+    std::vector<ShardTask> sdmaDirectBatchHolder_;
 
 public:
     ~LoadQueue();
@@ -82,7 +83,10 @@ private:
     Status WaitBackendTaskReady(ShardTask& task);
     Status HostToDeviceAsync(CopyStream& stream, void* host, void** device);
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
+    Status FlushSdmaDirectBatch(CopyStream& stream);
+    void ClearSdmaDirectHolders() noexcept;
     bool UseSdmaDirectTaskLaunch() const noexcept;
+    bool UseSdmaDirectBatchLaunch() const noexcept;
 };
 
 }  // namespace UC::CacheStore

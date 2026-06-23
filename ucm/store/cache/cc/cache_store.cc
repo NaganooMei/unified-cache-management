@@ -194,8 +194,9 @@ private:
             return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
         }
 #endif
-        if (config.sdmaDirectLaunchGranularity != "shard" &&
-            config.sdmaDirectLaunchGranularity != "task") {
+        if (config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchShard &&
+            config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchTask &&
+            config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchBatch) {
             return Status::InvalidParam("invalid Cache SDMA Direct launch granularity({})",
                                         config.sdmaDirectLaunchGranularity);
         }
