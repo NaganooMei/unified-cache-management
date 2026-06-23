@@ -80,7 +80,6 @@ private:
     Status DeviceToHostTaskAsync(CopyStream& stream, const std::vector<void**>& devices,
                                  const std::vector<void*>& hosts);
     bool UseSdmaDirectTaskLaunch() const noexcept;
-    bool UseSdmaDirectBatchLaunch() const noexcept;
     void BackendDumpStage();
 };
 
