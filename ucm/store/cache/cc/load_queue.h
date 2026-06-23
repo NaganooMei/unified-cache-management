@@ -56,6 +56,7 @@ private:
     StoreV1* backend_{nullptr};
     int32_t deviceId_{-1};
     std::vector<size_t> tensorSizes_{};
+    size_t shardBytes_{0};
     size_t streamNumber_{1};
     bool useGdr_{false};
     bool cacheIOAggregation_{false};
@@ -67,6 +68,7 @@ private:
     std::thread dispatcher_;
     std::thread transfer_;
     std::vector<ShardTask> holder_;
+    double h2dBatchStartTp_{0.0};
 
 public:
     ~LoadQueue();

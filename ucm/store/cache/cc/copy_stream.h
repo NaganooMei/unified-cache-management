@@ -24,7 +24,10 @@
 #ifndef UNIFIEDCACHE_CACHE_STORE_CC_COPY_STREAM_H
 #define UNIFIEDCACHE_CACHE_STORE_CC_COPY_STREAM_H
 
+#include <functional>
+#include <memory>
 #include <numeric>
+#include <vector>
 #include "logger/logger.h"
 #include "status/status.h"
 #include "trans/device.h"
@@ -125,6 +128,11 @@ public:
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         return stream->DeviceToHostAsync(device, host, sizes, mappedHost);
+    }
+    Status AppendCallback(std::function<void(bool)> cb) noexcept
+    {
+        if (streams_.empty()) [[unlikely]] { return Status::Error(); }
+        return streams_.front()->AppendCallback(std::move(cb));
     }
     Status WaitEvent(void* event) noexcept
     {
