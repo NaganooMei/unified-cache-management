@@ -58,10 +58,8 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
     return nullptr;
 }
 
-std::shared_ptr<Stream> Device::MakeSdmaDirectStream(
-    const SdmaDirectStreamConfig& config)
+std::shared_ptr<Stream> Device::MakeSdmaDirectStream()
 {
-    (void)config;
     return nullptr;
 }
 

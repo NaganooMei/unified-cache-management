@@ -46,13 +46,11 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
-    sdmaDirectMaxReadyLanes_ = config.sdmaDirectMaxReadyLanes;
     sdmaDirectLaunchGranularity_ = config.sdmaDirectLaunchGranularity;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
     holder_.reserve(1024);
-    sdmaDirectBatchHolder_.reserve(kSdmaDirectLaunchBatchSize);
     dispatcher_ = std::thread{&LoadQueue::DispatchStage, this};
     std::promise<Status> started;
     auto fut = started.get_future();
@@ -136,8 +134,7 @@ void LoadQueue::TransferStage(std::promise<Status>& started)
 {
     CopyStream stream;
     auto s = cacheSdmaDirect_
-                 ? stream.SetupSdmaDirect(deviceId_, streamNumber_, useGdr_,
-                                          sdmaDirectMaxReadyLanes_)
+                 ? stream.SetupSdmaDirect(deviceId_, useGdr_)
                  : stream.Setup(deviceId_, streamNumber_, useGdr_);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
@@ -199,36 +196,6 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             waiter->Done();
             return;
         }
-        if (UseSdmaDirectBatchLaunch()) {
-            sdmaDirectBatchHolder_.push_back(std::move(task));
-            const bool shouldFlush =
-                waiter || sdmaDirectBatchHolder_.size() >= kSdmaDirectLaunchBatchSize;
-            if (!shouldFlush) { return; }
-            auto tpH2dSubmitStart = NowTime::Now();
-            s = FlushSdmaDirectBatch(stream);
-            auto tpH2dSubmitted = NowTime::Now();
-            if (s.Failure()) [[unlikely]] {
-                UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
-                UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
-                break;
-            }
-            RecordH2dLaunch(tpH2dSubmitStart);
-            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
-                                     (tpH2dSubmitted - tpBackendReady) * 1e3);
-            if (!waiter) { return; }
-            auto tpSyncStart = NowTime::Now();
-            s = stream.Synchronize();
-            auto tpSyncEnd = NowTime::Now();
-            ClearSdmaDirectHolders();
-            if (s.Failure()) [[unlikely]] {
-                UC_ERROR("Failed({}) to sync on stream for task({}).", s, taskHandle);
-                UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
-                break;
-            }
-            RecordLoadSummary(tpSyncStart, tpSyncEnd);
-            waiter->Done();
-            return;
-        }
         auto* host = cacheSdmaDirect_ ? task.bufferHandle.DeviceData() : task.bufferHandle.Data();
         auto tpH2dSubmitStart = NowTime::Now();
         s = HostToDeviceAsync(stream, host, task.shard.addrs.data());
@@ -256,17 +223,8 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         }
         RecordLoadSummary(tpSyncStart, tpSyncEnd);
     } while (0);
-    if (s.Failure()) [[unlikely]] {
-        if (UseSdmaDirectBatchLaunch() && !holder_.empty()) {
-            auto syncStatus = stream.Synchronize();
-            if (syncStatus.Failure()) {
-                UC_ERROR("Failed({}) to sync in-flight H2D for task({}).", syncStatus,
-                         taskHandle);
-            }
-        }
-        failureSet_->Insert(taskHandle);
-    }
-    if (UseSdmaDirectTaskLaunch() || UseSdmaDirectBatchLaunch()) {
+    if (s.Failure()) [[unlikely]] { failureSet_->Insert(taskHandle); }
+    if (UseSdmaDirectTaskLaunch()) {
         ClearSdmaDirectHolders();
     }
     if (waiter) { waiter->Done(); }
@@ -312,20 +270,9 @@ Status LoadQueue::HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTas
     return stream.HostToDeviceAsync(hosts, devices, tensorSizes_);
 }
 
-Status LoadQueue::FlushSdmaDirectBatch(CopyStream& stream)
-{
-    if (sdmaDirectBatchHolder_.empty()) { return Status::OK(); }
-    auto s = HostToDeviceTaskAsync(stream, sdmaDirectBatchHolder_);
-    if (s.Failure()) [[unlikely]] { return s; }
-    for (auto& task : sdmaDirectBatchHolder_) { holder_.push_back(std::move(task)); }
-    sdmaDirectBatchHolder_.clear();
-    return Status::OK();
-}
-
 void LoadQueue::ClearSdmaDirectHolders() noexcept
 {
     holder_.clear();
-    sdmaDirectBatchHolder_.clear();
 }
 
 void LoadQueue::ResetPipelineTrace(Detail::TaskHandle taskHandle)
@@ -426,11 +373,6 @@ void LoadQueue::RecordLoadSummary(double syncStartTp, double syncEndTp)
 bool LoadQueue::UseSdmaDirectTaskLaunch() const noexcept
 {
     return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == kSdmaDirectLaunchTask;
-}
-
-bool LoadQueue::UseSdmaDirectBatchLaunch() const noexcept
-{
-    return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == kSdmaDirectLaunchBatch;
 }
 
 }  // namespace UC::CacheStore

@@ -10,20 +10,19 @@
 
 namespace UC::Trans {
 
+namespace {
+constexpr size_t kSdmaDirectLaneNumber = 1;
+constexpr uint16_t kSdmaDirectMaxReadyLanes = 8;
+}  // namespace
+
 AscendSdmaDirectCopier::~AscendSdmaDirectCopier() { Cleanup(); }
 
-Status AscendSdmaDirectCopier::Setup(const AscendSdmaDirectCopyConfig& config)
+Status AscendSdmaDirectCopier::Setup()
 {
     Cleanup();
-    if (config.deviceId < 0) { return Status::InvalidParam("invalid device id"); }
-    if (config.streamNumber == 0) { return Status::InvalidParam("invalid stream number"); }
-    if (config.maxReadyLanes == 0) {
-        return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes");
-    }
 
-    auto s = AclStatus(aclrtSetDevice(config.deviceId), "aclrtSetDevice");
-    if (s.Failure()) { return s; }
-    lanes_.resize(config.streamNumber);
+    auto s = Status::OK();
+    lanes_.resize(kSdmaDirectLaneNumber);
     for (auto& lane : lanes_) {
         s = AclStatus(aclrtCreateStream(&lane.fftsStream), "aclrtCreateStream(sdma-direct)");
         if (s.Failure()) {
@@ -32,8 +31,6 @@ Status AscendSdmaDirectCopier::Setup(const AscendSdmaDirectCopyConfig& config)
         }
     }
 
-    deviceId_ = config.deviceId;
-    maxReadyLanes_ = config.maxReadyLanes;
     setup_ = true;
     return Status::OK();
 }
@@ -42,11 +39,9 @@ Status AscendSdmaDirectCopier::WaitEvent(void* event)
 {
     if (event == nullptr) { return Status::OK(); }
     if (!setup_) { return Status::OK(); }
-    auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
-    if (s.Failure()) { return s; }
     for (auto& lane : lanes_) {
-        s = AclStatus(aclrtStreamWaitEvent(lane.fftsStream, static_cast<aclrtEvent>(event)),
-                      "aclrtStreamWaitEvent(sdma-direct)");
+        auto s = AclStatus(aclrtStreamWaitEvent(lane.fftsStream, static_cast<aclrtEvent>(event)),
+                           "aclrtStreamWaitEvent(sdma-direct)");
         if (s.Failure()) { return s; }
     }
     return Status::OK();
@@ -105,11 +100,9 @@ Status AscendSdmaDirectCopier::SubmitDumpTask(const std::vector<void**>& devices
 Status AscendSdmaDirectCopier::Synchronize()
 {
     if (!setup_) { return Status::OK(); }
-    auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
-    if (s.Failure()) { return s; }
     for (auto& lane : lanes_) {
-        s = AclStatus(aclrtSynchronizeStream(lane.fftsStream),
-                      "aclrtSynchronizeStream(sdma-direct)");
+        auto s = AclStatus(aclrtSynchronizeStream(lane.fftsStream),
+                           "aclrtSynchronizeStream(sdma-direct)");
         if (s.Failure()) { return s; }
         lane.inFlight.clear();
     }
@@ -118,7 +111,6 @@ Status AscendSdmaDirectCopier::Synchronize()
 
 void AscendSdmaDirectCopier::Cleanup() noexcept
 {
-    if (deviceId_ >= 0) { (void)aclrtSetDevice(deviceId_); }
     for (auto& lane : lanes_) {
         if (lane.fftsStream != nullptr) {
             (void)aclrtDestroyStream(lane.fftsStream);
@@ -128,7 +120,6 @@ void AscendSdmaDirectCopier::Cleanup() noexcept
     }
     lanes_.clear();
     setup_ = false;
-    deviceId_ = -1;
     nextLaneIndex_ = 0;
 }
 
@@ -182,9 +173,7 @@ Status AscendSdmaDirectCopier::LaunchSpecs(std::vector<AscendFftsCopySpec>&& spe
     auto object = std::make_unique<InFlightObject>();
     object->specs = std::move(specs);
     uint16_t readyCount = 0;
-    auto s = object->dispatcher.BuildCopies(object->specs, maxReadyLanes_, readyCount);
-    if (s.Failure()) { return s; }
-    s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+    auto s = object->dispatcher.BuildCopies(object->specs, kSdmaDirectMaxReadyLanes, readyCount);
     if (s.Failure()) { return s; }
     s = object->dispatcher.Launch(lane.fftsStream, readyCount);
     if (s.Failure()) { return s; }

@@ -45,7 +45,6 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
-    sdmaDirectMaxReadyLanes_ = config.sdmaDirectMaxReadyLanes;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -71,8 +70,7 @@ void DumpQueue::DispatchStage(std::promise<Status>& started)
 {
     CopyStream stream;
     auto s = cacheSdmaDirect_
-                 ? stream.SetupSdmaDirect(deviceId_, streamNumber_, useGdr_,
-                                          sdmaDirectMaxReadyLanes_)
+                 ? stream.SetupSdmaDirect(deviceId_, useGdr_)
                  : stream.Setup(deviceId_, streamNumber_, useGdr_);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }

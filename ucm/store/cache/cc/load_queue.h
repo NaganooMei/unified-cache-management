@@ -84,7 +84,6 @@ private:
     size_t streamNumber_{1};
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
-    size_t sdmaDirectMaxReadyLanes_{8};
     std::string sdmaDirectLaunchGranularity_{kSdmaDirectLaunchTask};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
@@ -92,7 +91,6 @@ private:
     std::thread dispatcher_;
     std::thread transfer_;
     std::vector<ShardTask> holder_;
-    std::vector<ShardTask> sdmaDirectBatchHolder_;
     LoadPipelineTrace pipelineTrace_;
     LoadLayerSummary layerSummary_;
 
@@ -109,14 +107,12 @@ private:
     Status WaitBackendTaskReady(ShardTask& task);
     Status HostToDeviceAsync(CopyStream& stream, void* host, void** device);
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
-    Status FlushSdmaDirectBatch(CopyStream& stream);
     void ClearSdmaDirectHolders() noexcept;
     void ResetPipelineTrace(Detail::TaskHandle taskHandle);
     void RecordBackendWait(const ShardTask& task, double readyTp);
     void RecordH2dLaunch(double submitStartTp);
     void RecordLoadSummary(double syncStartTp, double syncEndTp);
     bool UseSdmaDirectTaskLaunch() const noexcept;
-    bool UseSdmaDirectBatchLaunch() const noexcept;
 };
 
 }  // namespace UC::CacheStore

@@ -31,18 +31,12 @@
 
 namespace UC::Trans {
 
-struct SdmaDirectStreamConfig {
-    int32_t deviceId{-1};
-    size_t laneNumber{1};
-    size_t maxReadyLanes{8};
-};
-
 class Device {
 public:
     Status Setup(int32_t deviceId);
     std::unique_ptr<Stream> MakeStream();
     std::shared_ptr<Stream> MakeSharedStream();
-    std::shared_ptr<Stream> MakeSdmaDirectStream(const SdmaDirectStreamConfig& config);
+    std::shared_ptr<Stream> MakeSdmaDirectStream();
     std::unique_ptr<Stream> MakeGdrStream();
     std::unique_ptr<Stream> MakeSMStream();
     std::unique_ptr<Buffer> MakeBuffer();

@@ -67,10 +67,8 @@ public:
         return Status::OK();
     }
 
-    Status SetupSdmaDirect(const int32_t deviceId, const size_t laneNumber,
-                           const bool useGdr, const size_t maxReadyLanes)
+    Status SetupSdmaDirect(const int32_t deviceId, const bool useGdr)
     {
-        if (laneNumber == 0) { return Status::InvalidParam("invalid SDMA Direct lane number"); }
         if (useGdr) {
             return Status::InvalidParam("GDR stream is incompatible with cache SDMA Direct");
         }
@@ -80,11 +78,7 @@ public:
             UC_ERROR("Failed({}) to setup device({}).", s, deviceId);
             return s;
         }
-        Trans::SdmaDirectStreamConfig config;
-        config.deviceId = deviceId;
-        config.laneNumber = laneNumber;
-        config.maxReadyLanes = maxReadyLanes;
-        auto stream = device.MakeSdmaDirectStream(config);
+        auto stream = device.MakeSdmaDirectStream();
         if (!stream) [[unlikely]] {
             UC_ERROR("Failed to make cache SDMA Direct stream on device({}).", deviceId);
             return Status::Error();

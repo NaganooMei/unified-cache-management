@@ -39,8 +39,6 @@ namespace UC::CacheStore {
 
 inline constexpr const char* kSdmaDirectLaunchShard = "shard";
 inline constexpr const char* kSdmaDirectLaunchTask = "task";
-inline constexpr const char* kSdmaDirectLaunchBatch = "batch";
-inline constexpr size_t kSdmaDirectLaunchBatchSize = 8;
 
 struct Config {
     StoreV1* storeBackend{};
@@ -63,7 +61,6 @@ struct Config {
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
     bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
-    size_t sdmaDirectMaxReadyLanes{8};
     std::string sdmaDirectLaunchGranularity{kSdmaDirectLaunchTask};
 };
 

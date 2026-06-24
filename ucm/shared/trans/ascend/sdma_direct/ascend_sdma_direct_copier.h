@@ -16,12 +16,6 @@
 
 namespace UC::Trans {
 
-struct AscendSdmaDirectCopyConfig {
-    int32_t deviceId{-1};
-    size_t streamNumber{1};
-    uint16_t maxReadyLanes{8};
-};
-
 class AscendSdmaDirectCopier {
     struct InFlightObject {
         std::vector<AscendFftsCopySpec> specs;
@@ -38,7 +32,7 @@ public:
     AscendSdmaDirectCopier(const AscendSdmaDirectCopier&) = delete;
     AscendSdmaDirectCopier& operator=(const AscendSdmaDirectCopier&) = delete;
 
-    Status Setup(const AscendSdmaDirectCopyConfig& config);
+    Status Setup();
     Status WaitEvent(void* event);
     Status SubmitLoadObject(const void* hostDevicePtr, void** devices,
                             const std::vector<size_t>& sizes);
@@ -63,9 +57,7 @@ private:
     Lane& NextLane();
     static Status AclStatus(aclError ret, const char* expr);
 
-    int32_t deviceId_{-1};
     size_t nextLaneIndex_{0};
-    uint16_t maxReadyLanes_{8};
     std::vector<Lane> lanes_{};
     bool setup_{false};
 };

@@ -21,7 +21,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
-#include <limits>
 #include <memory>
 #include <numeric>
 #include "buffer_manager.h"
@@ -151,8 +150,6 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
-        config.GetNumber("cache_sdma_direct_max_ready_lanes",
-                         param.sdmaDirectMaxReadyLanes);
         config.Get("cache_sdma_direct_launch_granularity",
                    param.sdmaDirectLaunchGranularity);
         return param;
@@ -195,19 +192,9 @@ private:
         }
 #endif
         if (config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchShard &&
-            config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchTask &&
-            config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchBatch) {
+            config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchTask) {
             return Status::InvalidParam("invalid Cache SDMA Direct launch granularity({})",
                                         config.sdmaDirectLaunchGranularity);
-        }
-        if (config.cacheSdmaDirect) {
-            if (config.sdmaDirectMaxReadyLanes == 0) {
-                return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes");
-            }
-            if (config.sdmaDirectMaxReadyLanes > std::numeric_limits<uint16_t>::max()) {
-                return Status::InvalidParam("too many Cache SDMA Direct ready lanes({})",
-                                            config.sdmaDirectMaxReadyLanes);
-            }
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
         if (bufferNumber < 1024 || bufferNumber < config.loadExclusiveBufferNumber * 2) {
@@ -252,7 +239,6 @@ private:
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
-        UC_INFO("Set {}::SdmaDirectMaxReadyLanes to {}.", ns, config.sdmaDirectMaxReadyLanes);
         UC_INFO("Set {}::SdmaDirectLaunchGranularity to {}.", ns,
                 config.sdmaDirectLaunchGranularity);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);

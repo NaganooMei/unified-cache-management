@@ -4,7 +4,6 @@
  * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include "ascend_sdma_direct_stream.h"
-#include <limits>
 #include "ascend_sdma_direct_copier.h"
 
 namespace UC::Trans {
@@ -24,23 +23,8 @@ AscendSdmaDirectStream::~AscendSdmaDirectStream() = default;
 
 Status AscendSdmaDirectStream::Setup()
 {
-    return Status::InvalidParam("Cache SDMA Direct stream requires config");
-}
-
-Status AscendSdmaDirectStream::Setup(const SdmaDirectStreamConfig& config)
-{
-    if (config.maxReadyLanes == 0 ||
-        config.maxReadyLanes > static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
-        return Status::InvalidParam("invalid Cache SDMA Direct max ready lanes({})",
-                                    config.maxReadyLanes);
-    }
-
-    AscendSdmaDirectCopyConfig copyConfig;
-    copyConfig.deviceId = config.deviceId;
-    copyConfig.streamNumber = config.laneNumber;
-    copyConfig.maxReadyLanes = static_cast<uint16_t>(config.maxReadyLanes);
     auto copier = std::make_unique<AscendSdmaDirectCopier>();
-    auto s = copier->Setup(copyConfig);
+    auto s = copier->Setup();
     if (s.Failure()) [[unlikely]] { return s; }
     copier_ = std::move(copier);
     return Status::OK();

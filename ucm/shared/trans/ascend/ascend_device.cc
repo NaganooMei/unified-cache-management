@@ -63,8 +63,7 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
     return nullptr;
 }
 
-std::shared_ptr<Stream> Device::MakeSdmaDirectStream(
-    const SdmaDirectStreamConfig& config)
+std::shared_ptr<Stream> Device::MakeSdmaDirectStream()
 {
 #if UCM_RUNTIME_ASCEND_SDMA_DIRECT
     std::shared_ptr<AscendSdmaDirectStream> stream = nullptr;
@@ -73,9 +72,7 @@ std::shared_ptr<Stream> Device::MakeSdmaDirectStream(
     } catch (...) {
         return nullptr;
     }
-    if (stream->Setup(config).Success()) { return stream; }
-#else
-    (void)config;
+    if (stream->Setup().Success()) { return stream; }
 #endif
     return nullptr;
 }

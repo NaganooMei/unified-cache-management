@@ -19,7 +19,6 @@ public:
     AscendSdmaDirectStream();
     ~AscendSdmaDirectStream() override;
     Status Setup() override;
-    Status Setup(const SdmaDirectStreamConfig& config);
 
     Status DeviceToHost(void* device, void* host, size_t size) override;
     Status DeviceToHost(void* device[], void* host[], size_t size, size_t number) override;
