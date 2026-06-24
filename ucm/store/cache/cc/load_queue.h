@@ -52,32 +52,29 @@ class LoadQueue {
         WaiterPtr waiter;
     };
     struct LoadPipelineTrace {
-        struct BackendWaitSpan {
-            double startTp{0.0};
-            double endTp{0.0};
-            bool backendLoad{false};
-        };
         bool active{false};
         Detail::TaskHandle taskHandle{0};
         size_t shardCount{0};
         size_t backendLoadShardCount{0};
         size_t cacheBufferShardCount{0};
-        size_t h2dLaunchCount{0};
-        size_t h2dShardCount{0};
         double startTp{0.0};
         double firstH2dSubmitStartTp{0.0};
-        double backendWaitMs{0.0};
-        double backendLoadWaitMs{0.0};
-        double cacheBufferWaitMs{0.0};
-        double h2dSubmitMs{0.0};
-        std::vector<BackendWaitSpan> backendWaitSpans{};
+        double lastH2dSubmitStartTp{0.0};
         std::vector<double> backendLoadReadyTps{};
-        std::vector<double> allReadyTps{};
-        std::vector<double> h2dSubmitStartTps{};
-        std::vector<double> readyToH2dGapMs{};
+    };
+    struct LoadLayerSummary {
+        size_t taskCount{0};
+        size_t shardCount{0};
+        size_t backendLoadShardCount{0};
+        size_t cacheBufferShardCount{0};
+        size_t s2hDoneBeforeFirstH2dSubmitShardCount{0};
+        size_t s2hDoneBeforeLastH2dSubmitShardCount{0};
+        double transferTotalMs{0.0};
+        double h2dTailSyncMs{0.0};
     };
 
 private:
+    static constexpr size_t kLoadLayerSummaryLayers = 62;
     alignas(64) std::atomic_bool stop_{false};
     TaskIdSet* failureSet_{nullptr};
     TransBuffer* buffer_{nullptr};
@@ -97,6 +94,7 @@ private:
     std::vector<ShardTask> holder_;
     std::vector<ShardTask> sdmaDirectBatchHolder_;
     LoadPipelineTrace pipelineTrace_;
+    LoadLayerSummary layerSummary_;
 
 public:
     ~LoadQueue();
@@ -114,12 +112,9 @@ private:
     Status FlushSdmaDirectBatch(CopyStream& stream);
     void ClearSdmaDirectHolders() noexcept;
     void ResetPipelineTrace(Detail::TaskHandle taskHandle);
-    void RecordBackendWait(const ShardTask& task, double waitStartTp,
-                           double readyTp);
-    void RecordH2dLaunch(double submitStartTp, double submitEndTp,
-                         const std::vector<double>& backendReadyTps);
-    static std::vector<double> CollectBackendReadyTps(const std::vector<ShardTask>& tasks);
-    void LogPipelineTrace(double syncStartTp, double syncEndTp) const;
+    void RecordBackendWait(const ShardTask& task, double readyTp);
+    void RecordH2dLaunch(double submitStartTp);
+    void RecordLoadSummary(double syncStartTp, double syncEndTp);
     bool UseSdmaDirectTaskLaunch() const noexcept;
     bool UseSdmaDirectBatchLaunch() const noexcept;
 };

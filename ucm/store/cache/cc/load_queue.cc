@@ -122,12 +122,8 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     auto tpDispatch = NowTime::Now();
     auto dispatchMs = (tpDispatch - tpWait) * 1e3;
     auto queueWaitMs = (tpWait - tp) * 1e3;
-    auto cacheBufferCount = nShard - backendSubmitCount;
     UC_DEBUG("Cache task({}) dispatch shards({}), wait={:.3f}ms, cost={:.3f}ms.", task->id, nShard,
              queueWaitMs, dispatchMs);
-    UC_INFO("[UCM_LOAD_DISPATCH] task={} shards={} backend_load_shards={} "
-            "cache_buffer_shards={} queue_wait_ms={:.3f} dispatch_ms={:.3f}.",
-            task->id, nShard, backendSubmitCount, cacheBufferCount, queueWaitMs, dispatchMs);
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_queue_wait_duration_ms"), queueWaitMs);
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_dispatch_duration_ms"), dispatchMs);
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_backend_shards_total"),
@@ -173,13 +169,12 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
         task.backendReadyTp = tpBackendReady;
-        RecordBackendWait(task, tpBackendWait, tpBackendReady);
+        RecordBackendWait(task, tpBackendReady);
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
                                  (tpBackendReady - tpBackendWait) * 1e3);
         if (UseSdmaDirectTaskLaunch()) {
             holder_.push_back(std::move(task));
             if (!waiter) { return; }
-            auto backendReadyTps = CollectBackendReadyTps(holder_);
             auto tpH2dSubmitStart = NowTime::Now();
             s = HostToDeviceTaskAsync(stream, holder_);
             auto tpH2dSubmitted = NowTime::Now();
@@ -188,7 +183,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
-            RecordH2dLaunch(tpH2dSubmitStart, tpH2dSubmitted, backendReadyTps);
+            RecordH2dLaunch(tpH2dSubmitStart);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
                                      (tpH2dSubmitted - tpBackendReady) * 1e3);
             auto tpSyncStart = NowTime::Now();
@@ -200,7 +195,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
-            LogPipelineTrace(tpSyncStart, tpSyncEnd);
+            RecordLoadSummary(tpSyncStart, tpSyncEnd);
             waiter->Done();
             return;
         }
@@ -209,7 +204,6 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             const bool shouldFlush =
                 waiter || sdmaDirectBatchHolder_.size() >= kSdmaDirectLaunchBatchSize;
             if (!shouldFlush) { return; }
-            auto backendReadyTps = CollectBackendReadyTps(sdmaDirectBatchHolder_);
             auto tpH2dSubmitStart = NowTime::Now();
             s = FlushSdmaDirectBatch(stream);
             auto tpH2dSubmitted = NowTime::Now();
@@ -218,7 +212,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
-            RecordH2dLaunch(tpH2dSubmitStart, tpH2dSubmitted, backendReadyTps);
+            RecordH2dLaunch(tpH2dSubmitStart);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
                                      (tpH2dSubmitted - tpBackendReady) * 1e3);
             if (!waiter) { return; }
@@ -231,7 +225,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
-            LogPipelineTrace(tpSyncStart, tpSyncEnd);
+            RecordLoadSummary(tpSyncStart, tpSyncEnd);
             waiter->Done();
             return;
         }
@@ -244,8 +238,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
-        RecordH2dLaunch(tpH2dSubmitStart, tpH2dSubmitted,
-                        std::vector<double>{task.backendReadyTp});
+        RecordH2dLaunch(tpH2dSubmitStart);
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_h2d_ms"),
                                  (tpH2dSubmitted - tpBackendReady) * 1e3);
         if (!task.waiter) {
@@ -261,7 +254,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
-        LogPipelineTrace(tpSyncStart, tpSyncEnd);
+        RecordLoadSummary(tpSyncStart, tpSyncEnd);
     } while (0);
     if (s.Failure()) [[unlikely]] {
         if (UseSdmaDirectBatchLaunch() && !holder_.empty()) {
@@ -341,140 +334,93 @@ void LoadQueue::ResetPipelineTrace(Detail::TaskHandle taskHandle)
     pipelineTrace_.active = true;
     pipelineTrace_.taskHandle = taskHandle;
     pipelineTrace_.startTp = NowTime::Now();
-    pipelineTrace_.backendWaitSpans.reserve(1024);
     pipelineTrace_.backendLoadReadyTps.reserve(1024);
-    pipelineTrace_.allReadyTps.reserve(1024);
-    pipelineTrace_.h2dSubmitStartTps.reserve(1024);
-    pipelineTrace_.readyToH2dGapMs.reserve(1024);
 }
 
-void LoadQueue::RecordBackendWait(const ShardTask& task, double waitStartTp,
-                                  double readyTp)
+void LoadQueue::RecordBackendWait(const ShardTask& task, double readyTp)
 {
-    const auto waitMs = (readyTp - waitStartTp) * 1e3;
     const auto isBackendLoad = task.backendTaskHandle != 0;
     pipelineTrace_.shardCount++;
     if (isBackendLoad) {
         pipelineTrace_.backendLoadShardCount++;
-        pipelineTrace_.backendLoadWaitMs += waitMs;
         pipelineTrace_.backendLoadReadyTps.push_back(readyTp);
     } else {
         pipelineTrace_.cacheBufferShardCount++;
-        pipelineTrace_.cacheBufferWaitMs += waitMs;
     }
-    pipelineTrace_.backendWaitMs += waitMs;
-    pipelineTrace_.backendWaitSpans.push_back({waitStartTp, readyTp, isBackendLoad});
-    pipelineTrace_.allReadyTps.push_back(readyTp);
 }
 
-void LoadQueue::RecordH2dLaunch(double submitStartTp, double submitEndTp,
-                                const std::vector<double>& backendReadyTps)
+void LoadQueue::RecordH2dLaunch(double submitStartTp)
 {
-    pipelineTrace_.h2dLaunchCount++;
-    pipelineTrace_.h2dShardCount += backendReadyTps.size();
-    pipelineTrace_.h2dSubmitMs += (submitEndTp - submitStartTp) * 1e3;
     if (pipelineTrace_.firstH2dSubmitStartTp <= 0.0) {
         pipelineTrace_.firstH2dSubmitStartTp = submitStartTp;
     }
-    for (auto readyTp : backendReadyTps) {
-        pipelineTrace_.h2dSubmitStartTps.push_back(submitStartTp);
-        if (readyTp > 0.0) {
-            pipelineTrace_.readyToH2dGapMs.push_back(
-                std::max(0.0, (submitStartTp - readyTp) * 1e3));
-        }
-    }
+    pipelineTrace_.lastH2dSubmitStartTp = submitStartTp;
 }
 
-std::vector<double> LoadQueue::CollectBackendReadyTps(const std::vector<ShardTask>& tasks)
+void LoadQueue::RecordLoadSummary(double syncStartTp, double syncEndTp)
 {
-    std::vector<double> readyTps;
-    readyTps.reserve(tasks.size());
-    for (const auto& task : tasks) { readyTps.push_back(task.backendReadyTp); }
-    return readyTps;
-}
-
-void LoadQueue::LogPipelineTrace(double syncStartTp, double syncEndTp) const
-{
-    auto percentile = [](std::vector<double> values, double ratio) {
-        if (values.empty()) { return 0.0; }
-        std::sort(values.begin(), values.end());
-        const auto index = static_cast<size_t>(ratio * (values.size() - 1));
-        return values[index];
-    };
-
     const auto totalMs = (syncEndTp - pipelineTrace_.startTp) * 1e3;
-    const auto firstH2dDelayMs = pipelineTrace_.firstH2dSubmitStartTp > 0.0
-                                     ? (pipelineTrace_.firstH2dSubmitStartTp -
-                                        pipelineTrace_.startTp) *
-                                           1e3
-                                     : 0.0;
     const auto tailSyncMs = (syncEndTp - syncStartTp) * 1e3;
-    const auto backendWaitRatio =
-        totalMs > 0 ? pipelineTrace_.backendWaitMs / totalMs : 0.0;
-    const auto tailSyncRatio = totalMs > 0 ? tailSyncMs / totalMs : 0.0;
     const auto firstH2dTp = pipelineTrace_.firstH2dSubmitStartTp;
-    auto lastS2hReadyTp = 0.0;
-    for (auto readyTp : pipelineTrace_.backendLoadReadyTps) {
-        lastS2hReadyTp = std::max(lastS2hReadyTp, readyTp);
-    }
-    const auto s2hLastReadyMs =
-        lastS2hReadyTp > 0.0 ? (lastS2hReadyTp - pipelineTrace_.startTp) * 1e3 : 0.0;
-    const auto h2dBeforeS2hDoneShards =
-        lastS2hReadyTp > 0.0
-            ? static_cast<size_t>(std::count_if(
-                  pipelineTrace_.h2dSubmitStartTps.begin(),
-                  pipelineTrace_.h2dSubmitStartTps.end(),
-                  [lastS2hReadyTp](double submitTp) { return submitTp < lastS2hReadyTp; }))
-            : 0;
-    const auto h2dBeforeS2hDoneRatio =
-        pipelineTrace_.h2dShardCount > 0
-            ? static_cast<double>(h2dBeforeS2hDoneShards) /
-                  static_cast<double>(pipelineTrace_.h2dShardCount)
+    const auto lastH2dTp = pipelineTrace_.lastH2dSubmitStartTp;
+    const auto s2hDoneBeforeFirstH2d = firstH2dTp > 0.0
+                                           ? static_cast<size_t>(std::count_if(
+                                                 pipelineTrace_.backendLoadReadyTps.begin(),
+                                                 pipelineTrace_.backendLoadReadyTps.end(),
+                                                 [firstH2dTp](double readyTp) {
+                                                     return readyTp <= firstH2dTp;
+                                                 }))
+                                           : 0;
+    const auto s2hDoneBeforeLastH2d =
+        lastH2dTp > 0.0 ? static_cast<size_t>(std::count_if(
+                               pipelineTrace_.backendLoadReadyTps.begin(),
+                               pipelineTrace_.backendLoadReadyTps.end(),
+                               [lastH2dTp](double readyTp) { return readyTp <= lastH2dTp; }))
+                         : 0;
+    layerSummary_.taskCount++;
+    layerSummary_.shardCount += pipelineTrace_.shardCount;
+    layerSummary_.backendLoadShardCount += pipelineTrace_.backendLoadShardCount;
+    layerSummary_.cacheBufferShardCount += pipelineTrace_.cacheBufferShardCount;
+    layerSummary_.s2hDoneBeforeFirstH2dSubmitShardCount += s2hDoneBeforeFirstH2d;
+    layerSummary_.s2hDoneBeforeLastH2dSubmitShardCount += s2hDoneBeforeLastH2d;
+    layerSummary_.transferTotalMs += totalMs;
+    layerSummary_.h2dTailSyncMs += tailSyncMs;
+
+    if (layerSummary_.taskCount < kLoadLayerSummaryLayers) { return; }
+
+    const auto backendLoadShardCount =
+        static_cast<double>(layerSummary_.backendLoadShardCount);
+    const auto firstH2dS2hDoneRatio =
+        backendLoadShardCount > 0
+            ? static_cast<double>(layerSummary_.s2hDoneBeforeFirstH2dSubmitShardCount) /
+                  backendLoadShardCount
             : 0.0;
-    const auto readyBeforeFirstH2dShards =
-        firstH2dTp > 0.0
-            ? static_cast<size_t>(std::count_if(
-                  pipelineTrace_.allReadyTps.begin(), pipelineTrace_.allReadyTps.end(),
-                  [firstH2dTp](double readyTp) { return readyTp <= firstH2dTp; }))
-            : 0;
-    const auto s2hReadyBeforeFirstH2dShards =
-        firstH2dTp > 0.0
-            ? static_cast<size_t>(std::count_if(
-                  pipelineTrace_.backendLoadReadyTps.begin(),
-                  pipelineTrace_.backendLoadReadyTps.end(),
-                  [firstH2dTp](double readyTp) { return readyTp <= firstH2dTp; }))
-            : 0;
-    double s2hWaitAfterFirstH2dMs = 0.0;
-    if (firstH2dTp > 0.0) {
-        for (const auto& span : pipelineTrace_.backendWaitSpans) {
-            if (!span.backendLoad || span.endTp <= firstH2dTp) { continue; }
-            s2hWaitAfterFirstH2dMs += (span.endTp - std::max(span.startTp, firstH2dTp)) * 1e3;
-        }
-    }
-    const auto readyToH2dGapP50Ms = percentile(pipelineTrace_.readyToH2dGapMs, 0.50);
-    const auto readyToH2dGapP90Ms = percentile(pipelineTrace_.readyToH2dGapMs, 0.90);
-    const auto readyToH2dGapMaxMs = percentile(pipelineTrace_.readyToH2dGapMs, 1.00);
+    const auto lastH2dS2hDoneRatio =
+        backendLoadShardCount > 0
+            ? static_cast<double>(layerSummary_.s2hDoneBeforeLastH2dSubmitShardCount) /
+                  backendLoadShardCount
+            : 0.0;
+    const auto avgLayerTransferMs =
+        layerSummary_.transferTotalMs / static_cast<double>(layerSummary_.taskCount);
+    const auto avgH2dTailWaitMs =
+        layerSummary_.h2dTailSyncMs / static_cast<double>(layerSummary_.taskCount);
+    const auto h2dTailExposedRatio =
+        layerSummary_.transferTotalMs > 0.0
+            ? layerSummary_.h2dTailSyncMs / layerSummary_.transferTotalMs
+            : 0.0;
     const std::string launchGranularity =
         cacheSdmaDirect_ ? sdmaDirectLaunchGranularity_ : "copy";
-    UC_INFO("[UCM_LOAD_PIPELINE] task={} granularity={} shards={} backend_load_shards={} "
-            "cache_buffer_shards={} h2d_launches={} h2d_shards={} transfer_total_ms={:.3f} "
-            "backend_wait_visible_ms={:.3f} backend_wait_visible_ratio={:.3f} "
-            "backend_load_wait_visible_ms={:.3f} cache_buffer_wait_visible_ms={:.3f} "
-            "h2d_submit_ms={:.3f} first_h2d_delay_ms={:.3f} s2h_last_ready_ms={:.3f} "
-            "s2h_wait_after_first_h2d_ms={:.3f} h2d_before_s2h_done_shards={} "
-            "h2d_before_s2h_done_ratio={:.3f} ready_before_first_h2d_shards={} "
-            "s2h_ready_before_first_h2d_shards={} ready_to_h2d_gap_p50_ms={:.3f} "
-            "ready_to_h2d_gap_p90_ms={:.3f} ready_to_h2d_gap_max_ms={:.3f} "
-            "h2d_tail_sync_ms={:.3f} h2d_tail_sync_ratio={:.3f}.",
-            pipelineTrace_.taskHandle, launchGranularity, pipelineTrace_.shardCount,
-            pipelineTrace_.backendLoadShardCount, pipelineTrace_.cacheBufferShardCount,
-            pipelineTrace_.h2dLaunchCount, pipelineTrace_.h2dShardCount, totalMs,
-            pipelineTrace_.backendWaitMs, backendWaitRatio, pipelineTrace_.backendLoadWaitMs,
-            pipelineTrace_.cacheBufferWaitMs, pipelineTrace_.h2dSubmitMs, firstH2dDelayMs,
-            s2hLastReadyMs, s2hWaitAfterFirstH2dMs, h2dBeforeS2hDoneShards,
-            h2dBeforeS2hDoneRatio, readyBeforeFirstH2dShards,
-            s2hReadyBeforeFirstH2dShards, readyToH2dGapP50Ms, readyToH2dGapP90Ms,
-            readyToH2dGapMaxMs, tailSyncMs, tailSyncRatio);
+    UC_INFO("[UCM_LOAD_LAYER_SUMMARY] device_id={} layers={} tasks={} granularity={} "
+            "shards={} backend_load_shards={} cache_buffer_shards={} "
+            "avg_layer_transfer_ms={:.3f} avg_h2d_tail_wait_ms={:.3f} "
+            "h2d_tail_exposed_ratio={:.3f} "
+            "s2h_done_before_first_h2d_submit_ratio={:.3f} "
+            "s2h_done_before_last_h2d_submit_ratio={:.3f}.",
+            deviceId_, kLoadLayerSummaryLayers, layerSummary_.taskCount, launchGranularity,
+            layerSummary_.shardCount, layerSummary_.backendLoadShardCount,
+            layerSummary_.cacheBufferShardCount, avgLayerTransferMs, avgH2dTailWaitMs,
+            h2dTailExposedRatio, firstH2dS2hDoneRatio, lastH2dS2hDoneRatio);
+    layerSummary_ = {};
 }
 
 bool LoadQueue::UseSdmaDirectTaskLaunch() const noexcept
