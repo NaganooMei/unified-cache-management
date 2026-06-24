@@ -150,8 +150,7 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
-        config.Get("cache_sdma_direct_launch_granularity",
-                   param.sdmaDirectLaunchGranularity);
+        config.Get("cache_sdma_direct_launch_granularity", param.sdmaDirectLaunchGranularity);
         return param;
     }
     Status CheckSizeConfig(const Config& config)

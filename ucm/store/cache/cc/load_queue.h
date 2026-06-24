@@ -48,7 +48,6 @@ class LoadQueue {
         Detail::Shard shard;
         TransBuffer::Handle bufferHandle;
         Detail::TaskHandle backendTaskHandle;
-        double backendReadyTp{0.0};
         WaiterPtr waiter;
     };
     struct LoadPipelineTrace {
@@ -81,6 +80,7 @@ private:
     StoreV1* backend_{nullptr};
     int32_t deviceId_{-1};
     std::vector<size_t> tensorSizes_{};
+    size_t shardBytes_{0};
     size_t streamNumber_{1};
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
@@ -91,6 +91,7 @@ private:
     std::thread dispatcher_;
     std::thread transfer_;
     std::vector<ShardTask> holder_;
+    double h2dBatchStartTp_{0.0};
     LoadPipelineTrace pipelineTrace_;
     LoadLayerSummary layerSummary_;
 

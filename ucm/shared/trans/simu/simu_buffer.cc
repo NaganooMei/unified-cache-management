@@ -81,4 +81,4 @@ Status Buffer::GetHostDevicePointer(void* host, void** pDevice)
 
 void Buffer::UnregisterHostBuffer(void* host) {}
 
-} // namespace UC::Trans
+}  // namespace UC::Trans

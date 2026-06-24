@@ -37,8 +37,7 @@ public:
     Status SubmitLoadObject(const void* hostDevicePtr, void** devices,
                             const std::vector<size_t>& sizes);
     Status SubmitLoadTask(const std::vector<void*>& hostDevicePtrs,
-                          const std::vector<void**>& devices,
-                          const std::vector<size_t>& sizes);
+                          const std::vector<void**>& devices, const std::vector<size_t>& sizes);
     Status SubmitDumpObject(void** devices, void* hostDevicePtr, const std::vector<size_t>& sizes);
     Status SubmitDumpTask(const std::vector<void**>& devices,
                           const std::vector<void*>& hostDevicePtrs,

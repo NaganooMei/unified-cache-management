@@ -123,9 +123,9 @@ void AscendSdmaDirectCopier::Cleanup() noexcept
     nextLaneIndex_ = 0;
 }
 
-Status AscendSdmaDirectCopier::BuildHostToDeviceSpecs(
-    const void* hostDevicePtr, void** devices, const std::vector<size_t>& sizes,
-    std::vector<AscendFftsCopySpec>& specs) const
+Status AscendSdmaDirectCopier::BuildHostToDeviceSpecs(const void* hostDevicePtr, void** devices,
+                                                      const std::vector<size_t>& sizes,
+                                                      std::vector<AscendFftsCopySpec>& specs) const
 {
     if (!setup_) { return Status::Error("Cache SDMA Direct copier is not setup"); }
     if (hostDevicePtr == nullptr || devices == nullptr) {
@@ -145,9 +145,9 @@ Status AscendSdmaDirectCopier::BuildHostToDeviceSpecs(
     return Status::OK();
 }
 
-Status AscendSdmaDirectCopier::BuildDeviceToHostSpecs(
-    void** devices, void* hostDevicePtr, const std::vector<size_t>& sizes,
-    std::vector<AscendFftsCopySpec>& specs) const
+Status AscendSdmaDirectCopier::BuildDeviceToHostSpecs(void** devices, void* hostDevicePtr,
+                                                      const std::vector<size_t>& sizes,
+                                                      std::vector<AscendFftsCopySpec>& specs) const
 {
     if (!setup_) { return Status::Error("Cache SDMA Direct copier is not setup"); }
     if (hostDevicePtr == nullptr || devices == nullptr) {

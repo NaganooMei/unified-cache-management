@@ -97,14 +97,18 @@ public:
         streamIndex_ = (streamIndex_ + 1) % streamNumber_;
         return stream;
     }
+    Status AppendCallback(std::function<void(bool)> cb) noexcept
+    {
+        if (streams_.empty()) [[unlikely]] { return Status::Error(); }
+        return streams_.front()->AppendCallback(std::move(cb));
+    }
     Status HostToDeviceAsync(void* host, void** device, const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         return stream->HostToDeviceAsync(host, device, sizes);
     }
-    Status HostToDeviceAsync(const std::vector<void*>& hosts,
-                             const std::vector<void**>& devices,
+    Status HostToDeviceAsync(const std::vector<void*>& hosts, const std::vector<void**>& devices,
                              const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
@@ -117,8 +121,7 @@ public:
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         return stream->DeviceToHostAsync(device, host, sizes);
     }
-    Status DeviceToHostAsync(const std::vector<void**>& devices,
-                             const std::vector<void*>& hosts,
+    Status DeviceToHostAsync(const std::vector<void**>& devices, const std::vector<void*>& hosts,
                              const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
