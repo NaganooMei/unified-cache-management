@@ -122,9 +122,11 @@ Status FftsSdmaDispatcher::Launch(aclrtStream stream, uint16_t readyContextNum)
     task.argsHandleInfoNum = 0;
     task.argsHandleInfoPtr = nullptr;
 
-    completed_ = true;
     auto ret = rtFftsPlusTaskLaunchWithFlag(&task, reinterpret_cast<rtStream_t>(stream), 0);
-    if (ret == RT_ERROR_NONE) { return Status::OK(); }
+    if (ret == RT_ERROR_NONE) {
+        completed_ = true;
+        return Status::OK();
+    }
     UC_ERROR("Failed({}) to launch FFTS plus task.", static_cast<int32_t>(ret));
     return Status{static_cast<int32_t>(ret), "rtFftsPlusTaskLaunchWithFlag failed"};
 }

@@ -24,7 +24,7 @@ AscendIoAggregationStream::~AscendIoAggregationStream() = default;
 
 Status AscendIoAggregationStream::Setup()
 {
-    return Status::InvalidParam("Cache IO aggregation stream requires config");
+    return Status::InvalidParam("Cache IO aggregation stream requires IoAggregationStreamConfig");
 }
 
 Status AscendIoAggregationStream::Setup(const IoAggregationStreamConfig& config)
