@@ -357,9 +357,6 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         )
         logger.info("Init UCM FAWA connector.")
 
-    def _keep_cache_io_aggregation_for_layerwise(self) -> bool:
-        return True
-
     @classmethod
     def can_handle_kv_cache_config(
         cls, kv_cache_config: Optional["KVCacheConfig"]
@@ -563,7 +560,6 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         name = self.connector_configs[0]["ucm_connector_name"]
         module_path = self.connector_configs[0].get("ucm_connector_module_path", None)
         config = copy.deepcopy(self.connector_configs[0]["ucm_connector_config"])
-        self._apply_layerwise_cache_io_aggregation_policy(config)
         config.setdefault("store_pipeline", "Cache|Empty")
         # MLA ranks share one logical store buffer; non-MLA stores are per rank.
         config.setdefault("share_buffer_enable", self.is_mla)
