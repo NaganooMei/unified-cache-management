@@ -23,7 +23,13 @@
  * */
 #include "trans_buffer.h"
 #include <atomic>
+#include <cerrno>
+#include <cstdint>
 #include <filesystem>
+#include <fcntl.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include "logger/logger.h"
@@ -35,6 +41,18 @@ namespace UC::CacheStore {
 
 static constexpr size_t nHashTableBucket = 16411;
 static constexpr auto invalidIndex = std::numeric_limits<size_t>::max();
+
+#ifndef SHM_HUGETLB
+#define SHM_HUGETLB 04000
+#endif
+
+#ifndef SHM_HUGE_SHIFT
+#define SHM_HUGE_SHIFT 26
+#endif
+
+#ifndef SHM_HUGE_2MB
+#define SHM_HUGE_2MB (21 << SHM_HUGE_SHIFT)
+#endif
 
 static inline size_t Hash(const Detail::BlockId& blockId, size_t shard)
 {
@@ -196,6 +214,68 @@ public:
     BufferMetaNode* MetaAt(size_t iNode) override { return meta_.get() + iNode; }
 };
 
+class HugePageShm {
+private:
+    std::string name_{};
+    key_t key_{0};
+    int32_t handle_{-1};
+
+    static uint64_t HashName(const std::string& name) noexcept
+    {
+        uint64_t hash = 1469598103934665603ULL;
+        for (const auto ch : name) {
+            hash ^= static_cast<unsigned char>(ch);
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
+
+    static key_t MakeKey(const std::string& name) noexcept
+    {
+        auto key = static_cast<key_t>(HashName(name) & 0x7fffffff);
+        return key == 0 ? 1 : key;
+    }
+
+public:
+    explicit HugePageShm(std::string name) : name_{std::move(name)}, key_{MakeKey(name_)} {}
+    std::string Readme() const
+    {
+        return name_ + "(sysv key " + std::to_string(static_cast<int64_t>(key_)) + ")";
+    }
+    Status Create(size_t size)
+    {
+        static constexpr auto NewFilePerm = (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        constexpr auto flags = IPC_CREAT | IPC_EXCL | SHM_HUGETLB | SHM_HUGE_2MB;
+        handle_ = shmget(key_, size, flags | NewFilePerm);
+        const auto eno = errno;
+        if (handle_ >= 0) { return Status::OK(); }
+        if (eno == EEXIST) { return Status::DuplicateKey(); }
+        return Status{eno, std::to_string(eno)};
+    }
+    Status Open()
+    {
+        static constexpr auto NewFilePerm = (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        handle_ = shmget(key_, 1, NewFilePerm);
+        const auto eno = errno;
+        if (handle_ >= 0) { return Status::OK(); }
+        return Status{eno, std::to_string(eno)};
+    }
+    Status Attach(void*& addr)
+    {
+        addr = shmat(handle_, nullptr, 0);
+        const auto eno = errno;
+        if (addr != reinterpret_cast<void*>(-1)) { return Status::OK(); }
+        addr = nullptr;
+        return Status{eno, std::to_string(eno)};
+    }
+    static void Detach(void* addr) { shmdt(addr); }
+    void Unlink()
+    {
+        if (handle_ == -1 && Open().Failure()) { return; }
+        shmctl(handle_, IPC_RMID, nullptr);
+    }
+};
+
 class SharedBufferStrategy : public BufferStrategy {
 protected:
     struct ShareMutex {
@@ -226,6 +306,7 @@ protected:
     static constexpr size_t sharedBufferMagic = (('S' << 16) | ('b' << 8) | 1);
     struct BufferHeader {
         std::atomic<size_t> magic;
+        uint64_t nameHash;
         ShareLock lock;
         size_t nNode;
         size_t freeHead;
@@ -240,19 +321,36 @@ protected:
     std::byte* dataOnDevice_{nullptr};
     const std::string& uuid_;
     std::string shmName_;
+    std::string hugeShmName_;
     size_t nodeSize_{0};
     size_t nNode_{0};
     void* addrress_{nullptr};
     size_t totalSize_{0};
+    bool useHugeShm_{false};
+    bool ownHugeShm_{false};
 
+    static constexpr size_t kHugePageSize = 2UL << 20;
+    static size_t AlignUp(size_t size, size_t alignment) noexcept
+    {
+        return (size + alignment - 1) / alignment * alignment;
+    }
     size_t MetaOffset() const noexcept { return sizeof(BufferHeader) + sizeof(ShareLock) * nNode_; }
     size_t DataOffset() const noexcept
     {
-        static const auto pageSize = sysconf(_SC_PAGESIZE);
         const auto size = MetaOffset() + sizeof(BufferMetaNode) * nNode_;
-        return (size + pageSize - 1) & ~(pageSize - 1);
+        return AlignUp(size, kHugePageSize);
     }
     size_t DataSize() const noexcept { return nodeSize_ * nNode_; }
+    static size_t HugeMapSize(size_t size) noexcept { return AlignUp(size, kHugePageSize); }
+    static uint64_t ShmNameHash(const std::string& name) noexcept
+    {
+        uint64_t hash = 1469598103934665603ULL;
+        for (const auto ch : name) {
+            hash ^= static_cast<unsigned char>(ch);
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
     static const std::string& ShmPrefix() noexcept
     {
         static std::string prefix{"uc_shm_cache_"};
@@ -262,24 +360,26 @@ protected:
     {
         namespace fs = std::filesystem;
         std::string_view prefix = ShmPrefix();
-        fs::path shmDir = "/dev/shm";
-        if (!fs::exists(shmDir)) { return; }
         const auto now = fs::file_time_type::clock::now();
         const auto keepThreshold = std::chrono::minutes(10);
-        for (const auto& entry : fs::directory_iterator(shmDir)) {
-            const auto& path = entry.path();
-            const auto& name = path.filename().string();
-            if (!entry.is_regular_file() || name.compare(0, prefix.size(), prefix) != 0 ||
-                name == me) {
-                continue;
-            }
+        auto cleanDir = [&](const fs::path& dir) {
             try {
-                const auto lwt = fs::last_write_time(path);
-                if (now - lwt <= keepThreshold) { continue; }
-                fs::remove(path);
+                if (!fs::exists(dir)) { return; }
+                for (const auto& entry : fs::directory_iterator(dir)) {
+                    const auto& path = entry.path();
+                    const auto& name = path.filename().string();
+                    if (!entry.is_regular_file() || name.compare(0, prefix.size(), prefix) != 0 ||
+                        name == me) {
+                        continue;
+                    }
+                    const auto lwt = fs::last_write_time(path);
+                    if (now - lwt <= keepThreshold) { continue; }
+                    fs::remove(path);
+                }
             } catch (...) {
             }
-        }
+        };
+        cleanDir("/dev/shm");
     }
     static Status MmapShmFile(PosixShm& shmFile, const size_t size, void*& addr,
                               bool needTrunc = true)
@@ -295,6 +395,25 @@ protected:
         s = shmFile.MMap(addr, size, true, true, true);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to mmap file({}) with size({}).", s, shmFile.ShmName(), size);
+            addr = nullptr;
+            return s;
+        }
+        s = PosixShm::MAdvise(addr, size, MADV_HUGEPAGE);
+        if (s.Success()) {
+            UC_DEBUG("Advise shm file({}) to use transparent huge pages, size({}).",
+                     shmFile.ShmName(), size);
+        } else {
+            UC_DEBUG("Failed({}) to advise shm file({}) to use transparent huge pages.",
+                     s, shmFile.ShmName());
+        }
+        return Status::OK();
+    }
+    static Status AttachHugeShm(HugePageShm& shmFile, void*& addr)
+    {
+        auto s = shmFile.Attach(addr);
+        if (s.Failure()) [[unlikely]] {
+            UC_ERROR("Failed({}) to attach huge shm({}).", s, shmFile.Readme());
+            addr = nullptr;
             return s;
         }
         return Status::OK();
@@ -312,6 +431,15 @@ protected:
         } while (true);
         return Status::OK();
     }
+    Status WaitCurrentShmHeaderReady(BufferHeader* header) const
+    {
+        auto s = WaitShmHeaderReady(header);
+        if (s.Failure()) { return s; }
+        if (header->nameHash != ShmNameHash(shmName_)) {
+            return Status::InvalidParam("shared buffer name hash mismatch");
+        }
+        return Status::OK();
+    }
     Status InitShmBuffer(PosixShm& shmFile)
     {
         auto s = MmapShmFile(shmFile, totalSize_, addrress_);
@@ -319,6 +447,7 @@ protected:
         header_ = static_cast<BufferHeader*>(addrress_);
         meta_ = (BufferMetaNode*)(static_cast<std::byte*>(addrress_) + MetaOffset());
         header_->lock.Init();
+        header_->nameHash = ShmNameHash(shmName_);
         header_->nNode = nNode_;
         header_->freeHead = 0;
         for (size_t i = 0; i < nHashTableBucket; i++) {
@@ -342,11 +471,94 @@ protected:
         s = MmapShmFile(shmFile, totalSize_, addrress_, false);
         if (s.Failure()) [[unlikely]] { return s; }
         header_ = static_cast<BufferHeader*>(addrress_);
-        s = WaitShmHeaderReady(header_);
+        s = WaitCurrentShmHeaderReady(header_);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Shm file({}) not ready.", shmFile.ShmName());
             return s;
         }
+        meta_ = (BufferMetaNode*)(static_cast<std::byte*>(addrress_) + MetaOffset());
+        return Status::OK();
+    }
+    Status InitHugeShmBuffer(HugePageShm& shmFile)
+    {
+        auto s = AttachHugeShm(shmFile, addrress_);
+        if (s.Failure()) [[unlikely]] { return s; }
+        useHugeShm_ = true;
+        ownHugeShm_ = true;
+        UC_INFO("Use HugeTLB shm({}) for CacheStore shared buffer.", shmFile.Readme());
+        header_ = static_cast<BufferHeader*>(addrress_);
+        meta_ = (BufferMetaNode*)(static_cast<std::byte*>(addrress_) + MetaOffset());
+        header_->lock.Init();
+        header_->nameHash = ShmNameHash(shmName_);
+        header_->nNode = nNode_;
+        header_->freeHead = 0;
+        for (size_t i = 0; i < nHashTableBucket; i++) {
+            header_->buckets[i] = invalidIndex;
+            header_->bucketLocks[i].Init();
+        }
+        for (size_t i = 0; i < nNode_; i++) {
+            header_->nodeLocks[i].Init();
+            meta_[i].Init();
+        }
+        header_->magic = sharedBufferMagic;
+        return Status::OK();
+    }
+    Status LoadHugeShmBuffer(HugePageShm& shmFile)
+    {
+        auto s = shmFile.Open();
+        if (s.Failure()) {
+            if (s.Underlying() != ENOENT) {
+                UC_ERROR("Failed({}) to open huge shm({}).", s, shmFile.Readme());
+            }
+            return s;
+        }
+        s = AttachHugeShm(shmFile, addrress_);
+        if (s.Failure()) [[unlikely]] { return s; }
+        useHugeShm_ = true;
+        UC_INFO("Use HugeTLB shm({}) for CacheStore shared buffer.", shmFile.Readme());
+        header_ = static_cast<BufferHeader*>(addrress_);
+        s = WaitCurrentShmHeaderReady(header_);
+        if (s.Failure()) [[unlikely]] {
+            UC_ERROR("Huge shm({}) not ready.", shmFile.Readme());
+            return s;
+        }
+        meta_ = (BufferMetaNode*)(static_cast<std::byte*>(addrress_) + MetaOffset());
+        return Status::OK();
+    }
+    Status LoadHugeShmHeader(HugePageShm& shmFile)
+    {
+        auto s = shmFile.Open();
+        if (s.Failure()) {
+            if (s.Underlying() != ENOENT) {
+                UC_ERROR("Failed({}) to open huge shm({}).", s, shmFile.Readme());
+            }
+            return s;
+        }
+        void* addr = nullptr;
+        s = AttachHugeShm(shmFile, addr);
+        if (s.Failure()) [[unlikely]] { return s; }
+        auto header = static_cast<BufferHeader*>(addr);
+        s = WaitCurrentShmHeaderReady(header);
+        if (s.Failure()) [[unlikely]] {
+            HugePageShm::Detach(addr);
+            UC_ERROR("Huge shm({}) not ready.", shmFile.Readme());
+            return s;
+        }
+        nNode_ = header->nNode;
+        HugePageShm::Detach(addr);
+        return Status::OK();
+    }
+    Status LoadHugeShmMeta(HugePageShm& shmFile)
+    {
+        auto s = LoadHugeShmHeader(shmFile);
+        if (s.Failure()) [[unlikely]] { return s; }
+        totalSize_ = DataOffset();
+        s = AttachHugeShm(shmFile, addrress_);
+        if (s.Failure()) [[unlikely]] { return s; }
+        useHugeShm_ = true;
+        UC_INFO("Use HugeTLB shm({}) for CacheStore shared buffer watcher.",
+                shmFile.Readme());
+        header_ = static_cast<BufferHeader*>(addrress_);
         meta_ = (BufferMetaNode*)(static_cast<std::byte*>(addrress_) + MetaOffset());
         return Status::OK();
     }
@@ -377,8 +589,18 @@ public:
     ~SharedBufferStrategy() override
     {
         if (data_) { Trans::Buffer::UnregisterHostBuffer(data_); }
-        if (addrress_) { PosixShm::MUnmap(addrress_, totalSize_); }
-        PosixShm{shmName_}.ShmUnlink();
+        if (addrress_) {
+            if (useHugeShm_) {
+                HugePageShm::Detach(addrress_);
+            } else {
+                PosixShm::MUnmap(addrress_, totalSize_);
+            }
+        }
+        if (useHugeShm_) {
+            if (ownHugeShm_) { HugePageShm{hugeShmName_}.Unlink(); }
+        } else {
+            PosixShm{shmName_}.ShmUnlink();
+        }
     }
     Status Setup() override
     {
@@ -390,12 +612,32 @@ public:
         nodeSize_ = nodeSize;
         nNode_ = totalSize / nodeSize;
         CleanUpShmFileExceptMe(shmName_);
-        PosixShm shmFile{shmName_};
         const auto dataOffset = DataOffset();
-        totalSize_ = dataOffset + DataSize();
+        totalSize_ = HugeMapSize(dataOffset + DataSize());
+        hugeShmName_ = shmName_;
+        HugePageShm hugeFile{hugeShmName_};
+        auto s = hugeFile.Create(totalSize_);
+        if (s.Success()) {
+            s = InitHugeShmBuffer(hugeFile);
+            if (s.Success()) { return RegisterBuffer(deviceId); }
+            hugeFile.Unlink();
+            UC_WARN("Failed({}) to create HugeTLB shm buffer({}), fallback to POSIX shm.",
+                    s, hugeFile.Readme());
+        } else if (s == Status::DuplicateKey()) {
+            s = LoadHugeShmBuffer(hugeFile);
+            if (s.Success()) { return RegisterBuffer(deviceId); }
+            return s;
+        } else {
+            UC_WARN("Failed({}) to create HugeTLB shm({}), fallback to POSIX shm.",
+                    s, hugeFile.Readme());
+            addrress_ = nullptr;
+            useHugeShm_ = false;
+        }
+
+        PosixShm shmFile{shmName_};
         const auto flags =
             PosixShm::OpenFlag::CREATE | PosixShm::OpenFlag::EXCL | PosixShm::OpenFlag::READ_WRITE;
-        auto s = shmFile.ShmOpen(flags);
+        s = shmFile.ShmOpen(flags);
         if (s.Success()) {
             s = InitShmBuffer(shmFile);
         } else if (s == Status::DuplicateKey()) {
@@ -435,8 +677,14 @@ public:
     {
         shmName_ = ShmPrefix() + uuid_;
         CleanUpShmFileExceptMe(shmName_);
+        hugeShmName_ = shmName_;
+        HugePageShm hugeFile{hugeShmName_};
+        auto s = LoadHugeShmMeta(hugeFile);
+        if (s.Success()) { return Status::OK(); }
+        if (s.Underlying() != ENOENT) { return s; }
+
         PosixShm shmFile{shmName_};
-        auto s = shmFile.ShmOpen(PosixShm::OpenFlag::READ_WRITE);
+        s = shmFile.ShmOpen(PosixShm::OpenFlag::READ_WRITE);
         if (s.Failure()) {
             UC_ERROR("Failed({}) to open file({}).", s, shmFile.ShmName());
             return s;
@@ -446,8 +694,9 @@ public:
         s = MmapShmFile(shmFile, size, addr, false);
         if (s.Failure()) [[unlikely]] { return s; }
         auto header = static_cast<BufferHeader*>(addr);
-        s = WaitShmHeaderReady(header);
+        s = WaitCurrentShmHeaderReady(header);
         if (s.Failure()) [[unlikely]] {
+            PosixShm::MUnmap(addr, size);
             UC_ERROR("Shm file({}) not ready.", shmFile.ShmName());
             return s;
         }

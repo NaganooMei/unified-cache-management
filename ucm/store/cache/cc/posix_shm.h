@@ -24,6 +24,7 @@
 #ifndef UNIFIEDCACHE_CACHE_STORE_CC_POSIX_SHM_H
 #define UNIFIEDCACHE_CACHE_STORE_CC_POSIX_SHM_H
 
+#include <cerrno>
 #include <cstdint>
 #include <fcntl.h>
 #include <string>
@@ -78,6 +79,13 @@ public:
         addr = mmap(nullptr, size, prot, flags, handle_, 0);
         auto eno = errno;
         if (addr != MAP_FAILED) { return Status::OK(); }
+        return Status{eno, std::to_string(eno)};
+    }
+    static Status MAdvise(void* addr, size_t size, int32_t advice)
+    {
+        auto ret = madvise(addr, size, advice);
+        auto eno = errno;
+        if (ret == 0) { return Status::OK(); }
         return Status{eno, std::to_string(eno)};
     }
     static void MUnmap(void* addr, size_t size) { munmap(addr, size); }
