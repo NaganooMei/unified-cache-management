@@ -27,8 +27,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fcntl.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -41,18 +40,6 @@ namespace UC::CacheStore {
 
 static constexpr size_t nHashTableBucket = 16411;
 static constexpr auto invalidIndex = std::numeric_limits<size_t>::max();
-
-#ifndef SHM_HUGETLB
-#define SHM_HUGETLB 04000
-#endif
-
-#ifndef SHM_HUGE_SHIFT
-#define SHM_HUGE_SHIFT 26
-#endif
-
-#ifndef SHM_HUGE_2MB
-#define SHM_HUGE_2MB (21 << SHM_HUGE_SHIFT)
-#endif
 
 static inline size_t Hash(const Detail::BlockId& blockId, size_t shard)
 {
@@ -217,63 +204,76 @@ public:
 class HugePageShm {
 private:
     std::string name_{};
-    key_t key_{0};
+    std::string path_{};
     int32_t handle_{-1};
 
-    static uint64_t HashName(const std::string& name) noexcept
+    static std::string FileName(std::string name)
     {
-        uint64_t hash = 1469598103934665603ULL;
-        for (const auto ch : name) {
-            hash ^= static_cast<unsigned char>(ch);
-            hash *= 1099511628211ULL;
+        for (auto& ch : name) {
+            if (ch == '/' || ch == '\\') { ch = '_'; }
         }
-        return hash;
+        return name;
     }
 
-    static key_t MakeKey(const std::string& name) noexcept
+    static std::string MakePath(const std::string& name)
     {
-        auto key = static_cast<key_t>(HashName(name) & 0x7fffffff);
-        return key == 0 ? 1 : key;
+        return (std::filesystem::path{"/hugepages-2Mi"} / FileName(name)).string();
     }
 
 public:
-    explicit HugePageShm(std::string name) : name_{std::move(name)}, key_{MakeKey(name_)} {}
-    std::string Readme() const
+    explicit HugePageShm(std::string name) : name_{std::move(name)}, path_{MakePath(name_)} {}
+    ~HugePageShm()
     {
-        return name_ + "(sysv key " + std::to_string(static_cast<int64_t>(key_)) + ")";
+        if (handle_ != -1) { close(handle_); }
     }
+    const std::string& Path() const noexcept { return path_; }
+    std::string Readme() const { return path_; }
     Status Create(size_t size)
     {
+        size_ = size;
         static constexpr auto NewFilePerm = (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-        constexpr auto flags = IPC_CREAT | IPC_EXCL | SHM_HUGETLB | SHM_HUGE_2MB;
-        handle_ = shmget(key_, size, flags | NewFilePerm);
-        const auto eno = errno;
-        if (handle_ >= 0) { return Status::OK(); }
-        if (eno == EEXIST) { return Status::DuplicateKey(); }
-        return Status{eno, std::to_string(eno)};
+        handle_ = open(path_.c_str(), O_CREAT | O_EXCL | O_RDWR, NewFilePerm);
+        if (handle_ < 0) {
+            const auto eno = errno;
+            if (eno == EEXIST) { return Status::DuplicateKey(); }
+            return Status{eno, std::to_string(eno)};
+        }
+        const auto ret = ftruncate64(handle_, size);
+        const auto truncEno = errno;
+        if (ret == 0) { return Status::OK(); }
+        Unlink();
+        return Status{truncEno, std::to_string(truncEno)};
     }
     Status Open()
     {
-        static constexpr auto NewFilePerm = (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-        handle_ = shmget(key_, 1, NewFilePerm);
+        handle_ = open(path_.c_str(), O_RDWR);
         const auto eno = errno;
         if (handle_ >= 0) { return Status::OK(); }
         return Status{eno, std::to_string(eno)};
     }
     Status Attach(void*& addr)
     {
-        addr = shmat(handle_, nullptr, 0);
+        constexpr auto prot = PROT_READ | PROT_WRITE;
+        constexpr auto flags = MAP_SHARED | MAP_POPULATE;
+        addr = mmap(nullptr, size_, prot, flags, handle_, 0);
         const auto eno = errno;
-        if (addr != reinterpret_cast<void*>(-1)) { return Status::OK(); }
+        if (addr != MAP_FAILED) { return Status::OK(); }
         addr = nullptr;
         return Status{eno, std::to_string(eno)};
     }
-    static void Detach(void* addr) { shmdt(addr); }
+    void SetSize(size_t size) noexcept { size_ = size; }
+    static void Detach(void* addr, size_t size) { munmap(addr, size); }
     void Unlink()
     {
-        if (handle_ == -1 && Open().Failure()) { return; }
-        shmctl(handle_, IPC_RMID, nullptr);
+        if (handle_ != -1) {
+            close(handle_);
+            handle_ = -1;
+        }
+        unlink(path_.c_str());
     }
+
+private:
+    size_t size_{0};
 };
 
 class SharedBufferStrategy : public BufferStrategy {
@@ -380,6 +380,7 @@ protected:
             }
         };
         cleanDir("/dev/shm");
+        cleanDir("/hugepages-2Mi");
     }
     static Status MmapShmFile(PosixShm& shmFile, const size_t size, void*& addr,
                               bool needTrunc = true)
@@ -408,8 +409,9 @@ protected:
         }
         return Status::OK();
     }
-    static Status AttachHugeShm(HugePageShm& shmFile, void*& addr)
+    static Status AttachHugeShm(HugePageShm& shmFile, size_t size, void*& addr)
     {
+        shmFile.SetSize(size);
         auto s = shmFile.Attach(addr);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to attach huge shm({}).", s, shmFile.Readme());
@@ -481,7 +483,7 @@ protected:
     }
     Status InitHugeShmBuffer(HugePageShm& shmFile)
     {
-        auto s = AttachHugeShm(shmFile, addrress_);
+        auto s = AttachHugeShm(shmFile, totalSize_, addrress_);
         if (s.Failure()) [[unlikely]] { return s; }
         useHugeShm_ = true;
         ownHugeShm_ = true;
@@ -512,7 +514,7 @@ protected:
             }
             return s;
         }
-        s = AttachHugeShm(shmFile, addrress_);
+        s = AttachHugeShm(shmFile, totalSize_, addrress_);
         if (s.Failure()) [[unlikely]] { return s; }
         useHugeShm_ = true;
         UC_INFO("Use HugeTLB shm({}) for CacheStore shared buffer.", shmFile.Readme());
@@ -535,17 +537,18 @@ protected:
             return s;
         }
         void* addr = nullptr;
-        s = AttachHugeShm(shmFile, addr);
+        const auto size = HugeMapSize(sizeof(BufferHeader));
+        s = AttachHugeShm(shmFile, size, addr);
         if (s.Failure()) [[unlikely]] { return s; }
         auto header = static_cast<BufferHeader*>(addr);
         s = WaitCurrentShmHeaderReady(header);
         if (s.Failure()) [[unlikely]] {
-            HugePageShm::Detach(addr);
+            HugePageShm::Detach(addr, size);
             UC_ERROR("Huge shm({}) not ready.", shmFile.Readme());
             return s;
         }
         nNode_ = header->nNode;
-        HugePageShm::Detach(addr);
+        HugePageShm::Detach(addr, size);
         return Status::OK();
     }
     Status LoadHugeShmMeta(HugePageShm& shmFile)
@@ -553,7 +556,7 @@ protected:
         auto s = LoadHugeShmHeader(shmFile);
         if (s.Failure()) [[unlikely]] { return s; }
         totalSize_ = DataOffset();
-        s = AttachHugeShm(shmFile, addrress_);
+        s = AttachHugeShm(shmFile, totalSize_, addrress_);
         if (s.Failure()) [[unlikely]] { return s; }
         useHugeShm_ = true;
         UC_INFO("Use HugeTLB shm({}) for CacheStore shared buffer watcher.",
@@ -591,7 +594,7 @@ public:
         if (data_) { Trans::Buffer::UnregisterHostBuffer(data_); }
         if (addrress_) {
             if (useHugeShm_) {
-                HugePageShm::Detach(addrress_);
+                HugePageShm::Detach(addrress_, totalSize_);
             } else {
                 PosixShm::MUnmap(addrress_, totalSize_);
             }
