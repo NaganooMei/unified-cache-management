@@ -135,11 +135,10 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
 void LoadQueue::TransferStage(std::promise<Status>& started)
 {
     CopyStream stream;
-    auto s = cacheIOAggregation_
-                 ? stream.SetupIoAggregation(deviceId_, streamNumber_, useGdr_, tensorSizes_,
-                                             ioAggregationPipelineDepth_,
-                                             ioAggregationMaxReadyLanes_)
-                 : stream.Setup(deviceId_, streamNumber_, useGdr_);
+    auto s = cacheIOAggregation_ ? stream.SetupIoAggregation(
+                                       deviceId_, streamNumber_, useGdr_, tensorSizes_,
+                                       ioAggregationPipelineDepth_, ioAggregationMaxReadyLanes_)
+                                 : stream.Setup(deviceId_, streamNumber_, useGdr_);
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {

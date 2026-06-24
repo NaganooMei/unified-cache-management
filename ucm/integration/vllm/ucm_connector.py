@@ -488,6 +488,18 @@ class UCMDirectConnector(KVConnectorBase_V1):
             }
         )
 
+    def _keep_cache_io_aggregation_for_layerwise(self) -> bool:
+        return False
+
+    def _apply_layerwise_cache_io_aggregation_policy(
+        self, config: dict[str, object]
+    ) -> None:
+        if (
+            self.launch_config.get("use_layerwise", False)
+            and not self._keep_cache_io_aggregation_for_layerwise()
+        ):
+            config["cache_io_aggregation"] = False
+
     def generate_hash(
         self, block_size: int, token_ids: List[int], parent_block_hash_value: bytes
     ) -> list[bytes]:
@@ -523,8 +535,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
         name = self.connector_configs[0]["ucm_connector_name"]
         module_path = self.connector_configs[0].get("ucm_connector_module_path", None)
         config = copy.deepcopy(self.connector_configs[0]["ucm_connector_config"])
-        if self.launch_config.get("use_layerwise", False):
-            config["cache_io_aggregation"] = False
+        self._apply_layerwise_cache_io_aggregation_policy(config)
         config.setdefault("share_buffer_enable", self.is_mla)
         if "storage_backends" in config:
             backends = [path for path in config["storage_backends"].split(":")]
@@ -2622,6 +2633,9 @@ class UCMHMAConnector(UCMDirectConnector, SupportsHMA):
         logger.info(
             f"UCMHMAConnector initialized with use_layerwise={self.use_layerwise}"
         )
+
+    def _keep_cache_io_aggregation_for_layerwise(self) -> bool:
+        return bool(self.use_compress)
 
     def _create_kv_cache_layout(
         self, kv_caches: dict[str, torch.Tensor]

@@ -21,9 +21,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <limits>
 #include <memory>
 #include <numeric>
-#include <limits>
 #include "buffer_manager.h"
 #include "logger/logger.h"
 #include "trans/cuda/gdr/gdr_config.h"
@@ -151,10 +151,8 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_io_aggregation", param.cacheIOAggregation);
-        config.GetNumber("cache_io_aggregation_pipeline_depth",
-                         param.ioAggregationPipelineDepth);
-        config.GetNumber("cache_io_aggregation_max_ready_lanes",
-                         param.ioAggregationMaxReadyLanes);
+        config.GetNumber("cache_io_aggregation_pipeline_depth", param.ioAggregationPipelineDepth);
+        config.GetNumber("cache_io_aggregation_max_ready_lanes", param.ioAggregationMaxReadyLanes);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -191,8 +189,7 @@ private:
         if (s.Failure()) { return s; }
 #if !UCM_RUNTIME_ASCEND_IO_AGGREGATION
         if (config.cacheIOAggregation) {
-            return Status::InvalidParam(
-                "Cache IO aggregation requires RUNTIME_ENVIRONMENT=ascend");
+            return Status::InvalidParam("Cache IO aggregation requires RUNTIME_ENVIRONMENT=ascend");
         }
 #endif
         if (config.cacheIOAggregation &&

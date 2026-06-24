@@ -71,9 +71,9 @@ public:
         return Status::OK();
     }
 
-    Status SetupIoAggregation(const int32_t deviceId, const size_t laneNumber,
-                              const bool useGdr, const std::vector<size_t>& tensorSizes,
-                              const size_t pipelineDepth, const size_t maxReadyLanes)
+    Status SetupIoAggregation(const int32_t deviceId, const size_t laneNumber, const bool useGdr,
+                              const std::vector<size_t>& tensorSizes, const size_t pipelineDepth,
+                              const size_t maxReadyLanes)
     {
         if (laneNumber == 0) { return Status::InvalidParam("invalid IO aggregation lane number"); }
         if (tensorSizes.empty()) {

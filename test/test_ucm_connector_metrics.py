@@ -428,6 +428,48 @@ def _vllm_config(config=None):
     )
 
 
+def _store_config_connector(connector_cls=UCMDirectConnector):
+    connector = object.__new__(connector_cls)
+    connector.connector_configs = [
+        {
+            "ucm_connector_name": "UcmPipelineStore",
+            "ucm_connector_config": {
+                "store_pipeline": "Cache|Posix",
+                "storage_backends": "/tmp/ucm",
+            },
+        }
+    ]
+    connector.launch_config = {"use_layerwise": True}
+    connector.is_mla = False
+    connector.engine_id = "engine-0"
+    connector._role = KVConnectorRole.SCHEDULER
+    connector._vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_rank=0)
+    )
+    connector.block_size = 16
+    connector.element_size = 2
+    connector.head_size = 128
+    connector.num_layers = 2
+    connector.num_head = 4
+    connector.blocks_per_chunk = 1
+    return connector
+
+
+def _capture_created_store_config(monkeypatch):
+    created = []
+
+    def create_connector(name, config, module_path):
+        created.append((name, config, module_path))
+        return config
+
+    monkeypatch.setattr(
+        ucm_connector_module.UcmConnectorFactoryV1,
+        "create_connector",
+        staticmethod(create_connector),
+    )
+    return created
+
+
 def _reset_fakes():
     fake_ucmmetrics.created.clear()
     fake_ucmmetrics.updated.clear()
@@ -803,6 +845,30 @@ def test_direct_connector_drains_dispatcher_vllm_connector_snapshot():
         "sum": 75.0,
     }
     assert connector.get_kv_connector_stats() is None
+
+
+def test_direct_layerwise_store_disables_cache_io_aggregation(monkeypatch):
+    created = _capture_created_store_config(monkeypatch)
+    connector = _store_config_connector()
+
+    config = connector._create_store(None)
+
+    assert config["cache_io_aggregation"] is False
+    assert created[0][1]["cache_io_aggregation"] is False
+
+
+def test_hma_layerwise_store_keeps_cache_io_aggregation_default(monkeypatch):
+    class HMAConnector(UCMDirectConnector):
+        def _keep_cache_io_aggregation_for_layerwise(self):
+            return True
+
+    created = _capture_created_store_config(monkeypatch)
+    connector = _store_config_connector(HMAConnector)
+
+    config = connector._create_store(None)
+
+    assert "cache_io_aggregation" not in config
+    assert "cache_io_aggregation" not in created[0][1]
 
 
 def test_direct_connector_get_finished_records_async_durations():
