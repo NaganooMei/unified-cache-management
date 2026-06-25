@@ -17,7 +17,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from ucm.integration.vllm.device import create_device
-from ucm.integration.vllm.ucm_connector import UCMDirectConnector
+from ucm.integration.vllm.ucm_connector import UCMDirectConnector, _trace_speed_gbps
 from ucm.logger import init_logger
 from ucm.shared.metrics import ucmmetrics
 from ucm.sparse.utils import round_up
@@ -1134,6 +1134,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         if not isinstance(metadata, UCMFAWAConnectorMetadata):
             raise RuntimeError(f"Unexpected FAWA metadata type: {type(metadata)}")
 
+        load_start_time = time.perf_counter() * 1000
         tasks: list[FAWALoadTask] = []
         for request_id, request in metadata.request_meta.items():
             if not request.load_keys:
@@ -1185,6 +1186,18 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 self._handle_load_err(request_id)
 
         self._wait_all_load_task(tasks)
+        load_end_time = time.perf_counter() * 1000
+        load_duration_ms = load_end_time - load_start_time
+        total_bytes = sum(
+            task.key_count * self.file_size.get(task.label, 0) for task in tasks
+        )
+        if tasks:
+            logger.info(
+                f"[UCM_LOAD_PY] mode=fawa "
+                f"bytes={total_bytes} "
+                f"total_ms={load_duration_ms:.3f} "
+                f"speed_gbps={_trace_speed_gbps(total_bytes, load_duration_ms):.3f}"
+            )
 
     @fawa_latency_metric(
         "fawa_worker_wait_wait_all_load_task_ms",

@@ -113,6 +113,12 @@ def _record_counter(name: str, value: float = 1.0) -> None:
     ucmmetrics.update_stats({name: value})
 
 
+def _trace_speed_gbps(byte_count: int, duration_ms: float) -> float:
+    if duration_ms <= 0:
+        return 0.0
+    return byte_count / duration_ms / 1024 / 1024
+
+
 @dataclass
 class RequestMeta:
     ucm_block_ids: list[bytes] = field(default_factory=list)
@@ -911,6 +917,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
         load_bytes = num_loaded_block * self.block_data_size
         load_speed = load_bytes / load_duration_ms / 1024 / 1024  # GB/s
         if is_load:
+            logger.info(
+                f"[UCM_LOAD_PY] mode=direct "
+                f"bytes={load_bytes} "
+                f"total_ms={load_duration_ms:.3f} "
+                f"speed_gbps={_trace_speed_gbps(load_bytes, load_duration_ms):.3f}"
+            )
             load_stats = {
                 "load_requests_num": num_loaded_request,
                 "load_blocks_num": num_loaded_block,
