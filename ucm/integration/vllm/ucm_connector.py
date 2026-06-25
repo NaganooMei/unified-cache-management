@@ -493,7 +493,9 @@ class UCMDirectConnector(KVConnectorBase_V1):
     def _apply_sdma_direct_launch_granularity(self, config: dict[str, Any]) -> None:
         if "cache_sdma_direct_launch_granularity" in config:
             return
-        use_layerwise = self._config_bool(self.launch_config.get("use_layerwise", False))
+        use_layerwise = self._config_bool(
+            self.launch_config.get("use_layerwise", False)
+        )
         config["cache_sdma_direct_launch_granularity"] = (
             "task" if use_layerwise else "shard"
         )
