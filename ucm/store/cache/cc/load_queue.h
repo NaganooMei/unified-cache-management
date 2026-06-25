@@ -84,7 +84,7 @@ private:
     size_t streamNumber_{1};
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
-    std::string sdmaDirectLaunchGranularity_{kSdmaDirectLaunchTask};
+    std::string sdmaDirectLaunchGranularity_{kSdmaDirectLaunchShard};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;

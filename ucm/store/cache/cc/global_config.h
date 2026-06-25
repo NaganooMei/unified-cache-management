@@ -61,7 +61,7 @@ struct Config {
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
     bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
-    std::string sdmaDirectLaunchGranularity{kSdmaDirectLaunchTask};
+    std::string sdmaDirectLaunchGranularity{kSdmaDirectLaunchShard};
 };
 
 }  // namespace UC::CacheStore
