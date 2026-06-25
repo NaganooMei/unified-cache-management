@@ -23,9 +23,7 @@
  * */
 #include "trans_buffer.h"
 #include <atomic>
-#include <cstdint>
 #include <filesystem>
-#include <sys/mman.h>
 #include <thread>
 #include <unistd.h>
 #include "logger/logger.h"
@@ -228,7 +226,6 @@ protected:
     static constexpr size_t sharedBufferMagic = (('S' << 16) | ('b' << 8) | 1);
     struct BufferHeader {
         std::atomic<size_t> magic;
-        uint64_t nameHash;
         ShareLock lock;
         size_t nNode;
         size_t freeHead;
@@ -248,28 +245,14 @@ protected:
     void* addrress_{nullptr};
     size_t totalSize_{0};
 
-    static constexpr size_t kHugePageSize = 2UL << 20;
-    static size_t AlignUp(size_t size, size_t alignment) noexcept
-    {
-        return (size + alignment - 1) / alignment * alignment;
-    }
     size_t MetaOffset() const noexcept { return sizeof(BufferHeader) + sizeof(ShareLock) * nNode_; }
     size_t DataOffset() const noexcept
     {
+        static const auto pageSize = sysconf(_SC_PAGESIZE);
         const auto size = MetaOffset() + sizeof(BufferMetaNode) * nNode_;
-        return AlignUp(size, kHugePageSize);
+        return (size + pageSize - 1) & ~(pageSize - 1);
     }
     size_t DataSize() const noexcept { return nodeSize_ * nNode_; }
-    static size_t HugeMapSize(size_t size) noexcept { return AlignUp(size, kHugePageSize); }
-    static uint64_t ShmNameHash(const std::string& name) noexcept
-    {
-        uint64_t hash = 1469598103934665603ULL;
-        for (const auto ch : name) {
-            hash ^= static_cast<unsigned char>(ch);
-            hash *= 1099511628211ULL;
-        }
-        return hash;
-    }
     static const std::string& ShmPrefix() noexcept
     {
         static std::string prefix{"uc_shm_cache_"};
@@ -317,14 +300,6 @@ protected:
             addr = nullptr;
             return s;
         }
-        s = PosixShm::MAdvise(addr, size, MADV_HUGEPAGE);
-        if (s.Success()) {
-            UC_DEBUG("Advise shm file({}) to use transparent huge pages, size({}).",
-                     shmFile.ShmName(), size);
-        } else {
-            UC_DEBUG("Failed({}) to advise shm file({}) to use transparent huge pages.",
-                     s, shmFile.ShmName());
-        }
         return Status::OK();
     }
     static Status WaitShmHeaderReady(BufferHeader* header)
@@ -340,15 +315,6 @@ protected:
         } while (true);
         return Status::OK();
     }
-    Status WaitCurrentShmHeaderReady(BufferHeader* header) const
-    {
-        auto s = WaitShmHeaderReady(header);
-        if (s.Failure()) { return s; }
-        if (header->nameHash != ShmNameHash(shmName_)) {
-            return Status::InvalidParam("shared buffer name hash mismatch");
-        }
-        return Status::OK();
-    }
     Status InitShmBuffer(PosixShm& shmFile)
     {
         auto s = MmapShmFile(shmFile, totalSize_, addrress_);
@@ -356,7 +322,6 @@ protected:
         header_ = static_cast<BufferHeader*>(addrress_);
         meta_ = (BufferMetaNode*)(static_cast<std::byte*>(addrress_) + MetaOffset());
         header_->lock.Init();
-        header_->nameHash = ShmNameHash(shmName_);
         header_->nNode = nNode_;
         header_->freeHead = 0;
         for (size_t i = 0; i < nHashTableBucket; i++) {
@@ -380,7 +345,7 @@ protected:
         s = MmapShmFile(shmFile, totalSize_, addrress_, false);
         if (s.Failure()) [[unlikely]] { return s; }
         header_ = static_cast<BufferHeader*>(addrress_);
-        s = WaitCurrentShmHeaderReady(header_);
+        s = WaitShmHeaderReady(header_);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Shm file({}) not ready.", shmFile.ShmName());
             return s;
@@ -429,7 +394,7 @@ public:
         nNode_ = totalSize / nodeSize;
         CleanUpShmFileExceptMe(shmName_);
         const auto dataOffset = DataOffset();
-        totalSize_ = HugeMapSize(dataOffset + DataSize());
+        totalSize_ = dataOffset + DataSize();
         PosixShm shmFile{shmName_};
         const auto flags =
             PosixShm::OpenFlag::CREATE | PosixShm::OpenFlag::EXCL | PosixShm::OpenFlag::READ_WRITE;
@@ -484,7 +449,7 @@ public:
         s = MmapShmFile(shmFile, size, addr, false);
         if (s.Failure()) [[unlikely]] { return s; }
         auto header = static_cast<BufferHeader*>(addr);
-        s = WaitCurrentShmHeaderReady(header);
+        s = WaitShmHeaderReady(header);
         if (s.Failure()) [[unlikely]] {
             PosixShm::MUnmap(addr, size);
             UC_ERROR("Shm file({}) not ready.", shmFile.ShmName());
