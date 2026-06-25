@@ -482,22 +482,11 @@ class UCMDirectConnector(KVConnectorBase_V1):
     def _record_counter(name: str, value: float = 1.0) -> None:
         _record_counter(name, value)
 
-    @staticmethod
-    def _config_bool(value: Any) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
-
     def _apply_sdma_direct_launch_granularity(self, config: dict[str, Any]) -> None:
         if "cache_sdma_direct_launch_granularity" in config:
             return
-        use_layerwise = self._config_bool(
-            self.launch_config.get("use_layerwise", False)
-        )
         config["cache_sdma_direct_launch_granularity"] = (
-            "task" if use_layerwise else "shard"
+            "task" if self.launch_config.get("use_layerwise", False) else "shard"
         )
 
     def _record_load_error(self, metric_name: str, block_ids: Any) -> None:
