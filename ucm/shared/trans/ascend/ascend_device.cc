@@ -26,6 +26,9 @@
 #if UCM_RUNTIME_ASCEND_IO_AGGREGATION
 #include "io_aggregation/ascend_io_aggregation_stream.h"
 #endif
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#include "sdma_direct/ascend_sdma_direct_stream.h"
+#endif
 #include "ascend_stream.h"
 #include "trans/device.h"
 
@@ -77,6 +80,22 @@ std::shared_ptr<Stream> Device::MakeIoAggregationStream(const IoAggregationStrea
     (void)config;
 #endif
     return nullptr;
+}
+
+std::shared_ptr<Stream> Device::MakeSdmaDirectStream()
+{
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+    std::shared_ptr<AscendSdmaDirectStream> stream = nullptr;
+    try {
+        stream = std::make_shared<AscendSdmaDirectStream>();
+    } catch (...) {
+        return nullptr;
+    }
+    if (stream->Setup().Success()) { return stream; }
+    return nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 std::unique_ptr<Stream> Device::MakeGdrStream() { return nullptr; }

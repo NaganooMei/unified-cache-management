@@ -33,6 +33,10 @@
 #define UCM_RUNTIME_ASCEND_IO_AGGREGATION 0
 #endif
 
+#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
+#endif
+
 namespace UC::CacheStore {
 
 class CacheStore : public StoreV1 {
@@ -116,6 +120,7 @@ public:
         if (s.Failure()) [[unlikely]] { UC_ERROR("Failed({}) to wait task({}).", s, taskId); }
         return s;
     }
+    Status RegisterMemory(void* base_addr, size_t total_size) override { return Status::OK(); }
 
 private:
     Config ParseConfig(const Detail::Dictionary& config)
@@ -153,6 +158,8 @@ private:
         config.Get("cache_io_aggregation", param.cacheIOAggregation);
         config.GetNumber("cache_io_aggregation_pipeline_depth", param.ioAggregationPipelineDepth);
         config.GetNumber("cache_io_aggregation_max_ready_lanes", param.ioAggregationMaxReadyLanes);
+        config.Get("cache_sdma_direct", param.cacheSdmaDirect);
+        config.Get("cache_sdma_direct_launch_granularity", param.sdmaDirectLaunchGranularity);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -201,6 +208,20 @@ private:
                 static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
             return Status::InvalidParam("invalid Cache IO aggregation max ready lanes({})",
                                         config.ioAggregationMaxReadyLanes);
+        }
+#if !UCM_RUNTIME_ASCEND_SDMA_DIRECT
+        if (config.cacheSdmaDirect) {
+            return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
+        }
+#endif
+        if (config.cacheIOAggregation && config.cacheSdmaDirect) {
+            return Status::InvalidParam(
+                "Cache IO aggregation is incompatible with Cache SDMA Direct");
+        }
+        if (config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchShard &&
+            config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchTask) {
+            return Status::InvalidParam("invalid Cache SDMA Direct launch granularity({})",
+                                        config.sdmaDirectLaunchGranularity);
         }
         auto bufferNumber = config.bufferCapacity / config.shardSize;
         if (bufferNumber < 1024 || bufferNumber < config.loadExclusiveBufferNumber * 2) {
@@ -252,6 +273,9 @@ private:
             UC_INFO("Set {}::IOAggregationMaxReadyLanes to {}.", ns,
                     config.ioAggregationMaxReadyLanes);
         }
+        UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
+        UC_INFO("Set {}::SdmaDirectLaunchGranularity to {}.", ns,
+                config.sdmaDirectLaunchGranularity);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

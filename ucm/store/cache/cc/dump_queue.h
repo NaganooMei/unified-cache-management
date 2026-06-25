@@ -25,6 +25,7 @@
 #define UNIFIEDCACHE_CACHE_STORE_CC_DUMP_QUEUE_H
 
 #include <future>
+#include <string>
 #include <thread>
 #include "copy_stream.h"
 #include "template/hashset.h"
@@ -61,6 +62,7 @@ private:
     bool cacheIOAggregation_{false};
     size_t ioAggregationPipelineDepth_{2};
     size_t ioAggregationMaxReadyLanes_{8};
+    bool cacheSdmaDirect_{false};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<DumpCtx> dumping_;

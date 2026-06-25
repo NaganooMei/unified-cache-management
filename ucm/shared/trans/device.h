@@ -46,6 +46,7 @@ public:
     std::unique_ptr<Stream> MakeStream();
     std::shared_ptr<Stream> MakeSharedStream();
     std::shared_ptr<Stream> MakeIoAggregationStream(const IoAggregationStreamConfig& config);
+    std::shared_ptr<Stream> MakeSdmaDirectStream();
     std::unique_ptr<Stream> MakeGdrStream();
     std::unique_ptr<Stream> MakeSMStream();
     std::unique_ptr<Buffer> MakeBuffer();

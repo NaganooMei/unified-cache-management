@@ -24,16 +24,25 @@
 #ifndef UNIFIEDCACHE_CACHE_STORE_CC_GLOBAL_CONFIG_H
 #define UNIFIEDCACHE_CACHE_STORE_CC_GLOBAL_CONFIG_H
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 #include "ucmstore_v1.h"
 
 #ifndef UCM_RUNTIME_ASCEND_IO_AGGREGATION
 #define UCM_RUNTIME_ASCEND_IO_AGGREGATION 0
 #endif
 
+#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
+#endif
+
 namespace UC::CacheStore {
+
+inline constexpr const char* kSdmaDirectLaunchShard = "shard";
+inline constexpr const char* kSdmaDirectLaunchTask = "task";
 
 struct Config {
     StoreV1* storeBackend{};
@@ -58,6 +67,8 @@ struct Config {
     bool cacheIOAggregation{UCM_RUNTIME_ASCEND_IO_AGGREGATION};
     size_t ioAggregationPipelineDepth{2};
     size_t ioAggregationMaxReadyLanes{8};
+    bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
+    std::string sdmaDirectLaunchGranularity{kSdmaDirectLaunchShard};
 };
 
 }  // namespace UC::CacheStore

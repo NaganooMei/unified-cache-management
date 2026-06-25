@@ -7,6 +7,7 @@
 #define UNIFIEDCACHE_TRANS_ASCEND_FFTS_SDMA_DISPATCHER_H
 
 #include <acl/acl.h>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 #include "status/status.h"

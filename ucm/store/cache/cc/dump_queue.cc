@@ -52,6 +52,7 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     cacheIOAggregation_ = config.cacheIOAggregation;
     ioAggregationPipelineDepth_ = config.ioAggregationPipelineDepth;
     ioAggregationMaxReadyLanes_ = config.ioAggregationMaxReadyLanes;
+    cacheSdmaDirect_ = config.cacheSdmaDirect;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -76,10 +77,15 @@ void DumpQueue::Submit(TaskPtr task, WaiterPtr waiter)
 void DumpQueue::DispatchStage(std::promise<Status>& started)
 {
     CopyStream stream;
-    auto s = cacheIOAggregation_ ? stream.SetupIoAggregation(
-                                       deviceId_, streamNumber_, useGdr_, tensorSizes_,
-                                       ioAggregationPipelineDepth_, ioAggregationMaxReadyLanes_)
-                                 : stream.Setup(deviceId_, streamNumber_, useGdr_);
+    auto s = Status::OK();
+    if (cacheIOAggregation_) {
+        s = stream.SetupIoAggregation(deviceId_, streamNumber_, useGdr_, tensorSizes_,
+                                      ioAggregationPipelineDepth_, ioAggregationMaxReadyLanes_);
+    } else if (cacheSdmaDirect_) {
+        s = stream.SetupSdmaDirect(deviceId_, useGdr_);
+    } else {
+        s = stream.Setup(deviceId_, streamNumber_, useGdr_);
+    }
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {
@@ -132,7 +138,8 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
         auto handle = buffer_->Get(shard.owner, shard.index);
         if (!handle.Owner()) { continue; }
         if (!handle.Ready()) {
-            auto s = DeviceToHostAsync(stream, shard.addrs.data(), handle.Data());
+            auto* host = cacheSdmaDirect_ ? handle.DeviceData() : handle.Data();
+            auto s = DeviceToHostAsync(stream, shard.addrs.data(), host);
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
