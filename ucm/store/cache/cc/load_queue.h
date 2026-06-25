@@ -49,6 +49,7 @@ class LoadQueue {
         TransBuffer::Handle bufferHandle;
         Detail::TaskHandle backendTaskHandle;
         WaiterPtr waiter;
+        bool launchBoundary{false};
     };
     struct LoadPipelineTrace {
         bool active{false};
@@ -108,6 +109,7 @@ private:
     Status WaitBackendTaskReady(ShardTask& task);
     Status HostToDeviceAsync(CopyStream& stream, void* host, void** device);
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
+    Status FlushSdmaDirectTaskBatch(CopyStream& stream, double& syncStartTp, double& syncEndTp);
     void ClearSdmaDirectHolders() noexcept;
     void ResetPipelineTrace(Detail::TaskHandle taskHandle);
     void RecordBackendWait(const ShardTask& task, double readyTp);
