@@ -200,7 +200,8 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             if (!launchBoundary) { return; }
             double tpSyncStart = 0.0;
             double tpSyncEnd = 0.0;
-            s = FlushSdmaDirectTaskBatch(stream, tpSyncStart, tpSyncEnd);
+            s = FlushSdmaDirectTaskBatch(stream, taskHandle, waiter != nullptr, tpSyncStart,
+                                         tpSyncEnd);
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to flush H2D task batch for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
@@ -321,10 +322,12 @@ Status LoadQueue::HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTas
     return stream.HostToDeviceAsync(hosts, devices, tensorSizes_);
 }
 
-Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream, double& syncStartTp,
-                                           double& syncEndTp)
+Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream, Detail::TaskHandle taskHandle,
+                                           bool finalBatch, double& syncStartTp, double& syncEndTp)
 {
     if (holder_.empty()) { return Status::OK(); }
+    const auto shardCount = holder_.size();
+    const auto byteCount = shardCount * shardBytes_;
     auto h2dSubmitStartTp = NowTime::Now();
     auto s = HostToDeviceTaskAsync(stream, holder_);
     if (s.Failure()) [[unlikely]] {
@@ -336,6 +339,13 @@ Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream, double& syncStart
     s = stream.Synchronize();
     syncEndTp = NowTime::Now();
     ClearSdmaDirectHolders();
+    if (s.Success()) {
+        UC_INFO("[UCM_SDMA_DIRECT_TASK_BATCH] task={} final={} shards={} bytes={} "
+                "submit_ms={:.3f} sync_ms={:.3f} total_ms={:.3f}.",
+                taskHandle, finalBatch, shardCount, byteCount,
+                (syncStartTp - h2dSubmitStartTp) * 1e3, (syncEndTp - syncStartTp) * 1e3,
+                (syncEndTp - h2dSubmitStartTp) * 1e3);
+    }
     return s;
 }
 
