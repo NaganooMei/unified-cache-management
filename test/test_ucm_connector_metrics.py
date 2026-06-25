@@ -278,7 +278,11 @@ def _install_stubs():
     _install_package("ucm", REPO_ROOT / "ucm")
     _install_package("ucm.integration", REPO_ROOT / "ucm" / "integration")
     _install_package("ucm.integration.vllm", REPO_ROOT / "ucm" / "integration" / "vllm")
-    _install_module("torch", Tensor=type("Tensor", (), {}))
+    _install_module(
+        "torch",
+        Tensor=type("Tensor", (), {}),
+        dtype=type("dtype", (), {}),
+    )
     _install_module(
         "prometheus_client",
         Counter=FakeCounter,
@@ -972,6 +976,35 @@ def test_ucm_connector_get_kv_connector_stats_forwards_to_inner_connector():
     connector.connector = inner
 
     assert connector.get_kv_connector_stats() is expected
+
+
+@pytest.mark.parametrize(
+    ("use_layerwise", "expected_granularity"),
+    [(True, "task"), (False, "shard"), ("true", "task"), ("false", "shard")],
+)
+def test_sdma_direct_launch_granularity_defaults_from_layerwise(
+    use_layerwise, expected_granularity
+):
+    connector = object.__new__(UCMDirectConnector)
+    connector.launch_config = {"use_layerwise": use_layerwise}
+    config = {}
+
+    connector._apply_sdma_direct_launch_granularity(config)
+
+    assert config["cache_sdma_direct_launch_granularity"] == expected_granularity
+
+
+@pytest.mark.parametrize("configured_granularity", ["task", "shard"])
+def test_sdma_direct_launch_granularity_respects_user_config(
+    configured_granularity,
+):
+    connector = object.__new__(UCMDirectConnector)
+    connector.launch_config = {"use_layerwise": configured_granularity != "task"}
+    config = {"cache_sdma_direct_launch_granularity": configured_granularity}
+
+    connector._apply_sdma_direct_launch_granularity(config)
+
+    assert config["cache_sdma_direct_launch_granularity"] == configured_granularity
 
 
 def test_example_metrics_config_defaults_to_vllm_connector_metrics():
