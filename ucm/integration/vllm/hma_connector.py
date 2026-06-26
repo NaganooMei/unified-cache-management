@@ -569,6 +569,8 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             ]
         config["unique_id"] = f"{self.engine_id}_fawa_{store_suffix}"
         self._namespace_storage_backends(config, store_suffix)
+        if store_suffix == "wa" and self.use_compress:
+            config["cache_io_aggregation"] = False
         dp_rank = self._vllm_config.parallel_config.data_parallel_rank
         config["posix_gc_enable"] = (
             self._role != KVConnectorRole.WORKER and dp_rank == 0
