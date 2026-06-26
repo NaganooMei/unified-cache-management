@@ -269,8 +269,7 @@ Status AscendShardIOAggregator::Synchronize()
                                "aclrtStreamWaitEvent(slotFree)");
             if (s.Failure()) { return s; }
         }
-        auto s = AclStatus(aclrtSynchronizeStream(lane.copyStream),
-                           "aclrtSynchronizeStream(copy)");
+        auto s = AclStatus(aclrtSynchronizeStream(lane.copyStream), "aclrtSynchronizeStream(copy)");
         if (s.Failure()) { return s; }
         s = AclStatus(aclrtSynchronizeStream(lane.fftsStream), "aclrtSynchronizeStream(ffts)");
         if (s.Failure()) { return s; }

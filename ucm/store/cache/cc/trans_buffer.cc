@@ -326,7 +326,6 @@ protected:
         s = shmFile.MMap(addr, size, true, true, true, true);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to mmap file({}) with size({}).", s, shmFile.ShmName(), size);
-            addr = nullptr;
             return s;
         }
         return Status::OK();
@@ -422,9 +421,9 @@ public:
         nodeSize_ = nodeSize;
         nNode_ = totalSize / nodeSize;
         CleanUpShmFileExceptMe(shmName_);
+        PosixShm shmFile{shmName_};
         const auto dataOffset = DataOffset();
         totalSize_ = dataOffset + DataSize();
-        PosixShm shmFile{shmName_};
         const auto flags =
             PosixShm::OpenFlag::CREATE | PosixShm::OpenFlag::EXCL | PosixShm::OpenFlag::READ_WRITE;
         auto s = shmFile.ShmOpen(flags);
@@ -481,7 +480,6 @@ public:
         auto header = static_cast<BufferHeader*>(addr);
         s = WaitShmHeaderReady(header);
         if (s.Failure()) [[unlikely]] {
-            PosixShm::MUnmap(addr, size);
             UC_ERROR("Shm file({}) not ready.", shmFile.ShmName());
             return s;
         }

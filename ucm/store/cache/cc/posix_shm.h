@@ -68,8 +68,7 @@ public:
         if (ret == 0) { return Status::OK(); }
         return Status{eno, std::to_string(eno)};
     }
-    Status MMap(void*& addr, size_t size, bool write, bool read, bool shared,
-                bool populate = false)
+    Status MMap(void*& addr, size_t size, bool write, bool read, bool shared, bool populate = false)
     {
         auto prot = PROT_NONE;
         if (write) { prot |= PROT_WRITE; }
