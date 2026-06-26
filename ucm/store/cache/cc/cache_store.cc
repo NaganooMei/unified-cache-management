@@ -21,7 +21,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
-#include <limits>
 #include <memory>
 #include <numeric>
 #include "buffer_manager.h"
@@ -156,8 +155,6 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_io_aggregation", param.cacheIOAggregation);
-        config.GetNumber("cache_io_aggregation_pipeline_depth", param.ioAggregationPipelineDepth);
-        config.GetNumber("cache_io_aggregation_max_ready_lanes", param.ioAggregationMaxReadyLanes);
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
         config.Get("cache_sdma_direct_launch_granularity", param.sdmaDirectLaunchGranularity);
         return param;
@@ -199,16 +196,6 @@ private:
             return Status::InvalidParam("Cache IO aggregation requires RUNTIME_ENVIRONMENT=ascend");
         }
 #endif
-        if (config.cacheIOAggregation &&
-            (config.ioAggregationPipelineDepth == 0 || config.ioAggregationMaxReadyLanes == 0)) {
-            return Status::InvalidParam("invalid Cache IO aggregation config");
-        }
-        if (config.cacheIOAggregation &&
-            config.ioAggregationMaxReadyLanes >
-                static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
-            return Status::InvalidParam("invalid Cache IO aggregation max ready lanes({})",
-                                        config.ioAggregationMaxReadyLanes);
-        }
 #if !UCM_RUNTIME_ASCEND_SDMA_DIRECT
         if (config.cacheSdmaDirect) {
             return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
@@ -268,10 +255,6 @@ private:
         UC_INFO("Set {}::CacheIOAggregation to {}.", ns, config.cacheIOAggregation);
         if (config.cacheIOAggregation) {
             UC_INFO("Set {}::AggregationObject to CacheStoreShard.", ns);
-            UC_INFO("Set {}::IOAggregationPipelineDepth to {}.", ns,
-                    config.ioAggregationPipelineDepth);
-            UC_INFO("Set {}::IOAggregationMaxReadyLanes to {}.", ns,
-                    config.ioAggregationMaxReadyLanes);
         }
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
         UC_INFO("Set {}::SdmaDirectLaunchGranularity to {}.", ns,

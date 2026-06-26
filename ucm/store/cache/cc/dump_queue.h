@@ -60,8 +60,6 @@ private:
     size_t streamNumber_{1};
     bool useGdr_{false};
     bool cacheIOAggregation_{false};
-    size_t ioAggregationPipelineDepth_{2};
-    size_t ioAggregationMaxReadyLanes_{8};
     bool cacheSdmaDirect_{false};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;

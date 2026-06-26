@@ -50,8 +50,6 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
     cacheIOAggregation_ = config.cacheIOAggregation;
-    ioAggregationPipelineDepth_ = config.ioAggregationPipelineDepth;
-    ioAggregationMaxReadyLanes_ = config.ioAggregationMaxReadyLanes;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
@@ -79,8 +77,7 @@ void DumpQueue::DispatchStage(std::promise<Status>& started)
     CopyStream stream;
     auto s = Status::OK();
     if (cacheIOAggregation_) {
-        s = stream.SetupIoAggregation(deviceId_, streamNumber_, useGdr_, tensorSizes_,
-                                      ioAggregationPipelineDepth_, ioAggregationMaxReadyLanes_);
+        s = stream.SetupIoAggregation(deviceId_, useGdr_);
     } else if (cacheSdmaDirect_) {
         s = stream.SetupSdmaDirect(deviceId_, useGdr_);
     } else {

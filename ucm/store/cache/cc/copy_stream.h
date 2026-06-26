@@ -26,7 +26,6 @@
 
 #include <functional>
 #include <memory>
-#include <numeric>
 #include <vector>
 #include "logger/logger.h"
 #include "status/status.h"
@@ -71,14 +70,8 @@ public:
         return Status::OK();
     }
 
-    Status SetupIoAggregation(const int32_t deviceId, const size_t laneNumber, const bool useGdr,
-                              const std::vector<size_t>& tensorSizes, const size_t pipelineDepth,
-                              const size_t maxReadyLanes)
+    Status SetupIoAggregation(const int32_t deviceId, const bool useGdr)
     {
-        if (laneNumber == 0) { return Status::InvalidParam("invalid IO aggregation lane number"); }
-        if (tensorSizes.empty()) {
-            return Status::InvalidParam("invalid tensor sizes for cache IO aggregation");
-        }
         if (useGdr) {
             return Status::InvalidParam("GDR stream is incompatible with cache IO aggregation");
         }
@@ -88,15 +81,7 @@ public:
             UC_ERROR("Failed({}) to setup device({}).", s, deviceId);
             return s;
         }
-        Trans::IoAggregationStreamConfig config;
-        config.deviceId = deviceId;
-        config.laneNumber = laneNumber;
-        config.objectBytes =
-            std::accumulate(tensorSizes.begin(), tensorSizes.end(), static_cast<size_t>(0));
-        config.maxFragments = tensorSizes.size();
-        config.pipelineDepth = pipelineDepth;
-        config.maxReadyLanes = maxReadyLanes;
-        auto stream = device.MakeIoAggregationStream(config);
+        auto stream = device.MakeIoAggregationStream();
         if (!stream) [[unlikely]] {
             UC_ERROR("Failed to make cache IO aggregation stream on device({}).", deviceId);
             return Status::Error();

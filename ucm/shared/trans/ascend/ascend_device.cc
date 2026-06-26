@@ -66,7 +66,7 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
     return nullptr;
 }
 
-std::shared_ptr<Stream> Device::MakeIoAggregationStream(const IoAggregationStreamConfig& config)
+std::shared_ptr<Stream> Device::MakeIoAggregationStream()
 {
 #if UCM_RUNTIME_ASCEND_IO_AGGREGATION
     std::shared_ptr<AscendIoAggregationStream> stream = nullptr;
@@ -75,9 +75,8 @@ std::shared_ptr<Stream> Device::MakeIoAggregationStream(const IoAggregationStrea
     } catch (...) {
         return nullptr;
     }
-    if (stream->Setup(config).Success()) { return stream; }
+    if (stream->Setup().Success()) { return stream; }
 #else
-    (void)config;
 #endif
     return nullptr;
 }

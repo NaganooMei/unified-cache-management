@@ -65,8 +65,6 @@ struct Config {
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
     bool cacheIOAggregation{UCM_RUNTIME_ASCEND_IO_AGGREGATION};
-    size_t ioAggregationPipelineDepth{2};
-    size_t ioAggregationMaxReadyLanes{8};
     bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
     std::string sdmaDirectLaunchGranularity{kSdmaDirectLaunchShard};
 };

@@ -64,9 +64,8 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
     return nullptr;
 }
 
-std::shared_ptr<Stream> Device::MakeIoAggregationStream(const IoAggregationStreamConfig& config)
+std::shared_ptr<Stream> Device::MakeIoAggregationStream()
 {
-    (void)config;
     return nullptr;
 }
 

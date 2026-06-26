@@ -6,8 +6,9 @@
 #ifndef UNIFIEDCACHE_TRANS_ASCEND_IO_AGGREGATION_STREAM_H
 #define UNIFIEDCACHE_TRANS_ASCEND_IO_AGGREGATION_STREAM_H
 
+#include <cstdint>
 #include <memory>
-#include "trans/device.h"
+#include <vector>
 #include "trans/stream.h"
 
 namespace UC::Trans {
@@ -19,7 +20,6 @@ public:
     AscendIoAggregationStream();
     ~AscendIoAggregationStream() override;
     Status Setup() override;
-    Status Setup(const IoAggregationStreamConfig& config);
 
     Status DeviceToHost(void* device, void* host, size_t size) override;
     Status DeviceToHost(void* device[], void* host[], size_t size, size_t number) override;
@@ -42,7 +42,11 @@ public:
     Status WaitEvent(void* event) override;
 
 private:
+    Status EnsureAggregator(const std::vector<size_t>& sizes);
+
+    int32_t deviceId_{-1};
     std::unique_ptr<AscendShardIOAggregator> aggregator_{nullptr};
+    std::vector<void*> pendingEvents_{};
 };
 
 }  // namespace UC::Trans

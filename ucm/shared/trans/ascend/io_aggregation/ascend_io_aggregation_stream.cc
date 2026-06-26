@@ -4,8 +4,11 @@
  * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include "ascend_io_aggregation_stream.h"
-#include <limits>
+#include <acl/acl.h>
+#include <cstdint>
+#include <numeric>
 #include "ascend_shard_io_aggregator.h"
+#include "logger/logger.h"
 
 namespace UC::Trans {
 
@@ -16,6 +19,17 @@ Status Unsupported(const char* op)
     return Status::InvalidParam("Cache IO aggregation stream does not support {}", op);
 }
 
+Status AclStatus(aclError ret, const char* expr)
+{
+    if (ret == ACL_SUCCESS) { return Status::OK(); }
+    UC_ERROR("Failed({}) to call {}.", static_cast<int32_t>(ret), expr);
+    return Status{static_cast<int32_t>(ret), expr};
+}
+
+constexpr size_t kIoAggregationLaneNumber = 4;
+constexpr size_t kIoAggregationPipelineDepth = 2;
+constexpr uint16_t kIoAggregationMaxReadyLanes = 8;
+
 }  // namespace
 
 AscendIoAggregationStream::AscendIoAggregationStream() = default;
@@ -24,28 +38,39 @@ AscendIoAggregationStream::~AscendIoAggregationStream() = default;
 
 Status AscendIoAggregationStream::Setup()
 {
-    return Status::InvalidParam("Cache IO aggregation stream requires IoAggregationStreamConfig");
+    int32_t deviceId = -1;
+    auto s = AclStatus(aclrtGetDevice(&deviceId), "aclrtGetDevice(io-aggregation)");
+    if (s.Failure()) [[unlikely]] { return s; }
+    deviceId_ = deviceId;
+    aggregator_.reset();
+    pendingEvents_.clear();
+    return Status::OK();
 }
 
-Status AscendIoAggregationStream::Setup(const IoAggregationStreamConfig& config)
+Status AscendIoAggregationStream::EnsureAggregator(const std::vector<size_t>& sizes)
 {
-    if (config.maxReadyLanes == 0 ||
-        config.maxReadyLanes > static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
-        return Status::InvalidParam("invalid Cache IO aggregation max ready lanes({})",
-                                    config.maxReadyLanes);
-    }
+    if (aggregator_) { return Status::OK(); }
+    if (deviceId_ < 0) { return Status::Error("Cache IO aggregation stream is not setup"); }
+    if (sizes.empty()) { return Status::InvalidParam("invalid Cache IO aggregation sizes"); }
 
+    const auto objectBytes = std::accumulate(sizes.begin(), sizes.end(), static_cast<size_t>(0));
+    if (objectBytes == 0) { return Status::InvalidParam("invalid Cache IO aggregation bytes"); }
     AscendShardIOAggregatorConfig aggregatorConfig;
-    aggregatorConfig.deviceId = config.deviceId;
-    aggregatorConfig.streamNumber = config.laneNumber;
-    aggregatorConfig.pipelineDepth = config.pipelineDepth;
-    aggregatorConfig.maxReadyLanes = static_cast<uint16_t>(config.maxReadyLanes);
-    aggregatorConfig.objectBytes = config.objectBytes;
-    aggregatorConfig.maxFragments = config.maxFragments;
+    aggregatorConfig.deviceId = deviceId_;
+    aggregatorConfig.streamNumber = kIoAggregationLaneNumber;
+    aggregatorConfig.pipelineDepth = kIoAggregationPipelineDepth;
+    aggregatorConfig.maxReadyLanes = kIoAggregationMaxReadyLanes;
+    aggregatorConfig.objectBytes = objectBytes;
+    aggregatorConfig.maxFragments = sizes.size();
     auto aggregator = std::make_unique<AscendShardIOAggregator>();
     auto s = aggregator->Setup(aggregatorConfig);
     if (s.Failure()) [[unlikely]] { return s; }
     aggregator_ = std::move(aggregator);
+    for (auto* event : pendingEvents_) {
+        s = aggregator_->WaitEvent(event);
+        if (s.Failure()) [[unlikely]] { return s; }
+    }
+    pendingEvents_.clear();
     return Status::OK();
 }
 
@@ -112,18 +137,16 @@ Status AscendIoAggregationStream::HostToDeviceAsync(void*, void*[], size_t, size
 Status AscendIoAggregationStream::HostToDeviceAsync(void* host, void* device[],
                                                     const std::vector<size_t>& sizes)
 {
-    if (!aggregator_) [[unlikely]] {
-        return Status::Error("Cache IO aggregation stream is not setup");
-    }
+    auto s = EnsureAggregator(sizes);
+    if (s.Failure()) [[unlikely]] { return s; }
     return aggregator_->SubmitLoadObject(host, device, sizes);
 }
 
 Status AscendIoAggregationStream::DeviceToHostAsync(void* device[], void* host,
                                                     const std::vector<size_t>& sizes)
 {
-    if (!aggregator_) [[unlikely]] {
-        return Status::Error("Cache IO aggregation stream is not setup");
-    }
+    auto s = EnsureAggregator(sizes);
+    if (s.Failure()) [[unlikely]] { return s; }
     return aggregator_->SubmitDumpObject(device, host, sizes);
 }
 
@@ -135,13 +158,20 @@ Status AscendIoAggregationStream::AppendCallback(std::function<void(bool)> cb)
 
 Status AscendIoAggregationStream::Synchronized()
 {
-    if (!aggregator_) { return Status::OK(); }
+    if (!aggregator_) {
+        pendingEvents_.clear();
+        return Status::OK();
+    }
     return aggregator_->Synchronize();
 }
 
 Status AscendIoAggregationStream::WaitEvent(void* event)
 {
-    if (!aggregator_) { return Status::OK(); }
+    if (event == nullptr) { return Status::OK(); }
+    if (!aggregator_) {
+        pendingEvents_.push_back(event);
+        return Status::OK();
+    }
     return aggregator_->WaitEvent(event);
 }
 
