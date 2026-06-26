@@ -293,26 +293,24 @@ protected:
     {
         namespace fs = std::filesystem;
         std::string_view prefix = ShmPrefix();
+        fs::path shmDir = "/dev/shm";
+        if (!fs::exists(shmDir)) { return; }
         const auto now = fs::file_time_type::clock::now();
         const auto keepThreshold = std::chrono::minutes(10);
-        auto cleanDir = [&](const fs::path& dir) {
+        for (const auto& entry : fs::directory_iterator(shmDir)) {
+            const auto& path = entry.path();
+            const auto& name = path.filename().string();
+            if (!entry.is_regular_file() || name.compare(0, prefix.size(), prefix) != 0 ||
+                name == me) {
+                continue;
+            }
             try {
-                if (!fs::exists(dir)) { return; }
-                for (const auto& entry : fs::directory_iterator(dir)) {
-                    const auto& path = entry.path();
-                    const auto& name = path.filename().string();
-                    if (!entry.is_regular_file() || name.compare(0, prefix.size(), prefix) != 0 ||
-                        name == me) {
-                        continue;
-                    }
-                    const auto lwt = fs::last_write_time(path);
-                    if (now - lwt <= keepThreshold) { continue; }
-                    fs::remove(path);
-                }
+                const auto lwt = fs::last_write_time(path);
+                if (now - lwt <= keepThreshold) { continue; }
+                fs::remove(path);
             } catch (...) {
             }
-        };
-        cleanDir("/dev/shm");
+        }
     }
     static Status MmapShmFile(PosixShm& shmFile, const size_t size, void*& addr,
                               bool needTrunc = true)
