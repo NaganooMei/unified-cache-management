@@ -6,7 +6,6 @@
 #ifndef UNIFIEDCACHE_TRANS_ASCEND_IO_AGGREGATION_STREAM_H
 #define UNIFIEDCACHE_TRANS_ASCEND_IO_AGGREGATION_STREAM_H
 
-#include <cstdint>
 #include <memory>
 #include <vector>
 #include "trans/stream.h"
@@ -44,7 +43,6 @@ public:
 private:
     Status EnsureAggregator(const std::vector<size_t>& sizes);
 
-    int32_t deviceId_{-1};
     std::unique_ptr<AscendShardIOAggregator> aggregator_{nullptr};
     std::vector<void*> pendingEvents_{};
 };
