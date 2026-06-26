@@ -569,8 +569,6 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             ]
         config["unique_id"] = f"{self.engine_id}_fawa_{store_suffix}"
         self._namespace_storage_backends(config, store_suffix)
-        if store_suffix == "wa" and self.use_compress:
-            config["cache_io_aggregation"] = False
         dp_rank = self._vllm_config.parallel_config.data_parallel_rank
         config["posix_gc_enable"] = (
             self._role != KVConnectorRole.WORKER and dp_rank == 0
@@ -607,6 +605,8 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         """Instantiate one UCM store with worker tensor layout metadata."""
 
         name, module_path, config = self._base_store_config(store_suffix)
+        if label == "WA":
+            config["cache_io_aggregation"] = False
         if self._role == KVConnectorRole.WORKER:
             if tensor_size_list is None:
                 raise RuntimeError(f"Worker FAWA {label} store needs tensor sizes.")
