@@ -16,6 +16,7 @@
 namespace UC::Trans {
 
 struct AscendShardIOAggregatorConfig {
+    int32_t deviceId{-1};
     size_t streamNumber{1};
     size_t pipelineDepth{2};
     uint16_t maxReadyLanes{8};
@@ -59,6 +60,7 @@ private:
     Status LaunchFfts(InFlightObject& object, aclrtStream stream) const;
 
     bool setup_{false};
+    int32_t deviceId_{-1};
     size_t streamNumber_{0};
     size_t pipelineDepth_{0};
     uint16_t maxReadyLanes_{0};

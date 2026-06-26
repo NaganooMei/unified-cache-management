@@ -23,12 +23,14 @@ AscendShardIOAggregator::~AscendShardIOAggregator() { Cleanup(); }
 Status AscendShardIOAggregator::Setup(const AscendShardIOAggregatorConfig& config)
 {
     Cleanup();
+    if (config.deviceId < 0) { return Status::InvalidParam("invalid device id"); }
     if (config.streamNumber == 0) { return Status::InvalidParam("invalid stream number"); }
     if (config.pipelineDepth == 0) { return Status::InvalidParam("invalid pipeline depth"); }
     if (config.maxReadyLanes == 0) { return Status::InvalidParam("invalid max ready lanes"); }
     if (config.objectBytes == 0) { return Status::InvalidParam("invalid object bytes"); }
     if (config.maxFragments == 0) { return Status::InvalidParam("invalid max fragments"); }
 
+    deviceId_ = config.deviceId;
     streamNumber_ = config.streamNumber;
     pipelineDepth_ = config.pipelineDepth;
     maxReadyLanes_ = config.maxReadyLanes;
@@ -36,7 +38,8 @@ Status AscendShardIOAggregator::Setup(const AscendShardIOAggregatorConfig& confi
     maxFragments_ = config.maxFragments;
     nextObjectIndex_ = 0;
 
-    auto s = Status::OK();
+    auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+    if (s.Failure()) { return s; }
     lanes_.resize(streamNumber_);
     for (auto& lane : lanes_) {
         s = AclStatus(aclrtCreateStream(&lane.copyStream), "aclrtCreateStream(copy)");
@@ -89,10 +92,12 @@ Status AscendShardIOAggregator::WaitEvent(void* event)
 {
     if (!setup_) { return Status::OK(); }
     if (event == nullptr) { return Status::OK(); }
+    auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+    if (s.Failure()) { return s; }
     auto aclEvent = static_cast<aclrtEvent>(event);
     for (auto& lane : lanes_) {
-        auto s = AclStatus(aclrtStreamWaitEvent(lane.copyStream, aclEvent),
-                           "aclrtStreamWaitEvent(copy prerequisite)");
+        s = AclStatus(aclrtStreamWaitEvent(lane.copyStream, aclEvent),
+                      "aclrtStreamWaitEvent(copy prerequisite)");
         if (s.Failure()) { return s; }
         s = AclStatus(aclrtStreamWaitEvent(lane.fftsStream, aclEvent),
                       "aclrtStreamWaitEvent(ffts prerequisite)");
@@ -187,6 +192,8 @@ Status AscendShardIOAggregator::SubmitLoadObject(void* host, void** devices,
     if (s.Failure()) { return s; }
 
     const auto objectBytes = std::accumulate(sizes.begin(), sizes.end(), static_cast<size_t>(0));
+    s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+    if (s.Failure()) { return s; }
     s = AclStatus(aclrtStreamWaitEvent(lane.copyStream, lane.slotFree[slot]),
                   "aclrtStreamWaitEvent(slotFree)");
     if (s.Failure()) { return s; }
@@ -231,6 +238,8 @@ Status AscendShardIOAggregator::SubmitDumpObject(void** devices, void* host,
     if (s.Failure()) { return s; }
 
     const auto objectBytes = std::accumulate(sizes.begin(), sizes.end(), static_cast<size_t>(0));
+    s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+    if (s.Failure()) { return s; }
     s = AclStatus(aclrtStreamWaitEvent(lane.fftsStream, lane.slotFree[slot]),
                   "aclrtStreamWaitEvent(slotFree)");
     if (s.Failure()) { return s; }
@@ -263,14 +272,15 @@ Status AscendShardIOAggregator::SubmitDumpObject(void** devices, void* host,
 Status AscendShardIOAggregator::Synchronize()
 {
     if (!setup_) { return Status::OK(); }
+    auto s = AclStatus(aclrtSetDevice(deviceId_), "aclrtSetDevice");
+    if (s.Failure()) { return s; }
     for (auto& lane : lanes_) {
         for (auto event : lane.slotFree) {
-            auto s = AclStatus(aclrtStreamWaitEvent(lane.copyStream, event),
-                               "aclrtStreamWaitEvent(slotFree)");
+            s = AclStatus(aclrtStreamWaitEvent(lane.copyStream, event),
+                          "aclrtStreamWaitEvent(slotFree)");
             if (s.Failure()) { return s; }
         }
-        auto s = AclStatus(aclrtSynchronizeStream(lane.copyStream),
-                           "aclrtSynchronizeStream(copy)");
+        s = AclStatus(aclrtSynchronizeStream(lane.copyStream), "aclrtSynchronizeStream(copy)");
         if (s.Failure()) { return s; }
         s = AclStatus(aclrtSynchronizeStream(lane.fftsStream), "aclrtSynchronizeStream(ffts)");
         if (s.Failure()) { return s; }
@@ -281,6 +291,7 @@ Status AscendShardIOAggregator::Synchronize()
 
 void AscendShardIOAggregator::Cleanup() noexcept
 {
+    if (deviceId_ >= 0) { (void)aclrtSetDevice(deviceId_); }
     for (auto& lane : lanes_) {
         for (auto event : lane.slotReady) {
             if (event != nullptr) { (void)aclrtDestroyEvent(event); }
@@ -296,6 +307,7 @@ void AscendShardIOAggregator::Cleanup() noexcept
     }
 
     setup_ = false;
+    deviceId_ = -1;
     streamNumber_ = 0;
     pipelineDepth_ = 0;
     maxReadyLanes_ = 0;
