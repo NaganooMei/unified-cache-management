@@ -28,6 +28,10 @@
 #include "trans/cuda/gdr/gdr_config.h"
 #include "trans_manager.h"
 
+#ifndef UCM_RUNTIME_ASCEND_IO_AGGREGATION
+#define UCM_RUNTIME_ASCEND_IO_AGGREGATION 0
+#endif
+
 #ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
 #define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
 #endif
@@ -150,6 +154,7 @@ private:
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
+        config.Get("cache_io_aggregation", param.cacheIOAggregation);
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
         config.Get("cache_sdma_direct_launch_granularity", param.sdmaDirectLaunchGranularity);
         return param;
@@ -186,11 +191,20 @@ private:
         if (config.deviceId == -1) { return Status::OK(); }
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
+#if !UCM_RUNTIME_ASCEND_IO_AGGREGATION
+        if (config.cacheIOAggregation) {
+            return Status::InvalidParam("Cache IO aggregation requires RUNTIME_ENVIRONMENT=ascend");
+        }
+#endif
 #if !UCM_RUNTIME_ASCEND_SDMA_DIRECT
         if (config.cacheSdmaDirect) {
             return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
         }
 #endif
+        if (config.cacheIOAggregation && config.cacheSdmaDirect) {
+            return Status::InvalidParam(
+                "Cache IO aggregation is incompatible with Cache SDMA Direct");
+        }
         if (config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchShard &&
             config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchTask) {
             return Status::InvalidParam("invalid Cache SDMA Direct launch granularity({})",
@@ -238,6 +252,10 @@ private:
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, config.runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
+        UC_INFO("Set {}::CacheIOAggregation to {}.", ns, config.cacheIOAggregation);
+        if (config.cacheIOAggregation) {
+            UC_INFO("Set {}::AggregationObject to CacheStoreShard.", ns);
+        }
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
         UC_INFO("Set {}::SdmaDirectLaunchGranularity to {}.", ns,
                 config.sdmaDirectLaunchGranularity);

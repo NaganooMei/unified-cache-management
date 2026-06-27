@@ -64,6 +64,8 @@ std::shared_ptr<Stream> Device::MakeSharedStream()
     return nullptr;
 }
 
+std::shared_ptr<Stream> Device::MakeIoAggregationStream() { return nullptr; }
+
 std::shared_ptr<Stream> Device::MakeSdmaDirectStream() { return nullptr; }
 
 std::unique_ptr<Stream> Device::MakeGdrStream()

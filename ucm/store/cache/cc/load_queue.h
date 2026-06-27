@@ -62,6 +62,7 @@ private:
     size_t shardBytes_{0};
     size_t streamNumber_{1};
     bool useGdr_{false};
+    bool cacheIOAggregation_{false};
     bool cacheSdmaDirect_{false};
     std::string sdmaDirectLaunchGranularity_{kSdmaDirectLaunchShard};
     std::vector<ssize_t> cpuAffinityCores_{};

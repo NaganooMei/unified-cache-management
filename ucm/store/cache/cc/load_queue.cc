@@ -46,6 +46,7 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     for (const auto size : tensorSizes_) { shardBytes_ += size; }
     streamNumber_ = config.streamNumber;
     useGdr_ = config.useGdr;
+    cacheIOAggregation_ = config.cacheIOAggregation;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
     sdmaDirectLaunchGranularity_ = config.sdmaDirectLaunchGranularity;
     cpuAffinityCores_ = config.cpuAffinityCores;
@@ -161,8 +162,14 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
 void LoadQueue::TransferStage(std::promise<Status>& started)
 {
     CopyStream stream;
-    auto s = cacheSdmaDirect_ ? stream.SetupSdmaDirect(deviceId_, useGdr_)
-                              : stream.Setup(deviceId_, streamNumber_, useGdr_);
+    auto s = Status::OK();
+    if (cacheIOAggregation_) {
+        s = stream.SetupIoAggregation(deviceId_, useGdr_);
+    } else if (cacheSdmaDirect_) {
+        s = stream.SetupSdmaDirect(deviceId_, useGdr_);
+    } else {
+        s = stream.Setup(deviceId_, streamNumber_, useGdr_);
+    }
     started.set_value(s);
     if (s.Failure()) [[unlikely]] { return; }
     if (!cpuAffinityCores_.empty()) {

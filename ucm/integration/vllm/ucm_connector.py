@@ -530,6 +530,8 @@ class UCMDirectConnector(KVConnectorBase_V1):
         name = self.connector_configs[0]["ucm_connector_name"]
         module_path = self.connector_configs[0].get("ucm_connector_module_path", None)
         config = copy.deepcopy(self.connector_configs[0]["ucm_connector_config"])
+        if self.use_layerwise:
+            config["cache_io_aggregation"] = False
         config.setdefault("share_buffer_enable", self.is_mla)
         if "storage_backends" in config:
             backends = [path for path in config["storage_backends"].split(":")]

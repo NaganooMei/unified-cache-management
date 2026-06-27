@@ -605,6 +605,8 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         """Instantiate one UCM store with worker tensor layout metadata."""
 
         name, module_path, config = self._base_store_config(store_suffix)
+        if label == "WA":
+            config["cache_io_aggregation"] = False
         if self._role == KVConnectorRole.WORKER:
             if tensor_size_list is None:
                 raise RuntimeError(f"Worker FAWA {label} store needs tensor sizes.")
