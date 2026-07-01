@@ -1,0 +1,245 @@
+{
+  "title": "Minimax SDMA Debug",
+  "metrics": [
+    {
+      "name": "total_requests",
+      "type": "promql",
+      "expr": "sum by () (increase(vllm:time_to_first_token_seconds_count[$__rate_interval]))",
+      "value": "requests",
+      "aggregate": "sum"
+    },
+    {
+      "name": "ttft_s",
+      "source": "vllm:time_to_first_token_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "e2e_request_latency_s",
+      "source": "vllm:e2e_request_latency_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "tpot_s",
+      "source": "vllm:request_time_per_output_token_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "prefix_cache_hit_rate",
+      "type": "promql",
+      "expr": "sum by () (rate(vllm:prefix_cache_hits_total[$__rate_interval])) / clamp_min(sum by () (rate(vllm:prefix_cache_queries_total[$__rate_interval])), 1)",
+      "value": "hit_rate",
+      "unit": "ratio",
+      "aggregate": "avg"
+    },
+    {
+      "name": "external_prefix_cache_hit_rate",
+      "type": "promql",
+      "expr": "sum by () (rate(vllm:external_prefix_cache_hits_total[$__rate_interval])) / clamp_min(sum by () (rate(vllm:prefix_cache_queries_total[$__rate_interval])), 1)",
+      "value": "hit_rate",
+      "unit": "ratio",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_backend_load_fraction",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_load_backend_shards_total[$__rate_interval])) / clamp_min(sum by () (rate(ucm:cache_load_shards_total[$__rate_interval])), 1)",
+      "value": "fraction",
+      "unit": "ratio",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_load_task_rate",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_load_duration_ms_count[$__rate_interval]))",
+      "value": "tasks_per_s",
+      "unit": "task/s",
+      "aggregate": "sum"
+    },
+    {
+      "name": "cache_load_shards_rate",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_load_shards_total[$__rate_interval]))",
+      "value": "shards_per_s",
+      "unit": "shard/s",
+      "aggregate": "sum"
+    },
+    {
+      "name": "cache_backend_load_shards_rate",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_load_backend_shards_total[$__rate_interval]))",
+      "value": "shards_per_s",
+      "unit": "shard/s",
+      "aggregate": "sum"
+    },
+    {
+      "name": "cache_store_load_bandwidth_gbps",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_load_bytes_total[$__rate_interval])) / 1e9",
+      "value": "gbps",
+      "unit": "GB/s",
+      "aggregate": "sum"
+    },
+    {
+      "name": "cache_load_duration_ms",
+      "source": "ucm:cache_load_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_load_queue_wait_duration_ms",
+      "source": "ucm:cache_load_queue_wait_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_load_backend_submit_duration_ms",
+      "source": "ucm:cache_load_backend_submit_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_shard_backend_wait_ms",
+      "source": "ucm:cache_shard_backend_wait_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_h2d_submit_ms",
+      "source": "ucm:cache_h2d_submit_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_h2d_sync_ms",
+      "source": "ucm:cache_h2d_sync_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_h2d_bandwidth_gbps",
+      "source": "ucm:cache_h2d_bandwidth_gbps",
+      "type": "histogram",
+      "unit": "GB/s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "layerwise_wait_blocking_ms",
+      "source": "ucm:layerwise_wait_blocking_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "layerwise_wait_tasks_count",
+      "source": "ucm:layerwise_wait_tasks_count",
+      "type": "histogram",
+      "unit": "tasks",
+      "aggregate": "avg"
+    },
+    {
+      "name": "layerwise_inter_wait_interval_ms",
+      "source": "ucm:layerwise_inter_wait_interval_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "layerwise_first_layer_submit_ms",
+      "source": "ucm:layerwise_first_layer_submit_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "layerwise_next_layer_submit_ms",
+      "source": "ucm:layerwise_next_layer_submit_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "layerwise_batch_total_load_only_ms",
+      "source": "ucm:layerwise_batch_total_load_only_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "layerwise_batch_load_wait_total_load_only_ms",
+      "source": "ucm:layerwise_batch_load_wait_total_load_only_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_dump_task_rate",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_dump_duration_ms_count[$__rate_interval]))",
+      "value": "tasks_per_s",
+      "unit": "task/s",
+      "aggregate": "sum"
+    },
+    {
+      "name": "cache_store_dump_bandwidth_gbps",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_dump_bytes_total[$__rate_interval])) / 1e9",
+      "value": "gbps",
+      "unit": "GB/s",
+      "aggregate": "sum"
+    },
+    {
+      "name": "cache_dump_duration_ms",
+      "source": "ucm:cache_dump_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_dump_queue_wait_duration_ms",
+      "source": "ucm:cache_dump_queue_wait_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_d2h_duration_ms",
+      "source": "ucm:cache_d2h_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_d2h_bandwidth_gbps",
+      "source": "ucm:cache_d2h_bandwidth_gbps",
+      "type": "histogram",
+      "unit": "GB/s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_dump_backend_submit_duration_ms",
+      "source": "ucm:cache_dump_backend_submit_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_dump_backend_wait_duration_ms",
+      "source": "ucm:cache_dump_backend_wait_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    }
+  ]
+}
