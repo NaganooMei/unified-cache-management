@@ -1,0 +1,34 @@
+{
+  "title": "Minimax SDMA Core",
+  "metrics": [
+    {
+      "name": "cache_backend_load_fraction",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_load_backend_shards_total[$__rate_interval])) / clamp_min(sum by () (rate(ucm:cache_load_shards_total[$__rate_interval])), 1)",
+      "value": "fraction",
+      "unit": "ratio",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_load_bandwidth_gbps",
+      "source": "ucm:cache_load_bandwidth_gbps",
+      "type": "histogram",
+      "unit": "GB/s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_h2d_bandwidth_gbps",
+      "source": "ucm:cache_h2d_bandwidth_gbps",
+      "type": "histogram",
+      "unit": "GB/s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "layerwise_wait_blocking_ms",
+      "source": "ucm:layerwise_wait_blocking_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    }
+  ]
+}
