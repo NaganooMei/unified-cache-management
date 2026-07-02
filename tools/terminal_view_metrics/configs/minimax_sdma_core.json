@@ -2,6 +2,34 @@
   "title": "Minimax SDMA Core",
   "metrics": [
     {
+      "name": "total_requests",
+      "type": "promql",
+      "expr": "sum by () (increase(vllm:time_to_first_token_seconds_count[$__rate_interval]))",
+      "value": "requests",
+      "aggregate": "sum"
+    },
+    {
+      "name": "ttft_s",
+      "source": "vllm:time_to_first_token_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "tpot_s",
+      "source": "vllm:request_time_per_output_token_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "e2e_request_latency_s",
+      "source": "vllm:e2e_request_latency_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
       "name": "cache_backend_load_fraction",
       "type": "promql",
       "expr": "sum by () (rate(ucm:cache_load_backend_shards_total[$__rate_interval])) / clamp_min(sum by () (rate(ucm:cache_load_shards_total[$__rate_interval])), 1)",
