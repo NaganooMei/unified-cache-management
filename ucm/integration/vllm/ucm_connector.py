@@ -1500,8 +1500,16 @@ class UCMLayerWiseConnector(UCMDirectConnector):
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self._connector_metadata:
+            logger.info(
+                "[layerwise_wait_metrics_debug] skip wait_for_layer_load: "
+                f"layer={layer_name}, reason=no_connector_metadata"
+            )
             return
         if not self.need_load:
+            logger.info(
+                "[layerwise_wait_metrics_debug] skip wait_for_layer_load: "
+                f"layer={layer_name}, reason=need_load_false"
+            )
             return
         metadata = self._get_connector_metadata()
         current_layer_id = self.layer_name_to_id[layer_name]
@@ -1512,6 +1520,12 @@ class UCMLayerWiseConnector(UCMDirectConnector):
         # do not call store.wait() again on already-completed handles.
         layer_tasks = self.load_tasks.pop(current_layer_id, {})
         n_tasks = len(layer_tasks)
+        logger.info(
+            "[layerwise_wait_metrics_debug] begin wait_for_layer_load: "
+            f"layer={layer_name}, layer_id={current_layer_id}, "
+            f"tasks={n_tasks}, requests={len(metadata.request_meta)}, "
+            f"pending_layers_after_pop={len(self.load_tasks)}"
+        )
         for request_id, task in layer_tasks.items():
             try:
                 self.store.wait(task)
@@ -1550,7 +1564,19 @@ class UCMLayerWiseConnector(UCMDirectConnector):
         if has_next:
             submit_end = time.perf_counter()
             stats["layerwise_next_layer_submit_ms"] = (submit_end - wait_end) * 1000
+        logger.info(
+            "[layerwise_wait_metrics_debug] update layerwise wait stats: "
+            f"layer={layer_name}, layer_id={current_layer_id}, "
+            f"tasks={n_tasks}, blocking_ms={blocking_ms:.6f}, "
+            f"has_next={has_next}, batch_wait_total_ms="
+            f"{self._layerwise_batch_wait_blocking_total_ms:.6f}, "
+            f"stats={stats}"
+        )
         ucmmetrics.update_stats(stats)
+        logger.info(
+            "[layerwise_wait_metrics_debug] updated layerwise wait stats: "
+            f"layer={layer_name}, layer_id={current_layer_id}"
+        )
         self._layerwise_prev_wait_end = wait_end
 
     def save_kv_layer(
