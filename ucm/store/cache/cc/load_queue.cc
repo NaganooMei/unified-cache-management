@@ -204,18 +204,25 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         }
 
         if (cacheSdmaDirect_) {
+            if (holder_.empty()) { h2dBatchStartTp_ = tpBackendReady; }
             s = HostToDeviceAsync(stream, task.bufferHandle.DeviceData(), task.shard.addrs.data());
+            auto tpH2dSubmitted = NowTime::Now();
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
+            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
+                                     (tpH2dSubmitted - tpBackendReady) * 1e3);
             if (!task.waiter) {
                 holder_.push_back(std::move(task));
                 return;
             }
+            const auto copiedShards = holder_.size() + 1;
             s = stream.Synchronize();
+            UpdateH2dBatchMetrics(copiedShards, h2dBatchStartTp_, NowTime::Now());
             holder_.clear();
+            h2dBatchStartTp_ = 0.0;
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
@@ -242,13 +249,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         }
         const auto copiedShards = holder_.size() + 1;
         s = stream.Synchronize();
-        auto h2dSyncMs = (NowTime::Now() - h2dBatchStartTp_) * 1e3;
-        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_sync_ms"), h2dSyncMs);
-        if (copiedShards > 0 && h2dSyncMs > 0.0) {
-            auto copiedBytes = static_cast<double>(copiedShards) * static_cast<double>(shardBytes_);
-            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_bandwidth_gbps"),
-                                     copiedBytes / (h2dSyncMs * 1e-3) / 1e9);
-        }
+        UpdateH2dBatchMetrics(copiedShards, h2dBatchStartTp_, NowTime::Now());
         holder_.clear();
         h2dBatchStartTp_ = 0.0;
         if (s.Failure()) [[unlikely]] {
@@ -305,14 +306,29 @@ Status LoadQueue::HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTas
 Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream)
 {
     if (holder_.empty()) { return Status::OK(); }
+    const auto copiedShards = holder_.size();
+    const auto tpH2dStart = NowTime::Now();
     auto s = HostToDeviceTaskAsync(stream, holder_);
     if (s.Failure()) [[unlikely]] {
         ClearSdmaDirectHolders();
         return s;
     }
     s = stream.Synchronize();
+    UpdateH2dBatchMetrics(copiedShards, tpH2dStart, NowTime::Now());
     ClearSdmaDirectHolders();
     return s;
+}
+
+void LoadQueue::UpdateH2dBatchMetrics(size_t copiedShards, double h2dStartTp,
+                                      double h2dEndTp) const
+{
+    auto h2dSyncMs = (h2dEndTp - h2dStartTp) * 1e3;
+    UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_sync_ms"), h2dSyncMs);
+    if (copiedShards > 0 && h2dSyncMs > 0.0) {
+        auto copiedBytes = static_cast<double>(copiedShards) * static_cast<double>(shardBytes_);
+        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_bandwidth_gbps"),
+                                 copiedBytes / (h2dSyncMs * 1e-3) / 1e9);
+    }
 }
 
 void LoadQueue::ClearSdmaDirectHolders() noexcept

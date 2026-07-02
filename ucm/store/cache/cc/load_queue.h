@@ -86,6 +86,7 @@ private:
     Status HostToDeviceAsync(CopyStream& stream, void* host, void** device);
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
     Status FlushSdmaDirectTaskBatch(CopyStream& stream);
+    void UpdateH2dBatchMetrics(size_t copiedShards, double h2dStartTp, double h2dEndTp) const;
     void ClearSdmaDirectHolders() noexcept;
     bool UseSdmaDirectTaskLaunch() const noexcept;
 };
