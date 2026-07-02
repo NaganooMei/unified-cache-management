@@ -953,7 +953,10 @@ class UCMDirectConnector(KVConnectorBase_V1):
             ucmmetrics.update_stats(load_stats)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        pass
+        logger.info(
+            "[layerwise_wait_metrics_debug] direct connector wait_for_layer_load "
+            f"no-op: layer={layer_name}, connector={type(self).__name__}"
+        )
 
     def _get_dump_event_handle(self) -> int:
         if not self.enable_event_sync:
@@ -1740,9 +1743,16 @@ class UCMCPConnector(UCMLayerWiseConnector):
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if self.use_layerwise:
+            logger.info(
+                "[layerwise_wait_metrics_debug] cp connector route "
+                f"wait_for_layer_load: layer={layer_name}, use_layerwise=True"
+            )
             super().wait_for_layer_load(layer_name)
         else:
-            pass
+            logger.info(
+                "[layerwise_wait_metrics_debug] cp connector wait_for_layer_load "
+                f"no-op: layer={layer_name}, use_layerwise=False"
+            )
 
     def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
         if self.use_layerwise:
@@ -3364,7 +3374,17 @@ class UCMConnector(KVConnectorBase_V1, SupportsHMA):
         Args:
             layer_name: the name of that layer
         """
+        logger.info(
+            "[layerwise_wait_metrics_debug] outer connector route "
+            f"wait_for_layer_load: layer={layer_name}, "
+            f"inner_connector={type(self.connector).__name__}"
+        )
         self.connector.wait_for_layer_load(layer_name)
+        logger.info(
+            "[layerwise_wait_metrics_debug] outer connector returned "
+            f"wait_for_layer_load: layer={layer_name}, "
+            f"inner_connector={type(self.connector).__name__}"
+        )
 
     def save_kv_layer(
         self,
