@@ -45,6 +45,20 @@
       "aggregate": "avg"
     },
     {
+      "name": "load_speed",
+      "source": "ucm:load_speed",
+      "type": "histogram",
+      "unit": "GB/s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "load_duration",
+      "source": "ucm:load_duration",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
       "name": "fawa_worker_start_load_kv_ms",
       "source": "ucm:fawa_worker_start_load_kv_ms",
       "type": "histogram",

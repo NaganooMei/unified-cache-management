@@ -1137,10 +1137,15 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         if not isinstance(metadata, UCMFAWAConnectorMetadata):
             raise RuntimeError(f"Unexpected FAWA metadata type: {type(metadata)}")
 
+        load_start_time = time.perf_counter() * 1000
         tasks: list[FAWALoadTask] = []
+        num_loaded_request = 0
+        num_loaded_block = 0
+        load_bytes = 0
         for request_id, request in metadata.request_meta.items():
             if not request.load_keys:
                 continue
+            num_loaded_request += 1
 
             try:
                 if self.fa_store is None:
@@ -1164,6 +1169,8 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                         fa_ptrs,
                     )
                 )
+                num_loaded_block += len(request.load_keys)
+                load_bytes += len(request.load_keys) * self.file_size["FA"]
 
                 # WA groups only need the final matched boundary.
                 window_keys = request.load_keys[-1:]
@@ -1180,6 +1187,8 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                         window_ptrs,
                     )
                 )
+                num_loaded_block += len(window_keys)
+                load_bytes += len(window_keys) * self.file_size["WA"]
             except Exception as e:
                 logger.error(
                     f"request {request_id} submit FAWA load task "
@@ -1188,6 +1197,23 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 self._handle_load_err(request_id)
 
         self._wait_all_load_task(tasks)
+        if tasks:
+            load_end_time = time.perf_counter() * 1000
+            load_duration_ms = load_end_time - load_start_time
+            load_speed = (
+                load_bytes / load_duration_ms / 1024 / 1024
+                if load_duration_ms > 0
+                else 0.0
+            )
+            ucmmetrics.update_stats(
+                {
+                    "load_requests_num": num_loaded_request,
+                    "load_blocks_num": num_loaded_block,
+                    "load_duration": load_duration_ms,
+                    "load_speed": load_speed,
+                    "load_bytes_total": load_bytes,
+                }
+            )
 
     @fawa_latency_metric(
         "fawa_worker_wait_wait_all_load_task_ms",
