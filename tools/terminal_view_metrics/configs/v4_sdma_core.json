@@ -1,0 +1,111 @@
+{
+  "title": "V4 SDMA Core",
+  "metrics": [
+    {
+      "name": "total_requests",
+      "type": "promql",
+      "expr": "sum by () (increase(vllm:time_to_first_token_seconds_count[$__rate_interval]))",
+      "value": "requests",
+      "aggregate": "sum"
+    },
+    {
+      "name": "ttft_s",
+      "source": "vllm:time_to_first_token_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "tpot_s",
+      "source": "vllm:request_time_per_output_token_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "e2e_request_latency_s",
+      "source": "vllm:e2e_request_latency_seconds",
+      "type": "histogram",
+      "unit": "s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_backend_load_fraction",
+      "type": "promql",
+      "expr": "sum by () (rate(ucm:cache_load_backend_shards_total[$__rate_interval])) / clamp_min(sum by () (rate(ucm:cache_load_shards_total[$__rate_interval])), 1)",
+      "value": "fraction",
+      "unit": "ratio",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_load_bandwidth_gbps",
+      "source": "ucm:cache_load_bandwidth_gbps",
+      "type": "histogram",
+      "unit": "GB/s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "fawa_worker_start_load_kv_ms",
+      "source": "ucm:fawa_worker_start_load_kv_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "fawa_worker_wait_wait_all_load_task_ms",
+      "source": "ucm:fawa_worker_wait_wait_all_load_task_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_h2d_bandwidth_gbps",
+      "source": "ucm:cache_h2d_bandwidth_gbps",
+      "type": "histogram",
+      "unit": "GB/s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_load_duration_ms",
+      "source": "ucm:cache_load_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "fawa_worker_wait_for_save_ms",
+      "source": "ucm:fawa_worker_wait_for_save_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_dump_duration_ms",
+      "source": "ucm:cache_dump_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_d2h_duration_ms",
+      "source": "ucm:cache_d2h_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_d2h_bandwidth_gbps",
+      "source": "ucm:cache_d2h_bandwidth_gbps",
+      "type": "histogram",
+      "unit": "GB/s",
+      "aggregate": "avg"
+    },
+    {
+      "name": "cache_dump_backend_wait_duration_ms",
+      "source": "ucm:cache_dump_backend_wait_duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "aggregate": "avg"
+    }
+  ]
+}
