@@ -23,6 +23,7 @@
  * */
 #include "load_queue.h"
 #include <algorithm>
+#include <cstdio>
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "thread/cpu_affinity.h"
@@ -386,7 +387,7 @@ void LoadQueue::LogSlowLoadTask(Detail::TaskHandle taskHandle, LoadTaskProfile& 
     while (!profile.dispatchFinished.load(std::memory_order_acquire)) { std::this_thread::yield(); }
     const auto totalMs = (NowTime::Now() - profile.startTp) * 1e3;
     if (totalMs < 10.0) { return; }
-    UC_WARN_UNLIMITED(
+    const auto message = fmt::format(
         "Slow Cache load task: device={}, cache_task={}, shards={}, backend_submits={}, "
         "total={:.3f}ms, queue_wait={:.3f}ms, dispatch={:.3f}ms, "
         "backend_io_wait_total={:.3f}ms, backend_io_wait_max={:.3f}ms, "
@@ -398,6 +399,9 @@ void LoadQueue::LogSlowLoadTask(Detail::TaskHandle taskHandle, LoadTaskProfile& 
         profile.backendIoWaitMaxMs, profile.backendIoWaitCount, profile.sharedReadyWaitMs,
         profile.sharedReadyWaitMaxMs, profile.sharedReadyWaitCount, profile.h2dSubmitMs,
         profile.h2dSyncMs);
+    std::fprintf(stderr, "[UCM_DIAG] %s\n", message.c_str());
+    std::fflush(stderr);
+    UC_WARN_UNLIMITED("{}", message);
     UC::Logger::Flush();
 }
 
