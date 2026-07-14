@@ -293,10 +293,15 @@ def worker_loop(
         if epoch + 1 < len(block_id_records):
             time.sleep(epoch_interval_ms / 1000)
 
-    # Reuse one block set across load epochs to match posixstore_aio_test.
-    load_block_ids = block_id_records[0]
     for epoch in range(load_epoch_number):
-        load(epoch, device, device_id, worker, load_block_ids)
+        record_idx = epoch % len(block_id_records)
+        load(
+            epoch,
+            device,
+            device_id,
+            worker,
+            block_id_records[record_idx],
+        )
         barrier.wait()
         if epoch + 1 < load_epoch_number:
             time.sleep(epoch_interval_ms / 1000)
