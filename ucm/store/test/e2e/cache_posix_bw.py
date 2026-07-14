@@ -205,7 +205,7 @@ def print_native_store_diagnostics(connector):
 
     store_dir = Path(connector.__file__).resolve().parent.parent
     marker_checks = (
-        (store_dir / "cache" / "libcachestore.so", b"Slow Cache load task"),
+        (store_dir / "cache" / "libcachestore.so", b"[UCM_DIAG]"),
         (
             store_dir / "posix" / "libposixstore.so",
             b"Slow Posix Backend2Cache task",
