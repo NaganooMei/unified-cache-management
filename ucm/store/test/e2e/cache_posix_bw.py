@@ -31,6 +31,10 @@ import time
 
 import torch
 
+os.environ["UCM_LOG_LEVEL"] = "debug"
+os.environ["UC_LOGGER_LEVEL"] = "debug"
+os.environ["UCM_LOG_RATE_LIMIT_ENABLE"] = "false"
+
 store_pipeline = "Cache|Posix"
 device_type = "npu"
 
@@ -189,6 +193,20 @@ def create_pipeline_store(config):
     return connector.UcmPipelineStore(config)
 
 
+def initialize_ucm_debug_logging():
+    logger_module = importlib.import_module("ucm.logger")
+    logger = logger_module.init_logger("cache_posix_bw")
+    debug_enabled = logger_module.ucmlogger.isEnabledFor(
+        logger_module.ucmlogger.Level.DEBUG
+    )
+    logger.debug("Cache Posix benchmark debug logger probe, pid=%s", os.getpid())
+    logger_module.ucmlogger.flush()
+    print(
+        f"UCM logger probe: pid={os.getpid()}, debug_enabled={debug_enabled}",
+        flush=True,
+    )
+
+
 def create_cache_worker(unique_id: str, device_id: int):
     config = {}
     config["store_pipeline"] = store_pipeline
@@ -325,9 +343,7 @@ def worker_loop(
 ):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTSTP, signal.SIG_IGN)
-    os.environ["UCM_LOG_LEVEL"] = "debug"
-    os.environ["UC_LOGGER_LEVEL"] = "debug"
-    os.environ["UCM_LOG_RATE_LIMIT_ENABLE"] = "false"
+    initialize_ucm_debug_logging()
     make_storage_dirs()
     device = setup_device(device_id)
     worker = create_cache_worker(unique_id, device_id)
