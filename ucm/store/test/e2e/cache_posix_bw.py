@@ -326,6 +326,7 @@ def worker_loop(
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTSTP, signal.SIG_IGN)
     os.environ["UCM_LOG_LEVEL"] = "debug"
+    os.environ["UC_LOGGER_LEVEL"] = "debug"
     os.environ["UCM_LOG_RATE_LIMIT_ENABLE"] = "false"
     make_storage_dirs()
     device = setup_device(device_id)
