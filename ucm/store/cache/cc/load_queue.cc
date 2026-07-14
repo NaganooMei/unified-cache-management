@@ -22,6 +22,7 @@
  * SOFTWARE.
  * */
 #include "load_queue.h"
+#include <algorithm>
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "thread/cpu_affinity.h"
@@ -93,6 +94,10 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     auto tpWait = NowTime::Now();
     const auto nShard = task->desc.size();
     const auto taskLaunch = UseSdmaDirectTaskLaunch();
+    auto profile = std::make_shared<LoadTaskProfile>();
+    profile->startTp = tp;
+    profile->queueWaitMs = (tpWait - tp) * 1e3;
+    profile->shardCount = nShard;
     size_t backendSubmitCount = 0;
     std::vector<ShardTask> readyTasks;
     std::vector<ShardTask> pendingTasks;
@@ -124,6 +129,7 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
         }
         shardTask.taskHandle = task->id;
         shardTask.shard = std::move(shard);
+        shardTask.profile = profile;
         if (taskLaunch) {
             if (shardTask.bufferHandle.Ready()) {
                 readyTasks.push_back(std::move(shardTask));
@@ -148,6 +154,9 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
         for (auto& shardTask : pendingTasks) { running_.Push(std::move(shardTask)); }
     }
     auto tpDispatch = NowTime::Now();
+    profile->dispatchMs = (tpDispatch - tpWait) * 1e3;
+    profile->backendSubmitCount = backendSubmitCount;
+    profile->dispatchFinished.store(true, std::memory_order_release);
     UC_DEBUG("Cache task({}) dispatch shards({}), wait={:.3f}ms, cost={:.3f}ms.", task->id, nShard,
              (tpWait - tp) * 1e3, (tpDispatch - tpWait) * 1e3);
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_queue_wait_duration_ms"),
@@ -188,12 +197,25 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
     auto s = Status::OK();
     const auto taskHandle = task.taskHandle;
     auto waiter = task.waiter;
+    auto profile = task.profile;
     do {
         auto tpBackendWait = NowTime::Now();
+        const auto ownsBackendTask = task.backendTaskHandle != 0;
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
         auto backendWaitMs = (tpBackendReady - tpBackendWait) * 1e3;
+        if (ownsBackendTask) {
+            profile->backendIoWaitMs += backendWaitMs;
+            profile->backendIoWaitMaxMs =
+                std::max(profile->backendIoWaitMaxMs, backendWaitMs);
+            profile->backendIoWaitCount++;
+        } else {
+            profile->sharedReadyWaitMs += backendWaitMs;
+            profile->sharedReadyWaitMaxMs =
+                std::max(profile->sharedReadyWaitMaxMs, backendWaitMs);
+            profile->sharedReadyWaitCount++;
+        }
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
                                  backendWaitMs);
         if (backendWaitMs >= 10.0) {
@@ -206,19 +228,23 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             const auto launchBoundary = task.launchBoundary;
             holder_.push_back(std::move(task));
             if (!launchBoundary) { return; }
-            s = FlushSdmaDirectTaskBatch(stream);
+            s = FlushSdmaDirectTaskBatch(stream, *profile);
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to flush H2D task batch for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
-            if (waiter) { waiter->Done(); }
+            if (waiter) {
+                LogSlowLoadTask(taskHandle, *profile);
+                waiter->Done();
+            }
             return;
         }
 
         if (cacheSdmaDirect_) {
             s = HostToDeviceAsync(stream, task.bufferHandle.DeviceData(), task.shard.addrs.data());
             auto tpH2dSubmitted = NowTime::Now();
+            profile->h2dSubmitMs += (tpH2dSubmitted - tpBackendReady) * 1e3;
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
@@ -233,6 +259,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             auto tpH2dSyncStart = NowTime::Now();
             s = stream.Synchronize();
             auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
+            profile->h2dSyncMs += h2dSyncMs;
             RecordH2dSyncMetrics(h2dSyncMs);
             if (h2dSyncMs >= 10.0) {
                 UC_WARN_UNLIMITED(
@@ -250,6 +277,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
 
         s = HostToDeviceAsync(stream, task.bufferHandle.Data(), task.shard.addrs.data());
         auto tpH2dSubmitted = NowTime::Now();
+        profile->h2dSubmitMs += (tpH2dSubmitted - tpBackendReady) * 1e3;
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to do H2D for task({}).", s, task.taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
@@ -264,6 +292,7 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         auto tpH2dSyncStart = NowTime::Now();
         s = stream.Synchronize();
         auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
+        profile->h2dSyncMs += h2dSyncMs;
         RecordH2dSyncMetrics(h2dSyncMs);
         if (h2dSyncMs >= 10.0) {
             UC_WARN_UNLIMITED(
@@ -279,7 +308,10 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
     } while (0);
     if (s.Failure()) [[unlikely]] { failureSet_->Insert(taskHandle); }
     if (UseSdmaDirectTaskLaunch()) { ClearSdmaDirectHolders(); }
-    if (waiter) { waiter->Done(); }
+    if (waiter) {
+        LogSlowLoadTask(taskHandle, *profile);
+        waiter->Done();
+    }
 }
 
 Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
@@ -322,12 +354,13 @@ Status LoadQueue::HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTas
     return stream.HostToDeviceAsync(hosts, devices, tensorSizes_);
 }
 
-Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream)
+Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream, LoadTaskProfile& profile)
 {
     if (holder_.empty()) { return Status::OK(); }
     auto tpH2dSubmitStart = NowTime::Now();
     auto s = HostToDeviceTaskAsync(stream, holder_);
     auto tpH2dSubmitted = NowTime::Now();
+    profile.h2dSubmitMs += (tpH2dSubmitted - tpH2dSubmitStart) * 1e3;
     if (s.Failure()) [[unlikely]] {
         ClearSdmaDirectHolders();
         return s;
@@ -337,6 +370,7 @@ Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream)
     auto tpH2dSyncStart = NowTime::Now();
     s = stream.Synchronize();
     auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
+    profile.h2dSyncMs += h2dSyncMs;
     RecordH2dSyncMetrics(h2dSyncMs);
     ClearSdmaDirectHolders();
     return s;
@@ -345,6 +379,26 @@ Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream)
 void LoadQueue::RecordH2dSyncMetrics(double h2dSyncMs) const
 {
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_sync_ms"), h2dSyncMs);
+}
+
+void LoadQueue::LogSlowLoadTask(Detail::TaskHandle taskHandle, LoadTaskProfile& profile) const
+{
+    while (!profile.dispatchFinished.load(std::memory_order_acquire)) { std::this_thread::yield(); }
+    const auto totalMs = (NowTime::Now() - profile.startTp) * 1e3;
+    if (totalMs < 10.0) { return; }
+    UC_WARN_UNLIMITED(
+        "Slow Cache load task: device={}, cache_task={}, shards={}, backend_submits={}, "
+        "total={:.3f}ms, queue_wait={:.3f}ms, dispatch={:.3f}ms, "
+        "backend_io_wait_total={:.3f}ms, backend_io_wait_max={:.3f}ms, "
+        "backend_io_wait_count={}, shared_ready_wait_total={:.3f}ms, "
+        "shared_ready_wait_max={:.3f}ms, shared_ready_wait_count={}, "
+        "h2d_submit_total={:.3f}ms, h2d_sync_total={:.3f}ms.",
+        deviceId_, taskHandle, profile.shardCount, profile.backendSubmitCount, totalMs,
+        profile.queueWaitMs, profile.dispatchMs, profile.backendIoWaitMs,
+        profile.backendIoWaitMaxMs, profile.backendIoWaitCount, profile.sharedReadyWaitMs,
+        profile.sharedReadyWaitMaxMs, profile.sharedReadyWaitCount, profile.h2dSubmitMs,
+        profile.h2dSyncMs);
+    UC::Logger::Flush();
 }
 
 void LoadQueue::ClearSdmaDirectHolders() noexcept { holder_.clear(); }

@@ -24,7 +24,9 @@
 #ifndef UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 #define UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 
+#include <atomic>
 #include <future>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,12 +45,29 @@ class LoadQueue {
     using WaiterPtr = std::shared_ptr<Latch>;
     using TaskPair = std::pair<TaskPtr, WaiterPtr>;
     using TaskIdSet = HashSet<Detail::TaskHandle>;
+    struct LoadTaskProfile {
+        double startTp{0};
+        double queueWaitMs{0};
+        double dispatchMs{0};
+        double backendIoWaitMs{0};
+        double backendIoWaitMaxMs{0};
+        double sharedReadyWaitMs{0};
+        double sharedReadyWaitMaxMs{0};
+        double h2dSubmitMs{0};
+        double h2dSyncMs{0};
+        size_t shardCount{0};
+        size_t backendSubmitCount{0};
+        size_t backendIoWaitCount{0};
+        size_t sharedReadyWaitCount{0};
+        std::atomic_bool dispatchFinished{false};
+    };
     struct ShardTask {
         Detail::TaskHandle taskHandle;
         Detail::Shard shard;
         TransBuffer::Handle bufferHandle;
         Detail::TaskHandle backendTaskHandle;
         WaiterPtr waiter;
+        std::shared_ptr<LoadTaskProfile> profile;
         bool launchBoundary{false};
     };
 
@@ -83,8 +102,9 @@ private:
     Status WaitBackendTaskReady(ShardTask& task);
     Status HostToDeviceAsync(CopyStream& stream, void* host, void** device);
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
-    Status FlushSdmaDirectTaskBatch(CopyStream& stream);
+    Status FlushSdmaDirectTaskBatch(CopyStream& stream, LoadTaskProfile& profile);
     void RecordH2dSyncMetrics(double h2dSyncMs) const;
+    void LogSlowLoadTask(Detail::TaskHandle taskHandle, LoadTaskProfile& profile) const;
     void ClearSdmaDirectHolders() noexcept;
     bool UseSdmaDirectTaskLaunch() const noexcept;
 };

@@ -230,6 +230,7 @@ def initialize_ucm_debug_logging():
         logger_module.ucmlogger.Level.DEBUG
     )
     logger.debug("Cache Posix benchmark debug logger probe, pid=%s", os.getpid())
+    logger.warning("Cache Posix benchmark warning logger probe, pid=%s", os.getpid())
     logger_module.ucmlogger.flush()
     print(
         f"UCM logger probe: pid={os.getpid()}, debug_enabled={debug_enabled}",
