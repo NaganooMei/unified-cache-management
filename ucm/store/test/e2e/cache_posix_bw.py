@@ -22,6 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
+import importlib
 import multiprocessing
 import os
 import secrets
@@ -29,8 +30,6 @@ import signal
 import time
 
 import torch
-
-from ucm.store.pipeline.connector import UcmPipelineStore
 
 store_pipeline = "Cache|Posix"
 device_type = "npu"
@@ -185,7 +184,12 @@ def synchronize_device():
         torch.npu.synchronize()
 
 
-def create_cache_worker(unique_id: str, device_id: int) -> UcmPipelineStore:
+def create_pipeline_store(config):
+    connector = importlib.import_module("ucm.store.pipeline.connector")
+    return connector.UcmPipelineStore(config)
+
+
+def create_cache_worker(unique_id: str, device_id: int):
     config = {}
     config["store_pipeline"] = store_pipeline
     config["storage_backends"] = storage_backends
@@ -207,10 +211,10 @@ def create_cache_worker(unique_id: str, device_id: int) -> UcmPipelineStore:
     config["running_queue_depth"] = 1024
     config["timeout_ms"] = 10000
     config["device_id"] = device_id
-    return UcmPipelineStore(config)
+    return create_pipeline_store(config)
 
 
-def create_posix_scheduler() -> UcmPipelineStore:
+def create_posix_scheduler():
     config = {}
     config["store_pipeline"] = "Posix"
     config["storage_backends"] = storage_backends
@@ -219,7 +223,7 @@ def create_posix_scheduler() -> UcmPipelineStore:
     config["posix_lookup_concurrency"] = 32
     config["timeout_ms"] = 10000
     config["device_id"] = -1
-    return UcmPipelineStore(config)
+    return create_pipeline_store(config)
 
 
 def make_storage_dirs():
@@ -335,7 +339,8 @@ def worker_loop(
         f"shard_size={shard_size}, dtype={torch.bfloat16}, "
         f"epoch_interval_ms={epoch_interval_ms}, "
         f"storage_backends={storage_backends}, "
-        f"cache_sdma_direct={cache_sdma_direct}"
+        f"cache_sdma_direct={cache_sdma_direct}, "
+        f"ucm_log_level={os.environ['UCM_LOG_LEVEL']}"
     )
 
     barrier.wait()
