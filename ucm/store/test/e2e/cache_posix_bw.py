@@ -28,6 +28,7 @@ import os
 import secrets
 import signal
 import time
+from pathlib import Path
 
 import torch
 
@@ -170,6 +171,8 @@ share_buffer_enable = model_profile["share_buffer_enable"]
 tensor_size_list = model_profile["tensor_size_list"]
 shard_size = (sum(tensor_size_list) + 4095) // 4096 * 4096
 
+_native_store_diagnostics_printed = False
+
 
 def setup_device(device_id: int):
     if device_type == "cuda":
@@ -190,7 +193,34 @@ def synchronize_device():
 
 def create_pipeline_store(config):
     connector = importlib.import_module("ucm.store.pipeline.connector")
-    return connector.UcmPipelineStore(config)
+    worker = connector.UcmPipelineStore(config)
+    print_native_store_diagnostics(connector)
+    return worker
+
+
+def print_native_store_diagnostics(connector):
+    global _native_store_diagnostics_printed
+    if _native_store_diagnostics_printed:
+        return
+
+    store_dir = Path(connector.__file__).resolve().parent.parent
+    marker_checks = (
+        (store_dir / "cache" / "libcachestore.so", b"Slow Cache backend wait"),
+        (
+            store_dir / "posix" / "libposixstore.so",
+            b"Slow Posix Backend2Cache task",
+        ),
+    )
+    for library_path, marker in marker_checks:
+        exists = library_path.is_file()
+        marker_found = exists and marker in library_path.read_bytes()
+        print(
+            "UCM native store probe: "
+            f"pid={os.getpid()}, path={library_path}, exists={exists}, "
+            f"diagnostic_marker_found={marker_found}",
+            flush=True,
+        )
+    _native_store_diagnostics_printed = True
 
 
 def initialize_ucm_debug_logging():
