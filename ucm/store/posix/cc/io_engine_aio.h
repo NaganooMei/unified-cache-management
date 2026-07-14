@@ -57,6 +57,8 @@ class IoEngineAio : public Detail::TaskWrapper<TransTask, Detail::TaskHandle> {
         double openQueueMs{0};
         double openMs{0};
         double openThreadCpuMs{0};
+        long openVoluntarySwitches{0};
+        long openInvoluntarySwitches{0};
         std::string path{};
         double submitStartTp{0};
         std::atomic<double> submitDoneTp{0};
@@ -132,10 +134,11 @@ private:
                 const auto message = fmt::format(
                     "Slow Posix AIO read: pid={}, backend_task={}, block={}, shard={}, "
                     "bytes={}, path={}, open_queue={:.3f}ms, open={:.3f}ms, "
-                    "open_thread_cpu={:.3f}ms, "
+                    "open_thread_cpu={:.3f}ms, open_nvcsw={}, open_nivcsw={}, "
                     "aio_submit={:.3f}ms, aio_completion={:.3f}ms, total={:.3f}ms.",
                     ::getpid(), tid, id, shardIndex, bytes, trace->path, trace->openQueueMs,
-                    trace->openMs, trace->openThreadCpuMs, submitMs, completionMs, totalMs);
+                    trace->openMs, trace->openThreadCpuMs, trace->openVoluntarySwitches,
+                    trace->openInvoluntarySwitches, submitMs, completionMs, totalMs);
                 std::fprintf(stderr, "[UCM_POSIX_DIAG] %s\n", message.c_str());
                 std::fflush(stderr);
             }
@@ -189,6 +192,8 @@ private:
         trace->openQueueMs = result.queueWaitMs;
         trace->openMs = result.openMs;
         trace->openThreadCpuMs = result.openThreadCpuMs;
+        trace->openVoluntarySwitches = result.openVoluntarySwitches;
+        trace->openInvoluntarySwitches = result.openInvoluntarySwitches;
         trace->path = result.path;
         trace->submitStartTp = NowTime::Now();
         io.callback = [this, tid, w, fd = result.fd, last, id, shardIndex = shard.index,

@@ -208,7 +208,7 @@ def print_native_store_diagnostics(connector):
         (store_dir / "cache" / "libcachestore.so", b"[UCM_DIAG]"),
         (
             store_dir / "posix" / "libposixstore.so",
-            b"open_thread_cpu",
+            b"open_nvcsw",
         ),
     )
     for library_path, marker in marker_checks:
@@ -323,6 +323,7 @@ def load(epoch: int, device: str, device_id: int, worker, block_ids):
     shard_indexes = [0 for _ in range(block_number)]
     synchronize_device()
     cpu_stat_before = read_cgroup_cpu_stat()
+    cpu_pressure_before = read_cpu_pressure()
     tp = time.perf_counter()
     task = worker.load(block_ids, shard_indexes, dst_tensors)
     tp_submitted = time.perf_counter()
@@ -332,6 +333,7 @@ def load(epoch: int, device: str, device_id: int, worker, block_ids):
     tp_synchronized = time.perf_counter()
     cost = tp_synchronized - tp
     cpu_stat_after = read_cgroup_cpu_stat()
+    cpu_pressure_after = read_cpu_pressure()
     print_result("load", epoch, device_id, cost, total_size)
     if cost * 1e3 >= slow_load_threshold_ms:
         print(
@@ -340,7 +342,9 @@ def load(epoch: int, device: str, device_id: int, worker, block_ids):
             f"submit={(tp_submitted - tp) * 1e3:.3f}ms, "
             f"wait={(tp_waited - tp_submitted) * 1e3:.3f}ms, "
             f"sync={(tp_synchronized - tp_waited) * 1e3:.3f}ms, "
-            f"cgroup_cpu={format_cgroup_cpu_delta(cpu_stat_before, cpu_stat_after)}"
+            f"cgroup_cpu={format_cgroup_cpu_delta(cpu_stat_before, cpu_stat_after)}, "
+            "cpu_pressure="
+            f"{format_cpu_pressure_delta(cpu_pressure_before, cpu_pressure_after)}"
         )
 
 
@@ -367,6 +371,34 @@ def format_cgroup_cpu_delta(before, after):
         return "unavailable"
     keys = ("nr_throttled", "throttled_usec", "throttled_time")
     return ",".join(f"{key}:{after.get(key, 0) - before.get(key, 0)}" for key in keys)
+
+
+def read_cpu_pressure():
+    for path in ("/sys/fs/cgroup/cpu.pressure", "/proc/pressure/cpu"):
+        try:
+            with open(path, encoding="utf-8") as file:
+                result = {}
+                for line in file:
+                    parts = line.split()
+                    total = next(
+                        (part for part in parts[1:] if part.startswith("total=")),
+                        None,
+                    )
+                    if total is not None:
+                        result[parts[0]] = int(total.split("=", maxsplit=1)[1])
+                return result
+        except (FileNotFoundError, PermissionError, ValueError):
+            continue
+    return None
+
+
+def format_cpu_pressure_delta(before, after):
+    if before is None or after is None:
+        return "unavailable"
+    return ",".join(
+        f"{key}:{after.get(key, 0) - before.get(key, 0)}"
+        for key in ("some", "full")
+    )
 
 
 def wait_backend_ready(scheduler, block_ids, timeout_s=60, poll_interval_s=0.001):
@@ -407,6 +439,7 @@ def worker_loop(
     device = setup_device(device_id)
     worker = create_cache_worker(unique_id, device_id)
     scheduler = create_posix_scheduler()
+    allowed_cpu_number = len(os.sched_getaffinity(0))
     print(
         f"{store_pipeline} one-layer benchmark: device={device}, "
         f"model={model_name}, worker_mode={worker_mode}, "
@@ -416,6 +449,7 @@ def worker_loop(
         f"epoch_interval_ms={epoch_interval_ms}, "
         f"storage_backends={storage_backends}, "
         f"cache_sdma_direct={cache_sdma_direct}, "
+        f"allowed_cpu_number={allowed_cpu_number}, "
         f"ucm_log_level={os.environ['UCM_LOG_LEVEL']}"
     )
 

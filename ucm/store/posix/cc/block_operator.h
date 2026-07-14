@@ -33,6 +33,7 @@
 #include <list>
 #include <mutex>
 #include <string>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <thread>
 #include <time.h>
@@ -83,6 +84,8 @@ public:
         double queueWaitMs{0};
         double openMs{0};
         double openThreadCpuMs{0};
+        long openVoluntarySwitches{0};
+        long openInvoluntarySwitches{0};
         std::string path{};
     };
     using OpenCallback = std::function<void(OpenResult)>;
@@ -184,22 +187,28 @@ private:
             const auto openStartTp = NowTime::Now();
             timespec threadCpuStart{};
             timespec threadCpuDone{};
+            rusage usageStart{};
+            rusage usageDone{};
             clock_gettime(CLOCK_THREAD_CPUTIME_ID, &threadCpuStart);
+            getrusage(RUSAGE_THREAD, &usageStart);
 #ifdef UCM_ENABLE_TEST_HOOKS
             auto hook = TestHooks::GetOpenHook();
             auto fd = hook ? hook(path, task.flags, mode) : ::open(path.c_str(), task.flags, mode);
 #else
             auto fd = ::open(path.c_str(), task.flags, mode);
 #endif
+            auto err = (fd < 0) ? errno : 0;
+            getrusage(RUSAGE_THREAD, &usageDone);
             clock_gettime(CLOCK_THREAD_CPUTIME_ID, &threadCpuDone);
             const auto openDoneTp = NowTime::Now();
-            auto err = (fd < 0) ? errno : 0;
             if (task.callback) {
                 const auto threadCpuMs =
                     (threadCpuDone.tv_sec - threadCpuStart.tv_sec) * 1e3 +
                     (threadCpuDone.tv_nsec - threadCpuStart.tv_nsec) / 1e6;
                 task.callback(OpenResult{fd, err, (openStartTp - task.queuedTp) * 1e3,
-                                         (openDoneTp - openStartTp) * 1e3, threadCpuMs, path});
+                                         (openDoneTp - openStartTp) * 1e3, threadCpuMs,
+                                         usageDone.ru_nvcsw - usageStart.ru_nvcsw,
+                                         usageDone.ru_nivcsw - usageStart.ru_nivcsw, path});
             }
         }
     }
