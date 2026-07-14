@@ -38,6 +38,7 @@
 #include "logger/logger.h"
 #include "space_layout.h"
 #include "thread/cpu_affinity.h"
+#include "time/now_time.h"
 #include "type/types.h"
 
 namespace UC::PosixStore {
@@ -78,6 +79,8 @@ public:
     struct OpenResult {
         int32_t fd;
         int32_t error;
+        double queueWaitMs{0};
+        double openMs{0};
     };
     using OpenCallback = std::function<void(OpenResult)>;
     struct OpenTask {
@@ -86,6 +89,7 @@ public:
         int32_t flags;
         OpenCallback callback;
         uint64_t tag{0};
+        double queuedTp{0};
     };
     struct CommitTask {
         Detail::BlockId id;
@@ -119,6 +123,8 @@ public:
     }
     void Submit(std::list<OpenTask>&& tasks)
     {
+        const auto queuedTp = NowTime::Now();
+        for (auto& task : tasks) { task.queuedTp = queuedTp; }
         auto& q = openQueue_;
         std::lock_guard<std::mutex> lock{q.mutex};
         q.queue.splice(q.queue.end(), tasks);
@@ -172,14 +178,19 @@ private:
                 openQueue_.queue.pop_front();
             }
             const auto path = layout_->DataFilePath(task.id, task.activated);
+            const auto openStartTp = NowTime::Now();
 #ifdef UCM_ENABLE_TEST_HOOKS
             auto hook = TestHooks::GetOpenHook();
             auto fd = hook ? hook(path, task.flags, mode) : ::open(path.c_str(), task.flags, mode);
 #else
             auto fd = ::open(path.c_str(), task.flags, mode);
 #endif
+            const auto openDoneTp = NowTime::Now();
             auto err = (fd < 0) ? errno : 0;
-            if (task.callback) { task.callback(OpenResult{fd, err}); }
+            if (task.callback) {
+                task.callback(OpenResult{fd, err, (openStartTp - task.queuedTp) * 1e3,
+                                         (openDoneTp - openStartTp) * 1e3});
+            }
         }
     }
     void CommitWorkerLoop()

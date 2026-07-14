@@ -208,7 +208,7 @@ def print_native_store_diagnostics(connector):
         (store_dir / "cache" / "libcachestore.so", b"[UCM_DIAG]"),
         (
             store_dir / "posix" / "libposixstore.so",
-            b"Slow Posix Backend2Cache task",
+            b"[UCM_POSIX_DIAG]",
         ),
     )
     for library_path, marker in marker_checks:

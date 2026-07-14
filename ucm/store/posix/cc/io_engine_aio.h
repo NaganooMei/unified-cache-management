@@ -24,10 +24,15 @@
 #ifndef UNIFIEDCACHE_POSIX_STORE_CC_IO_ENGINE_AIO_H
 #define UNIFIEDCACHE_POSIX_STORE_CC_IO_ENGINE_AIO_H
 
+#include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <tuple>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 #include "aio_impl.h"
@@ -47,6 +52,12 @@ class IoEngineAio : public Detail::TaskWrapper<TransTask, Detail::TaskHandle> {
         double deadlineTp{0};
         size_t shardCount{0};
         bool aborted{false};
+    };
+    struct IoTrace {
+        double openQueueMs{0};
+        double openMs{0};
+        double submitStartTp{0};
+        std::atomic<double> submitDoneTp{0};
     };
     size_t shardSize_;
     size_t nShardPerBlock_;
@@ -102,8 +113,30 @@ private:
     }
     template <bool dump>
     void OnIoCallback(const Detail::TaskHandle& tid, WaiterPtr w, int32_t fd, bool last,
-                      const Detail::BlockId& id, const AioImpl::Result& result)
+                      const Detail::BlockId& id, size_t shardIndex, size_t bytes,
+                      const std::shared_ptr<IoTrace>& trace, const AioImpl::Result& result)
     {
+        const auto callbackTp = NowTime::Now();
+        auto submitDoneTp = trace->submitDoneTp.load(std::memory_order_acquire);
+        while (submitDoneTp == 0) {
+            std::this_thread::yield();
+            submitDoneTp = trace->submitDoneTp.load(std::memory_order_acquire);
+        }
+        const auto submitMs = (submitDoneTp - trace->submitStartTp) * 1e3;
+        const auto completionMs = (callbackTp - submitDoneTp) * 1e3;
+        const auto totalMs = trace->openQueueMs + trace->openMs + submitMs + completionMs;
+        if constexpr (!dump) {
+            if (totalMs >= 10.0) {
+                const auto message = fmt::format(
+                    "Slow Posix AIO read: pid={}, backend_task={}, block={}, shard={}, "
+                    "bytes={}, open_queue={:.3f}ms, open={:.3f}ms, "
+                    "aio_submit={:.3f}ms, aio_completion={:.3f}ms, total={:.3f}ms.",
+                    ::getpid(), tid, id, shardIndex, bytes, trace->openQueueMs, trace->openMs,
+                    submitMs, completionMs, totalMs);
+                std::fprintf(stderr, "[UCM_POSIX_DIAG] %s\n", message.c_str());
+                std::fflush(stderr);
+            }
+        }
         if (result.error != 0) {
             UC_ERROR("Failed({}) to do io on block({}).", result.error, id);
             if (result.error != ECANCELED) { IncrementIoErrorMetric(); }
@@ -149,10 +182,16 @@ private:
         io.length = shardSize_;
         io.buffer = shard.addrs.front();
         io.tag = tid;
-        io.callback = [this, tid, w, fd = result.fd, last, id](AioImpl::Result ioResult) {
-            OnIoCallback<dump>(tid, w, fd, last, id, ioResult);
+        auto trace = std::make_shared<IoTrace>();
+        trace->openQueueMs = result.queueWaitMs;
+        trace->openMs = result.openMs;
+        trace->submitStartTp = NowTime::Now();
+        io.callback = [this, tid, w, fd = result.fd, last, id, shardIndex = shard.index,
+                       bytes = shardSize_, trace](AioImpl::Result ioResult) {
+            OnIoCallback<dump>(tid, w, fd, last, id, shardIndex, bytes, trace, ioResult);
         };
         auto status = dump ? aio_.WriteAsync(std::move(io)) : aio_.ReadAsync(std::move(io));
+        trace->submitDoneTp.store(NowTime::Now(), std::memory_order_release);
         if (status.Failure()) {
             if (status == Status::Timeout()) {
                 IncrementAioTimeoutMetric();
