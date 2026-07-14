@@ -35,6 +35,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <thread>
+#include <time.h>
 #include "logger/logger.h"
 #include "space_layout.h"
 #include "thread/cpu_affinity.h"
@@ -81,6 +82,8 @@ public:
         int32_t error;
         double queueWaitMs{0};
         double openMs{0};
+        double openThreadCpuMs{0};
+        std::string path{};
     };
     using OpenCallback = std::function<void(OpenResult)>;
     struct OpenTask {
@@ -179,17 +182,24 @@ private:
             }
             const auto path = layout_->DataFilePath(task.id, task.activated);
             const auto openStartTp = NowTime::Now();
+            timespec threadCpuStart{};
+            timespec threadCpuDone{};
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &threadCpuStart);
 #ifdef UCM_ENABLE_TEST_HOOKS
             auto hook = TestHooks::GetOpenHook();
             auto fd = hook ? hook(path, task.flags, mode) : ::open(path.c_str(), task.flags, mode);
 #else
             auto fd = ::open(path.c_str(), task.flags, mode);
 #endif
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &threadCpuDone);
             const auto openDoneTp = NowTime::Now();
             auto err = (fd < 0) ? errno : 0;
             if (task.callback) {
+                const auto threadCpuMs =
+                    (threadCpuDone.tv_sec - threadCpuStart.tv_sec) * 1e3 +
+                    (threadCpuDone.tv_nsec - threadCpuStart.tv_nsec) / 1e6;
                 task.callback(OpenResult{fd, err, (openStartTp - task.queuedTp) * 1e3,
-                                         (openDoneTp - openStartTp) * 1e3});
+                                         (openDoneTp - openStartTp) * 1e3, threadCpuMs, path});
             }
         }
     }

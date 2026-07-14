@@ -208,7 +208,7 @@ def print_native_store_diagnostics(connector):
         (store_dir / "cache" / "libcachestore.so", b"[UCM_DIAG]"),
         (
             store_dir / "posix" / "libposixstore.so",
-            b"[UCM_POSIX_DIAG]",
+            b"open_thread_cpu",
         ),
     )
     for library_path, marker in marker_checks:
@@ -322,6 +322,7 @@ def load(epoch: int, device: str, device_id: int, worker, block_ids):
     total_size = sum(tensor_size_list) * block_number
     shard_indexes = [0 for _ in range(block_number)]
     synchronize_device()
+    cpu_stat_before = read_cgroup_cpu_stat()
     tp = time.perf_counter()
     task = worker.load(block_ids, shard_indexes, dst_tensors)
     tp_submitted = time.perf_counter()
@@ -330,6 +331,7 @@ def load(epoch: int, device: str, device_id: int, worker, block_ids):
     synchronize_device()
     tp_synchronized = time.perf_counter()
     cost = tp_synchronized - tp
+    cpu_stat_after = read_cgroup_cpu_stat()
     print_result("load", epoch, device_id, cost, total_size)
     if cost * 1e3 >= slow_load_threshold_ms:
         print(
@@ -337,8 +339,34 @@ def load(epoch: int, device: str, device_id: int, worker, block_ids):
             f"pid={os.getpid()}, task={task.task_id}, "
             f"submit={(tp_submitted - tp) * 1e3:.3f}ms, "
             f"wait={(tp_waited - tp_submitted) * 1e3:.3f}ms, "
-            f"sync={(tp_synchronized - tp_waited) * 1e3:.3f}ms"
+            f"sync={(tp_synchronized - tp_waited) * 1e3:.3f}ms, "
+            f"cgroup_cpu={format_cgroup_cpu_delta(cpu_stat_before, cpu_stat_after)}"
         )
+
+
+def read_cgroup_cpu_stat():
+    paths = (
+        "/sys/fs/cgroup/cpu.stat",
+        "/sys/fs/cgroup/cpu/cpu.stat",
+        "/sys/fs/cgroup/cpu,cpuacct/cpu.stat",
+    )
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as file:
+                return {
+                    key: int(value)
+                    for key, value in (line.split() for line in file)
+                }
+        except (FileNotFoundError, PermissionError, ValueError):
+            continue
+    return None
+
+
+def format_cgroup_cpu_delta(before, after):
+    if before is None or after is None:
+        return "unavailable"
+    keys = ("nr_throttled", "throttled_usec", "throttled_time")
+    return ",".join(f"{key}:{after.get(key, 0) - before.get(key, 0)}" for key in keys)
 
 
 def wait_backend_ready(scheduler, block_ids, timeout_s=60, poll_interval_s=0.001):

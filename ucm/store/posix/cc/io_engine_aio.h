@@ -56,6 +56,8 @@ class IoEngineAio : public Detail::TaskWrapper<TransTask, Detail::TaskHandle> {
     struct IoTrace {
         double openQueueMs{0};
         double openMs{0};
+        double openThreadCpuMs{0};
+        std::string path{};
         double submitStartTp{0};
         std::atomic<double> submitDoneTp{0};
     };
@@ -129,10 +131,11 @@ private:
             if (totalMs >= 10.0) {
                 const auto message = fmt::format(
                     "Slow Posix AIO read: pid={}, backend_task={}, block={}, shard={}, "
-                    "bytes={}, open_queue={:.3f}ms, open={:.3f}ms, "
+                    "bytes={}, path={}, open_queue={:.3f}ms, open={:.3f}ms, "
+                    "open_thread_cpu={:.3f}ms, "
                     "aio_submit={:.3f}ms, aio_completion={:.3f}ms, total={:.3f}ms.",
-                    ::getpid(), tid, id, shardIndex, bytes, trace->openQueueMs, trace->openMs,
-                    submitMs, completionMs, totalMs);
+                    ::getpid(), tid, id, shardIndex, bytes, trace->path, trace->openQueueMs,
+                    trace->openMs, trace->openThreadCpuMs, submitMs, completionMs, totalMs);
                 std::fprintf(stderr, "[UCM_POSIX_DIAG] %s\n", message.c_str());
                 std::fflush(stderr);
             }
@@ -185,6 +188,8 @@ private:
         auto trace = std::make_shared<IoTrace>();
         trace->openQueueMs = result.queueWaitMs;
         trace->openMs = result.openMs;
+        trace->openThreadCpuMs = result.openThreadCpuMs;
+        trace->path = result.path;
         trace->submitStartTp = NowTime::Now();
         io.callback = [this, tid, w, fd = result.fd, last, id, shardIndex = shard.index,
                        bytes = shardSize_, trace](AioImpl::Result ioResult) {
