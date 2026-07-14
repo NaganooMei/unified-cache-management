@@ -193,8 +193,15 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         s = WaitBackendTaskReady(task);
         if (s.Failure()) [[unlikely]] { break; }
         auto tpBackendReady = NowTime::Now();
+        auto backendWaitMs = (tpBackendReady - tpBackendWait) * 1e3;
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
-                                 (tpBackendReady - tpBackendWait) * 1e3);
+                                 backendWaitMs);
+        if (backendWaitMs >= 10.0) {
+            UC_WARN_UNLIMITED(
+                "Slow Cache backend wait: cache_task={}, backend_task={}, owner={}, "
+                "wait={:.3f}ms.",
+                taskHandle, task.backendTaskHandle, task.backendTaskHandle != 0, backendWaitMs);
+        }
         if (UseSdmaDirectTaskLaunch()) {
             const auto launchBoundary = task.launchBoundary;
             holder_.push_back(std::move(task));
@@ -227,6 +234,11 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             s = stream.Synchronize();
             auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
             RecordH2dSyncMetrics(h2dSyncMs);
+            if (h2dSyncMs >= 10.0) {
+                UC_WARN_UNLIMITED(
+                    "Slow Cache H2D sync: cache_task={}, sdma_direct=true, sync={:.3f}ms.",
+                    taskHandle, h2dSyncMs);
+            }
             holder_.clear();
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);
@@ -253,6 +265,11 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         s = stream.Synchronize();
         auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
         RecordH2dSyncMetrics(h2dSyncMs);
+        if (h2dSyncMs >= 10.0) {
+            UC_WARN_UNLIMITED(
+                "Slow Cache H2D sync: cache_task={}, sdma_direct=false, sync={:.3f}ms.",
+                taskHandle, h2dSyncMs);
+        }
         holder_.clear();
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);

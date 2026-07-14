@@ -199,6 +199,12 @@ private:
             auto bwGbps = cost > 0 ? static_cast<double>(size) / cost / 1e9 : 0.0;
             UC_DEBUG("Posix task({},{},{},{}) finished, cost {:.3f}ms.", id, brief, num, size,
                      costMs);
+            if (!isDump && brief == "Backend2Cache" && costMs >= 10.0) {
+                UC_WARN_UNLIMITED(
+                    "Slow Posix Backend2Cache task: backend_task={}, shards={}, bytes={}, "
+                    "cost={:.3f}ms.",
+                    id, num, size, costMs);
+            }
             static UC::Metrics::CachedMetric loadDuration{"posix_load_task_duration_ms"};
             static UC::Metrics::CachedMetric dumpDuration{"posix_dump_task_duration_ms"};
             static UC::Metrics::CachedMetric loadBandwidth{"posix_s2h_bandwidth_gbps"};
