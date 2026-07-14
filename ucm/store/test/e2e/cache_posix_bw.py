@@ -40,6 +40,7 @@ block_number = 100
 dump_epoch_number = 16
 load_epoch_number = 16
 epoch_interval_ms = 15
+slow_load_threshold_ms = 10
 cache_sdma_direct = True
 storage_backends = ["./build/data"]
 
@@ -270,9 +271,21 @@ def load(epoch: int, device: str, device_id: int, worker, block_ids):
     synchronize_device()
     tp = time.perf_counter()
     task = worker.load(block_ids, shard_indexes, dst_tensors)
+    tp_submitted = time.perf_counter()
     worker.wait(task)
+    tp_waited = time.perf_counter()
     synchronize_device()
-    print_result("load", epoch, device_id, time.perf_counter() - tp, total_size)
+    tp_synchronized = time.perf_counter()
+    cost = tp_synchronized - tp
+    print_result("load", epoch, device_id, cost, total_size)
+    if cost * 1e3 >= slow_load_threshold_ms:
+        print(
+            f"slow_load epoch={epoch:03}, worker={device_id:02}, "
+            f"pid={os.getpid()}, task={task.task_id}, "
+            f"submit={(tp_submitted - tp) * 1e3:.3f}ms, "
+            f"wait={(tp_waited - tp_submitted) * 1e3:.3f}ms, "
+            f"sync={(tp_synchronized - tp_waited) * 1e3:.3f}ms"
+        )
 
 
 def wait_backend_ready(scheduler, block_ids, timeout_s=60, poll_interval_s=0.001):
@@ -308,7 +321,7 @@ def worker_loop(
 ):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTSTP, signal.SIG_IGN)
-    os.environ["UC_LOGGER_LEVEL"] = "warning"
+    os.environ.setdefault("UC_LOGGER_LEVEL", "warning")
     make_storage_dirs()
     device = setup_device(device_id)
     worker = create_cache_worker(unique_id, device_id)
