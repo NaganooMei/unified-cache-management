@@ -69,7 +69,7 @@ storage_backends = ["./build/data"]
 posix_io_engine = "psync"
 # Data-transfer concurrency used by the psync I/O engine.
 posix_data_trans_concurrency = 128
-# Bind each worker and its UCM store threads to NUMA-local CPU cores.
+# Bind each worker, CacheStore, and PosixStore to disjoint NUMA-local CPU cores.
 worker_cpu_affinity_enable = False
 
 # MLA writes once from worker 0 and all workers load the same block ids, while
@@ -340,11 +340,11 @@ def get_fallback_numa_cpu_pools(available_cpu_cores):
 def make_cpu_affinity_core_groups():
     if not worker_cpu_affinity_enable:
         empty_groups = [[] for _ in range(worker_number)]
-        return empty_groups, empty_groups
+        return empty_groups, empty_groups, empty_groups
     available_cpu_cores = sorted(os.sched_getaffinity(0))
-    if len(available_cpu_cores) < worker_number * 2:
+    if len(available_cpu_cores) < worker_number * 3:
         raise RuntimeError(
-            f"NUMA-aware affinity requires at least two CPU cores per worker: "
+            f"NUMA-aware affinity requires at least three CPU cores per worker: "
             f"worker_number={worker_number}, available={len(available_cpu_cores)}"
         )
     npu_ids = get_visible_npu_ids()
@@ -359,14 +359,15 @@ def make_cpu_affinity_core_groups():
         grouped_worker_ids.setdefault(tuple(cpu_pool), []).append(worker_id)
 
     worker_cpu_core_groups = [[] for _ in range(worker_number)]
-    store_cpu_core_groups = [[] for _ in range(worker_number)]
+    cache_cpu_core_groups = [[] for _ in range(worker_number)]
+    posix_cpu_core_groups = [[] for _ in range(worker_number)]
     assigned_cpu_cores = set()
     for cpu_pool, worker_ids in grouped_worker_ids.items():
         per_worker_pools = split_cpu_cores(list(cpu_pool), len(worker_ids))
         for worker_id, per_worker_pool in zip(worker_ids, per_worker_pools):
-            if len(per_worker_pool) < 2:
+            if len(per_worker_pool) < 3:
                 raise RuntimeError(
-                    f"NPU {npu_ids[worker_id]} has fewer than two available "
+                    f"NPU {npu_ids[worker_id]} has fewer than three available "
                     f"CPU cores: {per_worker_pool}"
                 )
             overlap = assigned_cpu_cores.intersection(per_worker_pool)
@@ -378,14 +379,22 @@ def make_cpu_affinity_core_groups():
             assigned_cpu_cores.update(per_worker_pool)
             middle = max(1, len(per_worker_pool) // 2)
             worker_cpu_core_groups[worker_id] = per_worker_pool[:middle]
-            store_cpu_core_groups[worker_id] = per_worker_pool[middle:]
+            store_cpu_cores = per_worker_pool[middle:]
+            posix_cpu_cores, cache_cpu_cores = split_cpu_cores(store_cpu_cores, 2)
+            posix_cpu_core_groups[worker_id] = posix_cpu_cores
+            cache_cpu_core_groups[worker_id] = cache_cpu_cores
             print(
                 f"CPU affinity plan: source={affinity_source}, "
                 f"worker={worker_id}, npu={npu_ids[worker_id]}, "
                 f"worker_cores={worker_cpu_core_groups[worker_id]}, "
-                f"store_cores={store_cpu_core_groups[worker_id]}"
+                f"cache_cores={cache_cpu_core_groups[worker_id]}, "
+                f"posix_cores={posix_cpu_core_groups[worker_id]}"
             )
-    return worker_cpu_core_groups, store_cpu_core_groups
+    return (
+        worker_cpu_core_groups,
+        cache_cpu_core_groups,
+        posix_cpu_core_groups,
+    )
 
 
 def setup_device(device_id: int):
@@ -411,7 +420,11 @@ def configure_ucm_logging():
 
 
 def create_cache_worker(
-    pipeline_store_cls, unique_id: str, device_id: int, store_cpu_affinity_cores
+    pipeline_store_cls,
+    unique_id: str,
+    device_id: int,
+    cache_cpu_affinity_cores,
+    posix_cpu_affinity_cores,
 ):
     config = {}
     config["store_pipeline"] = store_pipeline
@@ -432,13 +445,18 @@ def create_cache_worker(
     config["cache_sdma_direct_launch_granularity"] = "shard"
     config["timeout_ms"] = 30000
     config["device_id"] = device_id
-    if store_cpu_affinity_cores:
-        config["cpu_affinity_cores"] = store_cpu_affinity_cores
+    if cache_cpu_affinity_cores:
+        config["cache_cpu_affinity_cores"] = cache_cpu_affinity_cores
+    if posix_cpu_affinity_cores:
+        config["posix_cpu_affinity_cores"] = posix_cpu_affinity_cores
     return pipeline_store_cls(config)
 
 
 def create_cache_scheduler(
-    pipeline_store_cls, unique_id: str, store_cpu_affinity_cores
+    pipeline_store_cls,
+    unique_id: str,
+    cache_cpu_affinity_cores,
+    posix_cpu_affinity_cores,
 ):
     config = {}
     config["store_pipeline"] = store_pipeline
@@ -458,8 +476,10 @@ def create_cache_scheduler(
     config["cache_sdma_direct_launch_granularity"] = "shard"
     config["timeout_ms"] = 30000
     config["device_id"] = -1
-    if store_cpu_affinity_cores:
-        config["cpu_affinity_cores"] = store_cpu_affinity_cores
+    if cache_cpu_affinity_cores:
+        config["cache_cpu_affinity_cores"] = cache_cpu_affinity_cores
+    if posix_cpu_affinity_cores:
+        config["posix_cpu_affinity_cores"] = posix_cpu_affinity_cores
     return pipeline_store_cls(config)
 
 
@@ -597,7 +617,8 @@ def worker_loop(
     barrier: multiprocessing.Barrier,
     unique_id: str,
     worker_cpu_affinity_cores,
-    store_cpu_affinity_cores,
+    cache_cpu_affinity_cores,
+    posix_cpu_affinity_cores,
     block_id_records,
     backend_block_ids,
     dump_cost_records,
@@ -625,10 +646,19 @@ def worker_loop(
     make_storage_dirs()
     device = setup_device(device_id)
     worker = create_cache_worker(
-        UcmPipelineStore, unique_id, device_id, store_cpu_affinity_cores
+        UcmPipelineStore,
+        unique_id,
+        device_id,
+        cache_cpu_affinity_cores,
+        posix_cpu_affinity_cores,
     )
     scheduler = (
-        create_cache_scheduler(UcmPipelineStore, unique_id, store_cpu_affinity_cores)
+        create_cache_scheduler(
+            UcmPipelineStore,
+            unique_id,
+            cache_cpu_affinity_cores,
+            posix_cpu_affinity_cores,
+        )
         if device_id == 0
         else None
     )
@@ -650,7 +680,8 @@ def worker_loop(
         f"cache_sdma_direct={cache_sdma_direct}, "
         f"worker_cpu_affinity_enable={worker_cpu_affinity_enable}, "
         f"worker_cpu_affinity_cores={worker_cpu_affinity_cores}, "
-        f"store_cpu_affinity_cores={store_cpu_affinity_cores}, "
+        f"cache_cpu_affinity_cores={cache_cpu_affinity_cores}, "
+        f"posix_cpu_affinity_cores={posix_cpu_affinity_cores}, "
         f"multiprocessing_start_method={multiprocessing.get_start_method()}"
     )
 
@@ -756,7 +787,11 @@ if __name__ == "__main__":
     backend_block_ids = [
         block_id for block_ids in backend_block_id_records for block_id in block_ids
     ]
-    worker_cpu_core_groups, store_cpu_core_groups = make_cpu_affinity_core_groups()
+    (
+        worker_cpu_core_groups,
+        cache_cpu_core_groups,
+        posix_cpu_core_groups,
+    ) = make_cpu_affinity_core_groups()
     dump_cost_records = process_context.Array(
         "d", worker_number * dump_epoch_number, lock=False
     )
@@ -775,7 +810,8 @@ if __name__ == "__main__":
                     barrier,
                     unique_id,
                     worker_cpu_core_groups[device_id],
-                    store_cpu_core_groups[device_id],
+                    cache_cpu_core_groups[device_id],
+                    posix_cpu_core_groups[device_id],
                     worker_block_id_records[device_id],
                     backend_block_ids if device_id == 0 else None,
                     dump_cost_records,

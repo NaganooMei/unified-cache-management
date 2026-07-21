@@ -204,11 +204,16 @@ def _cache_posix_pipeline_builder(
 ):
     store_dir = Path(__file__).resolve().parent.parent
     posix_config = copy.deepcopy(config)
+    cache_config = copy.deepcopy(config)
+    if "posix_cpu_affinity_cores" in config:
+        posix_config["cpu_affinity_cores"] = config["posix_cpu_affinity_cores"]
+    if "cache_cpu_affinity_cores" in config:
+        cache_config["cpu_affinity_cores"] = config["cache_cpu_affinity_cores"]
     if config.get("device_id", -1) >= 0:
         posix_config |= {"tensor_size": config["shard_size"]}
     _preload_metrics(store_dir)
     pipeline.Stack("Posix", str(store_dir / "posix/libposixstore.so"), posix_config)
-    pipeline.Stack("Cache", str(store_dir / "cache/libcachestore.so"), config)
+    pipeline.Stack("Cache", str(store_dir / "cache/libcachestore.so"), cache_config)
 
 
 def _build_cache_compress_posix_pipeline(
