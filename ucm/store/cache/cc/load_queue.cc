@@ -28,6 +28,10 @@
 
 namespace UC::CacheStore {
 
+namespace {
+constexpr double kSlowLoadLogThresholdMs = 500.0;
+}
+
 LoadQueue::~LoadQueue()
 {
     stop_.store(true);
@@ -148,12 +152,20 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
         for (auto& shardTask : pendingTasks) { running_.Push(std::move(shardTask)); }
     }
     auto tpDispatch = NowTime::Now();
+    const auto queueWaitMs = (tpWait - tp) * 1e3;
+    const auto backendSubmitMs = (tpDispatch - tpWait) * 1e3;
     UC_DEBUG("Cache task({}) dispatch shards({}), wait={:.3f}ms, cost={:.3f}ms.", task->id, nShard,
-             (tpWait - tp) * 1e3, (tpDispatch - tpWait) * 1e3);
+             queueWaitMs, backendSubmitMs);
+    if (queueWaitMs >= kSlowLoadLogThresholdMs ||
+        backendSubmitMs >= kSlowLoadLogThresholdMs) {
+        UC_WARN("Slow Cache load dispatch: device={}, task={}, shards={}, backendSubmits={}, "
+                "queueWait={:.3f}ms, backendSubmit={:.3f}ms.",
+                deviceId_, task->id, nShard, backendSubmitCount, queueWaitMs, backendSubmitMs);
+    }
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_queue_wait_duration_ms"),
-                             (tpWait - tp) * 1e3);
+                             queueWaitMs);
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_backend_submit_duration_ms"),
-                             (tpDispatch - tpWait) * 1e3);
+                             backendSubmitMs);
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_backend_shards_total"),
                              static_cast<double>(backendSubmitCount));
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_shards_total"),
@@ -217,8 +229,14 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
+            const auto h2dSubmitMs = (tpH2dSubmitted - tpBackendReady) * 1e3;
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
-                                     (tpH2dSubmitted - tpBackendReady) * 1e3);
+                                     h2dSubmitMs);
+            if (h2dSubmitMs >= kSlowLoadLogThresholdMs) {
+                UC_WARN("Slow Cache H2D submit: device={}, task={}, shard={}, sdma=true, "
+                        "submit={:.3f}ms.",
+                        deviceId_, task.taskHandle, task.shard.index, h2dSubmitMs);
+            }
             if (!task.waiter) {
                 holder_.push_back(std::move(task));
                 return;
@@ -227,6 +245,10 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             s = stream.Synchronize();
             auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
             RecordH2dSyncMetrics(h2dSyncMs);
+            if (h2dSyncMs >= kSlowLoadLogThresholdMs) {
+                UC_WARN("Slow Cache H2D sync: device={}, task={}, sdma=true, sync={:.3f}ms.",
+                        deviceId_, task.taskHandle, h2dSyncMs);
+            }
             holder_.clear();
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);
@@ -243,8 +265,14 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
+        const auto h2dSubmitMs = (tpH2dSubmitted - tpBackendReady) * 1e3;
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
-                                 (tpH2dSubmitted - tpBackendReady) * 1e3);
+                                 h2dSubmitMs);
+        if (h2dSubmitMs >= kSlowLoadLogThresholdMs) {
+            UC_WARN("Slow Cache H2D submit: device={}, task={}, shard={}, sdma=false, "
+                    "submit={:.3f}ms.",
+                    deviceId_, task.taskHandle, task.shard.index, h2dSubmitMs);
+        }
         if (!task.waiter) {
             holder_.push_back(std::move(task));
             return;
@@ -253,6 +281,10 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         s = stream.Synchronize();
         auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
         RecordH2dSyncMetrics(h2dSyncMs);
+        if (h2dSyncMs >= kSlowLoadLogThresholdMs) {
+            UC_WARN("Slow Cache H2D sync: device={}, task={}, sdma=false, sync={:.3f}ms.",
+                    deviceId_, task.taskHandle, h2dSyncMs);
+        }
         holder_.clear();
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to sync on stream for task({}).", s, task.taskHandle);
@@ -267,8 +299,15 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
 
 Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
 {
+    const auto tpWaitStart = NowTime::Now();
     if (task.backendTaskHandle != 0) {
         auto s = backend_->Wait(task.backendTaskHandle);
+        const auto waitMs = (NowTime::Now() - tpWaitStart) * 1e3;
+        if (waitMs >= kSlowLoadLogThresholdMs) {
+            UC_WARN("Slow Cache owner backend wait: device={}, task={}, backendTask={}, shard={}, "
+                    "wait={:.3f}ms.",
+                    deviceId_, task.taskHandle, task.backendTaskHandle, task.shard.index, waitMs);
+        }
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to wait backend({}) for task({}).", s, task.backendTaskHandle,
                      task.taskHandle);
@@ -282,6 +321,11 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
     while (!task.bufferHandle.Ready()) {
         if (failureSet_->Contains(task.taskHandle)) { return Status::Error(); }
         std::this_thread::yield();
+    }
+    const auto waitMs = (NowTime::Now() - tpWaitStart) * 1e3;
+    if (waitMs >= kSlowLoadLogThresholdMs) {
+        UC_WARN("Slow Cache shared ready wait: device={}, task={}, shard={}, wait={:.3f}ms.",
+                deviceId_, task.taskHandle, task.shard.index, waitMs);
     }
     return Status::OK();
 }
@@ -315,12 +359,21 @@ Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream)
         ClearSdmaDirectHolders();
         return s;
     }
+    const auto h2dSubmitMs = (tpH2dSubmitted - tpH2dSubmitStart) * 1e3;
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
-                             (tpH2dSubmitted - tpH2dSubmitStart) * 1e3);
+                             h2dSubmitMs);
+    if (h2dSubmitMs >= kSlowLoadLogThresholdMs) {
+        UC_WARN("Slow Cache task-level H2D submit: device={}, shards={}, submit={:.3f}ms.",
+                deviceId_, holder_.size(), h2dSubmitMs);
+    }
     auto tpH2dSyncStart = NowTime::Now();
     s = stream.Synchronize();
     auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
     RecordH2dSyncMetrics(h2dSyncMs);
+    if (h2dSyncMs >= kSlowLoadLogThresholdMs) {
+        UC_WARN("Slow Cache task-level H2D sync: device={}, shards={}, sync={:.3f}ms.", deviceId_,
+                holder_.size(), h2dSyncMs);
+    }
     ClearSdmaDirectHolders();
     return s;
 }

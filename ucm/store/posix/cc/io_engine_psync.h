@@ -59,6 +59,12 @@ protected:
             auto bwGbps = cost > 0 ? static_cast<double>(size) / cost / 1e9 : 0.0;
             UC_DEBUG("Posix task({},{},{},{}) finished, cost {:.3f}ms.", id, brief, num, size,
                      costMs);
+            constexpr double slowLoadLogThresholdMs = 500.0;
+            if (!isDump && costMs >= slowLoadLogThresholdMs) {
+                UC_WARN("Slow Posix load task: task={}, brief={}, shards={}, bytes={}, "
+                        "queueAndIo={:.3f}ms.",
+                        id, brief, num, size, costMs);
+            }
             static UC::Metrics::CachedMetric loadDuration{"posix_load_task_duration_ms"};
             static UC::Metrics::CachedMetric dumpDuration{"posix_dump_task_duration_ms"};
             static UC::Metrics::CachedMetric loadBandwidth{"posix_s2h_bandwidth_gbps"};

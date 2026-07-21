@@ -25,8 +25,13 @@
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "posix_file.h"
+#include <unistd.h>
 
 namespace UC::PosixStore {
+
+namespace {
+constexpr double kSlowLoadLogThresholdMs = 500.0;
+}
 
 Status TransQueue::Setup(const Config& config, TaskIdSet* failureSet, const SpaceLayout* layout)
 {
@@ -95,9 +100,14 @@ void TransQueue::LoadWorker(IoUnit& ios)
 {
     if (ios.firstIo) {
         auto wait = NowTime::Now() - ios.waiter->startTp;
-        UC_DEBUG("Posix load task({}) start running, wait {:.3f}ms.", ios.owner, wait * 1e3);
+        const auto waitMs = wait * 1e3;
+        UC_DEBUG("Posix load task({}) start running, wait {:.3f}ms.", ios.owner, waitMs);
+        if (waitMs >= kSlowLoadLogThresholdMs) {
+            UC_WARN("Slow Posix psync queue wait: pid={}, task={}, shard={}, wait={:.3f}ms.",
+                    getpid(), ios.owner, ios.shard.index, waitMs);
+        }
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("posix_load_queue_wait_duration_ms"),
-                                 wait * 1e3);
+                                 waitMs);
     }
     if (failureSet_->Contains(ios.owner)) {
         ios.waiter->Done();
@@ -155,27 +165,53 @@ Status TransQueue::H2S(IoUnit& ios)
 
 Status TransQueue::S2H(IoUnit& ios)
 {
+    const auto tpStart = NowTime::Now();
     const auto& path = layout_->DataFilePath(ios.shard.owner, false);
     PosixFile file{path};
     auto flags = PosixFile::OpenFlag::READ_ONLY;
     if (ioDirect_) { flags |= PosixFile::OpenFlag::DIRECT; }
+    const auto tpOpenStart = NowTime::Now();
     auto s = file.Open(flags);
+    const auto tpOpened = NowTime::Now();
+    const auto openMs = (tpOpened - tpOpenStart) * 1e3;
     if (s.Failure()) [[unlikely]] {
         UC_ERROR("Failed({}) to open file({}) with flags({}).", s, path, flags);
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("posix_open_errors_total"), 1.0);
+        if (openMs >= kSlowLoadLogThresholdMs) {
+            UC_WARN("Slow failed Posix open: pid={}, task={}, shard={}, path={}, direct={}, "
+                    "open={:.3f}ms, status={}.",
+                    getpid(), ios.owner, ios.shard.index, path, ioDirect_, openMs, s);
+        }
         return s;
     }
     auto offset = shardSize_ * ios.shard.index;
+    const auto initialOffset = offset;
+    const auto totalBytes = ioSize_ * ios.shard.addrs.size();
+    const auto tpReadStart = NowTime::Now();
     for (const auto& addr : ios.shard.addrs) {
         s = file.Read(addr, ioSize_, offset);
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to read file({}:{}).", s, path, offset);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("posix_io_errors_total"), 1.0);
-            return s;
+            break;
         }
         offset += ioSize_;
     }
-    return Status::OK();
+    const auto tpReadDone = NowTime::Now();
+    file.Close();
+    const auto tpClosed = NowTime::Now();
+    const auto readMs = (tpReadDone - tpReadStart) * 1e3;
+    const auto closeMs = (tpClosed - tpReadDone) * 1e3;
+    const auto totalMs = (tpClosed - tpStart) * 1e3;
+    if (openMs >= kSlowLoadLogThresholdMs || readMs >= kSlowLoadLogThresholdMs ||
+        closeMs >= kSlowLoadLogThresholdMs || totalMs >= kSlowLoadLogThresholdMs) {
+        UC_WARN("Slow Posix S2H: pid={}, task={}, shard={}, path={}, direct={}, bytes={}, "
+                "offset={}, open={:.3f}ms, pread={:.3f}ms, close={:.3f}ms, total={:.3f}ms, "
+                "status={}.",
+                getpid(), ios.owner, ios.shard.index, path, ioDirect_, totalBytes, initialOffset,
+                openMs, readMs, closeMs, totalMs, s);
+    }
+    return s;
 }
 
 }  // namespace UC::PosixStore

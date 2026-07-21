@@ -64,6 +64,12 @@ protected:
             auto bwGbps = cost > 0 ? static_cast<double>(size) / cost / 1e9 : 0.0;
             UC_DEBUG("Cache task({},{},{},{}) finished, cost {:.3f}ms.", id, brief, num, size,
                      costMs);
+            constexpr double slowLoadLogThresholdMs = 500.0;
+            if (isLoad && costMs >= slowLoadLogThresholdMs) {
+                UC_WARN("Slow Cache load task: task={}, brief={}, shards={}, bytes={}, "
+                        "endToEnd={:.3f}ms.",
+                        id, brief, num, size, costMs);
+            }
             if (isLoad) {
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_duration_ms"), costMs);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_bandwidth_gbps"), bwGbps);
