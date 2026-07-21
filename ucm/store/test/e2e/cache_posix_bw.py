@@ -69,8 +69,18 @@ storage_backends = ["./build/data"]
 posix_io_engine = "psync"
 # Data-transfer concurrency used by the psync I/O engine.
 posix_data_trans_concurrency = 128
-# Bind each worker, CacheStore, and PosixStore to disjoint NUMA-local CPU cores.
+# Enable NUMA-local CPU affinity. The three options below define the experiment:
+#   half + shared: develop behavior; worker and UCM each use half of the pool.
+#   half + split: worker uses half; Cache/Posix split the UCM half by ratio.
+#   all_ucm + shared: worker and both stores share the full pool.
+#   all_ucm + split: worker uses the full pool; Cache/Posix split that same pool.
 worker_cpu_affinity_enable = False
+# Worker/UCM allocation mode: half or all_ucm.
+worker_ucm_affinity_mode = "half"
+# Cache/Posix allocation mode: shared or split.
+cache_posix_affinity_mode = "shared"
+# Fraction of UCM cores assigned to CacheStore in split mode. Posix gets the rest.
+cache_cpu_affinity_ratio = 0.25
 
 # MLA writes once from worker 0 and all workers load the same block ids, while
 # GQA workers use their own block ids. GLM and MiniMax support layerwise and
@@ -339,12 +349,37 @@ def get_fallback_numa_cpu_pools(available_cpu_cores):
 
 def make_cpu_affinity_core_groups():
     if not worker_cpu_affinity_enable:
-        empty_groups = [[] for _ in range(worker_number)]
-        return empty_groups, empty_groups, empty_groups
+        return (
+            [[] for _ in range(worker_number)],
+            [[] for _ in range(worker_number)],
+            [[] for _ in range(worker_number)],
+        )
+    if worker_ucm_affinity_mode not in ("half", "all_ucm"):
+        raise ValueError(
+            f"unsupported worker_ucm_affinity_mode "
+            f"{worker_ucm_affinity_mode!r}; choose half or all_ucm"
+        )
+    if cache_posix_affinity_mode not in ("shared", "split"):
+        raise ValueError(
+            f"unsupported cache_posix_affinity_mode "
+            f"{cache_posix_affinity_mode!r}; choose shared or split"
+        )
+    if cache_posix_affinity_mode == "split" and not 0 < cache_cpu_affinity_ratio < 1:
+        raise ValueError(
+            f"cache_cpu_affinity_ratio must be between 0 and 1, got "
+            f"{cache_cpu_affinity_ratio}"
+        )
+
+    ucm_minimum = 2 if cache_posix_affinity_mode == "split" else 1
+    worker_minimum = 1 if worker_ucm_affinity_mode == "half" else 0
+    minimum_cpu_number = worker_minimum + ucm_minimum
     available_cpu_cores = sorted(os.sched_getaffinity(0))
-    if len(available_cpu_cores) < worker_number * 3:
+    if len(available_cpu_cores) < worker_number * minimum_cpu_number:
         raise RuntimeError(
-            f"NUMA-aware affinity requires at least three CPU cores per worker: "
+            f"NUMA-aware affinity requires at least {minimum_cpu_number} CPU "
+            f"cores per worker for worker_ucm_affinity_mode="
+            f"{worker_ucm_affinity_mode} and cache_posix_affinity_mode="
+            f"{cache_posix_affinity_mode}: "
             f"worker_number={worker_number}, available={len(available_cpu_cores)}"
         )
     npu_ids = get_visible_npu_ids()
@@ -365,10 +400,11 @@ def make_cpu_affinity_core_groups():
     for cpu_pool, worker_ids in grouped_worker_ids.items():
         per_worker_pools = split_cpu_cores(list(cpu_pool), len(worker_ids))
         for worker_id, per_worker_pool in zip(worker_ids, per_worker_pools):
-            if len(per_worker_pool) < 3:
+            if len(per_worker_pool) < minimum_cpu_number:
                 raise RuntimeError(
-                    f"NPU {npu_ids[worker_id]} has fewer than three available "
-                    f"CPU cores: {per_worker_pool}"
+                    f"NPU {npu_ids[worker_id]} requires at least "
+                    f"{minimum_cpu_number} available CPU cores for the selected "
+                    f"affinity modes: {per_worker_pool}"
                 )
             overlap = assigned_cpu_cores.intersection(per_worker_pool)
             if overlap:
@@ -377,15 +413,35 @@ def make_cpu_affinity_core_groups():
                     f"{worker_id}: {sorted(overlap)}"
                 )
             assigned_cpu_cores.update(per_worker_pool)
-            middle = max(1, len(per_worker_pool) // 2)
-            worker_cpu_core_groups[worker_id] = per_worker_pool[:middle]
-            store_cpu_cores = per_worker_pool[middle:]
-            posix_cpu_cores, cache_cpu_cores = split_cpu_cores(store_cpu_cores, 2)
+            if worker_ucm_affinity_mode == "half":
+                middle = max(1, len(per_worker_pool) // 2)
+                worker_cpu_cores = per_worker_pool[:middle]
+                ucm_cpu_cores = per_worker_pool[middle:]
+            else:
+                worker_cpu_cores = per_worker_pool
+                ucm_cpu_cores = per_worker_pool
+
+            if cache_posix_affinity_mode == "shared":
+                cache_cpu_cores = ucm_cpu_cores
+                posix_cpu_cores = ucm_cpu_cores
+            else:
+                cache_cpu_number = int(
+                    len(ucm_cpu_cores) * cache_cpu_affinity_ratio + 0.5
+                )
+                cache_cpu_number = max(1, min(len(ucm_cpu_cores) - 1, cache_cpu_number))
+                posix_cpu_number = len(ucm_cpu_cores) - cache_cpu_number
+                posix_cpu_cores = ucm_cpu_cores[:posix_cpu_number]
+                cache_cpu_cores = ucm_cpu_cores[posix_cpu_number:]
+
+            worker_cpu_core_groups[worker_id] = worker_cpu_cores
             posix_cpu_core_groups[worker_id] = posix_cpu_cores
             cache_cpu_core_groups[worker_id] = cache_cpu_cores
             print(
                 f"CPU affinity plan: source={affinity_source}, "
                 f"worker={worker_id}, npu={npu_ids[worker_id]}, "
+                f"worker_ucm_mode={worker_ucm_affinity_mode}, "
+                f"cache_posix_mode={cache_posix_affinity_mode}, "
+                f"cache_ratio={cache_cpu_affinity_ratio}, "
                 f"worker_cores={worker_cpu_core_groups[worker_id]}, "
                 f"cache_cores={cache_cpu_core_groups[worker_id]}, "
                 f"posix_cores={posix_cpu_core_groups[worker_id]}"
@@ -419,6 +475,19 @@ def configure_ucm_logging():
     os.environ["UC_LOGGER_LEVEL"] = "info"
 
 
+def apply_store_cpu_affinity(
+    config, cache_cpu_affinity_cores, posix_cpu_affinity_cores
+):
+    if cache_posix_affinity_mode == "shared":
+        if cache_cpu_affinity_cores:
+            config["cpu_affinity_cores"] = cache_cpu_affinity_cores
+        return
+    if cache_cpu_affinity_cores:
+        config["cache_cpu_affinity_cores"] = cache_cpu_affinity_cores
+    if posix_cpu_affinity_cores:
+        config["posix_cpu_affinity_cores"] = posix_cpu_affinity_cores
+
+
 def create_cache_worker(
     pipeline_store_cls,
     unique_id: str,
@@ -445,10 +514,7 @@ def create_cache_worker(
     config["cache_sdma_direct_launch_granularity"] = "shard"
     config["timeout_ms"] = 30000
     config["device_id"] = device_id
-    if cache_cpu_affinity_cores:
-        config["cache_cpu_affinity_cores"] = cache_cpu_affinity_cores
-    if posix_cpu_affinity_cores:
-        config["posix_cpu_affinity_cores"] = posix_cpu_affinity_cores
+    apply_store_cpu_affinity(config, cache_cpu_affinity_cores, posix_cpu_affinity_cores)
     return pipeline_store_cls(config)
 
 
@@ -476,10 +542,7 @@ def create_cache_scheduler(
     config["cache_sdma_direct_launch_granularity"] = "shard"
     config["timeout_ms"] = 30000
     config["device_id"] = -1
-    if cache_cpu_affinity_cores:
-        config["cache_cpu_affinity_cores"] = cache_cpu_affinity_cores
-    if posix_cpu_affinity_cores:
-        config["posix_cpu_affinity_cores"] = posix_cpu_affinity_cores
+    apply_store_cpu_affinity(config, cache_cpu_affinity_cores, posix_cpu_affinity_cores)
     return pipeline_store_cls(config)
 
 
@@ -679,6 +742,9 @@ def worker_loop(
         f"posix_data_trans_concurrency={posix_data_trans_concurrency}, "
         f"cache_sdma_direct={cache_sdma_direct}, "
         f"worker_cpu_affinity_enable={worker_cpu_affinity_enable}, "
+        f"worker_ucm_affinity_mode={worker_ucm_affinity_mode}, "
+        f"cache_posix_affinity_mode={cache_posix_affinity_mode}, "
+        f"cache_cpu_affinity_ratio={cache_cpu_affinity_ratio}, "
         f"worker_cpu_affinity_cores={worker_cpu_affinity_cores}, "
         f"cache_cpu_affinity_cores={cache_cpu_affinity_cores}, "
         f"posix_cpu_affinity_cores={posix_cpu_affinity_cores}, "
