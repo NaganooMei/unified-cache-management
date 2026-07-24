@@ -11,7 +11,7 @@
 namespace UC::Trans {
 
 namespace {
-constexpr size_t kSdmaDirectLaneNumber = 1;
+constexpr size_t kSdmaDirectLaneNumber = 4;
 constexpr uint16_t kSdmaDirectMaxReadyLanes = 8;
 }  // namespace
 
