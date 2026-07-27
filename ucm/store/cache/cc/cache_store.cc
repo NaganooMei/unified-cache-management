@@ -21,7 +21,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include "buffer_manager.h"
 #include "logger/logger.h"
@@ -32,6 +34,10 @@
 #define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
 #endif
 
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#include "trans/ascend/sdma_direct/ascend_sdma_direct_copier.h"
+#endif
+
 namespace UC::CacheStore {
 
 class CacheStore : public StoreV1 {
@@ -39,6 +45,12 @@ class CacheStore : public StoreV1 {
     bool transEnable_{false};
     TransManager transMgr_;
     std::unique_ptr<Trans::GdrKVBufferConfig> gpuKvBufferRegistrations_{nullptr};
+    bool cacheTpBroadcastScatter_{false};
+    std::vector<size_t> tensorSizes_{};
+    std::mutex scatterMutex_{};
+#if UCM_RUNTIME_ASCEND_SDMA_DIRECT
+    std::unique_ptr<Trans::AscendSdmaDirectCopier> scatterCopier_{nullptr};
+#endif
 
 public:
     Status Setup(const Detail::Dictionary& inConfig) override
@@ -68,6 +80,8 @@ public:
             s = transMgr_.Setup(config, bufferMgr_.GetTransBuffer());
             if (s.Failure()) [[unlikely]] { return s; }
         }
+        cacheTpBroadcastScatter_ = config.cacheTpBroadcastScatter;
+        tensorSizes_ = config.tensorSizes;
         ShowConfig(config);
         return Status::OK();
     }
@@ -118,6 +132,51 @@ public:
         if (s.Failure()) [[unlikely]] { UC_ERROR("Failed({}) to wait task({}).", s, taskId); }
         return s;
     }
+    Status ScatterFromContiguous(const void* source, const size_t* sourceOffsets,
+                                 void* const* destinationAddrs, size_t rows, size_t cols)
+    {
+        if (!cacheTpBroadcastScatter_) {
+            return Status::InvalidParam("Cache TP broadcast scatter is not enabled");
+        }
+        if (source == nullptr || sourceOffsets == nullptr || destinationAddrs == nullptr) {
+            return Status::InvalidParam("invalid Cache TP broadcast scatter pointers");
+        }
+        if (rows == 0 || cols != tensorSizes_.size()) {
+            return Status::InvalidParam("invalid Cache TP broadcast scatter shape({},{})", rows,
+                                        cols);
+        }
+#if !UCM_RUNTIME_ASCEND_SDMA_DIRECT
+        return Status::Unsupported();
+#else
+        std::vector<size_t> offsets(sourceOffsets, sourceOffsets + rows);
+        std::vector<void**> destinations;
+        destinations.reserve(rows);
+        for (size_t i = 0; i < rows; ++i) {
+            destinations.push_back(const_cast<void**>(destinationAddrs + i * cols));
+        }
+
+        std::lock_guard<std::mutex> lock(scatterMutex_);
+        if (!scatterCopier_) {
+            scatterCopier_ = std::make_unique<Trans::AscendSdmaDirectCopier>();
+            auto s = scatterCopier_->Setup();
+            if (s.Failure()) [[unlikely]] {
+                scatterCopier_.reset();
+                UC_ERROR("Failed({}) to setup TP broadcast scatter copier.", s);
+                return s;
+            }
+        }
+        auto s = scatterCopier_->SubmitScatterTask(source, offsets, destinations, tensorSizes_);
+        if (s.Failure()) [[unlikely]] {
+            UC_ERROR("Failed({}) to submit TP broadcast scatter({}x{}).", s, rows, cols);
+            return s;
+        }
+        s = scatterCopier_->Synchronize();
+        if (s.Failure()) [[unlikely]] {
+            UC_ERROR("Failed({}) to synchronize TP broadcast scatter({}x{}).", s, rows, cols);
+        }
+        return s;
+#endif
+    }
 
 private:
     Config ParseConfig(const Detail::Dictionary& config)
@@ -154,6 +213,7 @@ private:
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
         config.Get("cache_sdma_direct_launch_granularity", param.sdmaDirectLaunchGranularity);
+        config.Get("cache_tp_broadcast_scatter", param.cacheTpBroadcastScatter);
         return param;
     }
     Status CheckSizeConfig(const Config& config)
@@ -189,10 +249,13 @@ private:
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
 #if !UCM_RUNTIME_ASCEND_SDMA_DIRECT
-        if (config.cacheSdmaDirect) {
+        if (config.cacheSdmaDirect || config.cacheTpBroadcastScatter) {
             return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
         }
 #endif
+        if (config.cacheTpBroadcastScatter && !config.cacheSdmaDirect) {
+            return Status::InvalidParam("Cache TP broadcast scatter requires Cache SDMA Direct");
+        }
         if (config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchShard &&
             config.sdmaDirectLaunchGranularity != kSdmaDirectLaunchTask) {
             return Status::InvalidParam("invalid Cache SDMA Direct launch granularity({})",
@@ -243,6 +306,8 @@ private:
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
         UC_INFO("Set {}::SdmaDirectLaunchGranularity to {}.", ns,
                 config.sdmaDirectLaunchGranularity);
+        UC_INFO("Set {}::CacheTpBroadcastScatter to {}.", ns,
+                config.cacheTpBroadcastScatter);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);
@@ -252,3 +317,15 @@ private:
 }  // namespace UC::CacheStore
 
 extern "C" UC::StoreV1* MakeCacheStore() { return new UC::CacheStore::CacheStore(); }
+
+extern "C" UC::Status UcmCacheStoreScatterFromContiguousV1(
+    UC::StoreV1* store, uintptr_t sourceAddr, const size_t* sourceOffsets,
+    void* const* destinationAddrs, size_t rows, size_t cols)
+{
+    if (store == nullptr || sourceAddr == 0) {
+        return UC::Status::InvalidParam("invalid CacheStore scatter input");
+    }
+    auto* cacheStore = static_cast<UC::CacheStore::CacheStore*>(store);
+    return cacheStore->ScatterFromContiguous(reinterpret_cast<const void*>(sourceAddr),
+                                             sourceOffsets, destinationAddrs, rows, cols);
+}

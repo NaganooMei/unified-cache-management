@@ -97,6 +97,23 @@ Status AscendSdmaDirectCopier::SubmitDumpTask(const std::vector<void**>& devices
     return LaunchSpecs(std::move(specs), NextLane());
 }
 
+Status AscendSdmaDirectCopier::SubmitScatterTask(
+    const void* deviceSource, const std::vector<size_t>& sourceOffsets,
+    const std::vector<void**>& devices, const std::vector<size_t>& sizes)
+{
+    if (deviceSource == nullptr || sourceOffsets.size() != devices.size()) {
+        return Status::InvalidParam("invalid Cache SDMA Direct D2D scatter inputs");
+    }
+    std::vector<AscendFftsCopySpec> specs;
+    specs.reserve(devices.size() * sizes.size());
+    auto* source = static_cast<const std::byte*>(deviceSource);
+    for (size_t i = 0; i < devices.size(); ++i) {
+        auto s = BuildDeviceToDeviceSpecs(source + sourceOffsets[i], devices[i], sizes, specs);
+        if (s.Failure()) { return s; }
+    }
+    return LaunchSpecs(std::move(specs), NextLane());
+}
+
 Status AscendSdmaDirectCopier::Synchronize()
 {
     if (!setup_) { return Status::OK(); }
@@ -159,6 +176,27 @@ Status AscendSdmaDirectCopier::BuildDeviceToHostSpecs(void** devices, void* host
         if (sizes[i] != 0 && devices[i] != nullptr) {
             auto* dst = static_cast<std::byte*>(hostDevicePtr) + offset;
             specs.push_back({dst, devices[i], sizes[i]});
+        }
+        offset += sizes[i];
+    }
+    return Status::OK();
+}
+
+Status AscendSdmaDirectCopier::BuildDeviceToDeviceSpecs(
+    const void* deviceSource, void** devices, const std::vector<size_t>& sizes,
+    std::vector<AscendFftsCopySpec>& specs) const
+{
+    if (!setup_) { return Status::Error("Cache SDMA Direct copier is not setup"); }
+    if (deviceSource == nullptr || devices == nullptr) {
+        return Status::InvalidParam("invalid Cache SDMA Direct D2D pointers");
+    }
+
+    specs.reserve(specs.size() + sizes.size());
+    auto* source = static_cast<const std::byte*>(deviceSource);
+    size_t offset = 0;
+    for (size_t i = 0; i < sizes.size(); ++i) {
+        if (sizes[i] != 0 && devices[i] != nullptr) {
+            specs.push_back({devices[i], source + offset, sizes[i]});
         }
         offset += sizes[i];
     }

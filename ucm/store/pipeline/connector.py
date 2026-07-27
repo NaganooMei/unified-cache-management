@@ -174,6 +174,25 @@ class UcmPipelineStore(UcmKVStoreBaseV1):
         task_id = self.store_.Dump(ids, indexes, addrs, prerequisite_handle)
         return UcmPipelineStoreTransTask(task_id)
 
+    def scatter_from_contiguous(
+        self,
+        source_addr: int,
+        source_offsets: List[int] | np.ndarray,
+        destination_addrs: List[List[int]] | np.ndarray,
+    ) -> None:
+        offsets = np.ascontiguousarray(source_offsets, dtype=np.uint64)
+        addrs = np.ascontiguousarray(destination_addrs, dtype=np.uint64)
+        if offsets.ndim != 1:
+            raise ValueError(f"source_offsets must be 1D, got shape={offsets.shape}")
+        if addrs.ndim != 2:
+            raise ValueError(f"destination_addrs must be 2D, got shape={addrs.shape}")
+        if offsets.shape[0] != addrs.shape[0]:
+            raise ValueError(
+                "scatter row mismatch: "
+                f"offsets={offsets.shape[0]}, addrs={addrs.shape[0]}"
+            )
+        self.store_.ScatterFromContiguous(int(source_addr), offsets, addrs)
+
     def wait(self, task: Task) -> None:
         return self.store_.Wait(task.task_id)
 

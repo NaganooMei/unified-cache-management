@@ -177,26 +177,40 @@ classDiagram
     }
 
     class PipelineStore {
+        -cacheStore
+        -cacheScatterFn
+        +Stack()
         +Load()
         +Wait()
         +ScatterFromContiguous()
+    }
+
+    class LibraryLoader {
+        +LoadLibrary()
+        +CreateObject()
+        +FindOptionalSymbol()
+    }
+
+    class CacheStoreExtensionV1 {
+        <<C ABI>>
+        +UcmCacheStoreScatterFromContiguousV1()
     }
 
     class StoreV1 {
         <<interface>>
         +Load()
         +Wait()
-        +ScatterFromContiguous()
     }
 
     class HealthBreakerStore {
-        +ScatterFromContiguous()
+        +Load()
+        +Wait()
     }
 
     class CacheStore {
         +Load()
         +ScatterFromContiguous()
-        -scatterStream
+        -scatterCopier
     }
 
     class TransManager {
@@ -210,20 +224,17 @@ classDiagram
 
     class CopyStream {
         +HostToDeviceAsync()
-        +DeviceToDeviceAsync()
         +Synchronize()
     }
 
     class Stream {
         <<interface>>
         +HostToDeviceAsync()
-        +DeviceToDeviceAsync()
         +Synchronized()
     }
 
     class AscendSdmaDirectStream {
         +HostToDeviceAsync()
-        +DeviceToDeviceAsync()
     }
 
     class AscendSdmaDirectCopier {
@@ -243,17 +254,21 @@ classDiagram
     UCMLayerWiseConnector --> GroupCoordinator : HCCL broadcast
     UCMLayerWiseConnector --> UcmPipelineStore : load and scatter
     UcmPipelineStore --> PipelineStore : pybind
-    PipelineStore --> StoreV1
+    PipelineStore --> StoreV1 : regular Load and Wait
+    PipelineStore --> LibraryLoader
+    LibraryLoader --> CacheStoreExtensionV1 : dlsym optional symbol
+    PipelineStore --> CacheStoreExtensionV1 : cached function pointer
+    CacheStoreExtensionV1 --> CacheStore : direct extension call
     StoreV1 <|-- CacheStore
     StoreV1 <|-- HealthBreakerStore
-    HealthBreakerStore o-- StoreV1 : forwards
+    HealthBreakerStore o-- StoreV1 : regular operation wrapper
     CacheStore --> TransManager : root load
     TransManager --> LoadQueue
     LoadQueue --> CopyStream : H2D
-    CacheStore --> CopyStream : D2D scatter
     CopyStream --> Stream
     Stream <|-- AscendSdmaDirectStream
     AscendSdmaDirectStream --> AscendSdmaDirectCopier
+    CacheStore --> AscendSdmaDirectCopier : dedicated D2D scatter
     AscendSdmaDirectCopier --> FftsSdmaDispatcher
 ```
 
@@ -262,9 +277,12 @@ classDiagram
 - `UCMLayerWiseConnector`：决定 Root、构造连续 Buffer 地址、调用 HCCL、触发 Scatter。
 - `GroupCoordinator`：复用 vLLM 已建立的 TP Process Group；Ascend 后端实际执行 HCCL Broadcast。
 - `UcmPipelineStore` 和 `PipelineStore`：提供 Python 到 C++ 的薄封装，不处理数据拷贝。
-- `StoreV1`：增加通用 Scatter 能力入口；默认实现返回 Unsupported。
-- `HealthBreakerStore`：透明转发 Scatter，保证启用健康检查时接口仍能到达 CacheStore。
-- `CacheStore`：校验 Scatter 参数，调用专用 SDMA Direct CopyStream，并在返回前完成同步。
+- `StoreV1`：保持现有接口不变，Load、Wait 等普通 Store 操作继续通过它调用。
+- `LibraryLoader`：除现有 Store Factory 外，增加可选符号查询能力。
+- `CacheStoreExtensionV1`：由 `libcachestore.so` 导出的可选 C ABI；只承载 CacheStore 特有的 Scatter。
+- `PipelineStore`：在加载 CacheStore 时保存真实 CacheStore 指针和 Scatter 函数指针，不依赖基类虚函数。
+- `HealthBreakerStore`：保持不变，只包装普通 Store 操作；本地 HBM D2D Scatter 不经过健康熔断层。
+- `CacheStore`：校验 Scatter 参数，调用专用 `AscendSdmaDirectCopier`，并在返回前完成同步。
 - `AscendSdmaDirectCopier`：将连续源地址和离散 KV 目标地址转换为 FFTS D2D Copy Specs。
 - `FftsSdmaDispatcher`：构建并提交真正的 D2D Scatter 任务。
 
@@ -331,50 +349,74 @@ store.scatter_from_contiguous(
 
 该接口为同步接口。返回成功时，本卡真实 KV Tensor 已经可以被后续 Forward 使用。
 
-### 6.4 StoreV1 Scatter 描述
+### 6.4 CacheStore 可选扩展接口
 
-建议新增独立描述结构，避免把 Broadcast/Scatter 语义塞入普通 Load Task：
+Scatter 不加入 `StoreV1`，也不要求 PosixStore、Ds3fsStore、EmptyStore、HealthBreakerStore 等其他实现增加无关接口。
+
+`libcachestore.so` 单独导出带版本号的可选 C ABI：
 
 ```cpp
-struct ScatterShard {
-    size_t sourceOffset;
-    std::vector<void*> destinationAddrs;
-};
-
-struct ScatterDesc {
-    const void* source;
-    std::vector<ScatterShard> shards;
-};
+extern "C" Status UcmCacheStoreScatterFromContiguousV1(
+    StoreV1* cacheStore,
+    uintptr_t sourceAddr,
+    const size_t* sourceOffsets,
+    void* const* destinationAddrs,
+    size_t rows,
+    size_t cols);
 ```
 
-Store 接口：
+对应的函数指针类型由 PipelineStore 持有：
 
 ```cpp
-virtual Status ScatterFromContiguous(ScatterDesc desc);
+using CacheScatterFn = Status (*)(
+    StoreV1* cacheStore,
+    uintptr_t sourceAddr,
+    const size_t* sourceOffsets,
+    void* const* destinationAddrs,
+    size_t rows,
+    size_t cols);
+```
+
+这里的 `StoreV1*` 只是现有 Factory 返回的对象指针类型，不增加虚函数，也不通过该指针调用 Scatter。扩展函数位于 CacheStore 动态库内部，可以安全地把该指针还原为实际 CacheStore 对象并调用其内部方法。
+
+`LibraryLoader` 增加通用的可选符号查询：
+
+```cpp
+template <class Function>
+Function FindOptionalSymbol(const char* name) const;
+```
+
+当 `PipelineStore::Stack` 加载名为 `Cache` 的 Store 时：
+
+1. 通过现有 Factory 创建 CacheStore 对象。
+2. 在 HealthBreaker 包装之前保存真实 CacheStore 指针。
+3. 从同一个动态库解析 `UcmCacheStoreScatterFromContiguousV1`。
+4. 将对象指针和函数指针保存在 PipelineStore 中。
+5. 如果配置启用了 Broadcast，但扩展符号不存在，则初始化直接失败。
+
+PipelineStore 新增的 pybind 方法只负责解析 NumPy Buffer 并调用缓存的函数指针：
+
+```cpp
+void PipelineStore::ScatterFromContiguous(
+    uintptr_t sourceAddr,
+    const pybind11::buffer& sourceOffsets,
+    const pybind11::buffer& destinationAddrs);
 ```
 
 接口约束：
 
-- `source` 必须是当前 Device 上的有效地址；
-- 每个 `destinationAddrs` 的数量必须与 CacheStore 的 `tensor_size_list` 一致；
-- 源偏移和每个 Tensor 的 Size 都以字节为单位；
-- CacheStore 以同步方式完成 Scatter；
-- 非 CacheStore 实现默认返回 Unsupported；
-- HealthBreakerStore 直接转发给被包装的 Store。
+- `sourceAddr` 必须是当前 Device 上的连续 Buffer 地址；
+- `sourceOffsets` 行数必须与 `destinationAddrs` 行数一致；
+- `destinationAddrs` 列数必须与 CacheStore 的 `tensor_size_list` 一致；
+- NumPy 地址数组在同步调用返回前保持有效；
+- CacheStore 完成 FFTS Scatter 和 Stream 同步后才返回；
+- `stores_` 保证真实 CacheStore 对象存活，`loaders_` 保证动态库及函数指针持续有效。
+
+HealthBreaker 只保护 Backend/Cache Load、Dump、Wait 等 Store 操作。Scatter 是 Load 成功和 HCCL 完成之后的本卡 HBM D2D 搬运，因此直接调用真实 CacheStore 扩展，不经过 HealthBreaker，也不改变其基类接口。
 
 ### 6.5 SDMA Direct D2D 接口
 
-`CopyStream` 和 `Stream` 增加 D2D Scatter 入口：
-
-```cpp
-Status DeviceToDeviceAsync(
-    const void* source,
-    const std::vector<size_t>& sourceOffsets,
-    const std::vector<void**>& destinations,
-    const std::vector<size_t>& tensorSizes);
-```
-
-`AscendSdmaDirectCopier` 增加：
+不修改通用 `Stream` 或 `CopyStream` 接口。CacheStore 为 Broadcast Scatter 单独持有一个 `AscendSdmaDirectCopier`，并新增：
 
 ```cpp
 Status SubmitScatterTask(
@@ -383,6 +425,8 @@ Status SubmitScatterTask(
     const std::vector<void**>& destinations,
     const std::vector<size_t>& tensorSizes);
 ```
+
+Scatter Copier 在第一次 Scatter 调用时懒初始化。这样 `sdma16worker` 基线阶段仍然只创建和使用原有 4 条 SDMA Direct lane，不会因为启用对比功能而提前多占一组 Scatter Stream；首次初始化成本由 Broadcast warmup 吸收。
 
 对第 `i` 个 Block、第 `j` 个 Tensor，FFTS Copy Spec 为：
 
@@ -397,6 +441,63 @@ copy bytes = tensorSizes[j]
 当前 SDMA 4-stream 分支中的四条 lane 用于不同提交之间的轮转；单个聚合 Scatter Task 由一条 lane 提交，其内部并行度由 FFTS Ready Context 控制。第一版不额外把一个 Layer Scatter 强制拆成四个任务，避免增加同步与 Launch 开销。
 
 ## 7. 调用与同步顺序
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R0 as R0 UCMLayerWiseConnector
+    participant P0 as R0 PipelineStore
+    participant C0 as R0 CacheStore
+    participant SHM as Shared Host Buffer
+    participant HCCL as HCCL TP16 Group
+    participant RX as R1...R15 Connector
+    participant PX as R1...R15 PipelineStore
+    participant CX as R1...R15 CacheStore
+    participant F0 as R0 FFTS SDMA
+    participant FX as R1...R15 FFTS SDMA
+    participant KV as Per-rank KV Tensor
+
+    Note over R0,RX: start_load_kv：所有 rank 使用相同请求和 Block 元数据
+    R0->>R0: 申请或复用连续 Buffer<br/>构造 Block/Tensor 切片地址
+    R0->>P0: load_data(block_ids, shard_indices, buffer_addrs)
+    P0->>C0: StoreV1::Load
+    C0->>SHM: 获取共享 Host Buffer 数据
+    C0-->>P0: 返回异步 Load Task
+    P0-->>R0: 保存 Root Load Task
+    RX->>RX: 申请同尺寸连续 Buffer<br/>保存真实 KV 目标地址
+    Note over RX: 非 Root 不调用 UCM Load
+
+    Note over R0,RX: wait_for_layer_load：进入当前层使用前的同步点
+    R0->>P0: Wait(root_load_task)
+    P0->>C0: StoreV1::Wait
+    C0->>C0: 等待 4-lane SDMA Direct H2D 完成<br/>Shared Host -> R0 连续 Buffer
+    C0-->>R0: Root Payload Ready
+
+    R0->>HCCL: broadcast(status, src=0)<br/>broadcast(payload, src=0)
+    RX->>HCCL: 参与相同顺序的 collective
+    HCCL-->>R0: R0 Buffer Ready
+    HCCL-->>RX: R1...R15 Buffer Ready
+    Note over R0,RX: Broadcast Stream synchronize
+
+    par Root 本地 Scatter
+        R0->>P0: ScatterFromContiguous(source, offsets, kv_addrs)
+        Note over P0: 调用加载 CacheStore 时缓存的<br/>cacheScatterFn(rawCacheStore)
+        P0->>C0: UcmCacheStoreScatterFromContiguousV1
+        C0->>F0: BuildCopies + Launch
+        F0->>KV: R0 Buffer -> R0 KV Tensor
+        F0-->>R0: Scatter Stream synchronized
+    and 非 Root 本地 Scatter
+        RX->>PX: ScatterFromContiguous(source, offsets, kv_addrs)
+        Note over PX: 不经过 StoreV1 和 HealthBreaker
+        PX->>CX: UcmCacheStoreScatterFromContiguousV1
+        CX->>FX: BuildCopies + Launch
+        FX->>KV: 各卡 Buffer -> 各卡 KV Tensor
+        FX-->>RX: Scatter Stream synchronized
+    end
+
+    R0->>P0: 异步提交下一层 Root Load
+    Note over R0,RX: 当前层 KV Ready，wait_for_layer_load 返回并进入 Forward
+```
 
 每层执行顺序固定如下：
 
@@ -418,6 +519,19 @@ copy bytes = tensorSizes[j]
 ## 8. A/B 对比与指标
 
 在同一个 SDMA 4-stream 分支、相同模型、相同 Block 数量和相同 TP16 拓扑下，仅切换 `enable_tp_broadcast_load`：
+
+第一版先在 `cache_fake_bw.py` 中直接验证数据面，不接入 vLLM Connector 生产流程。脚本一次启动 16 个 Worker，并顺序执行：
+
+```python
+load_benchmark_modes = ("sdma16worker", "broadcast16worker")
+cache_sdma_direct = True
+```
+
+- `sdma16worker`：16 个 Worker 同时调用普通 CacheStore Load。
+- `broadcast16worker`：只有 rank 0 Load 到连续 Buffer，TP16 执行 HCCL Broadcast，随后每个 rank 调用 CacheStore Scatter 扩展。
+- 两种模式使用相同的 Block ID、Tensor Size、Worker、共享内存和 SDMA 4-lane 配置。
+- Scatter Copier 在首次 Broadcast warmup 时初始化，避免影响先执行的 SDMA 基线。
+- 首个 Broadcast warmup 会抽样检查 HCCL Payload，并逐 Tensor 检查 Scatter 结果。
 
 | 模式 | Root H2D | 非 Root H2D | 卡间通信 | KV 写入 |
 | --- | --- | --- | --- | --- |
@@ -451,6 +565,7 @@ Root H2D 时间 + HCCL Broadcast 时间 + FFTS Scatter 时间
 - 单个 PP Stage 内的 TP Group Broadcast；
 - Root 连续 Buffer Load；
 - HCCL Broadcast；
+- CacheStore 动态库可选 Scatter 扩展，`StoreV1` 和 HealthBreaker 接口保持不变；
 - C++ FFTS SDMA D2D Scatter；
 - 同步正确性路径和分段性能指标。
 
@@ -461,6 +576,7 @@ Root H2D 时间 + HCCL Broadcast 时间 + FFTS Scatter 时间
 - 非 Layerwise 模式；
 - 跨 DP Group 或跨 PP Stage Broadcast；
 - Python `torch.stack`、`copy_`、`foreach_copy_` 数据搬运；
+- 向 `StoreV1` 增加 Scatter 虚函数；
 - Root KV Tensor 到连续 Buffer 的额外 Gather；
 - HCCL Communicator 的 C++ 生命周期管理；
 - H2D、HCCL、Scatter、Forward 的全异步 Event Pipeline。

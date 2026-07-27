@@ -42,6 +42,9 @@ public:
     Status SubmitDumpTask(const std::vector<void**>& devices,
                           const std::vector<void*>& hostDevicePtrs,
                           const std::vector<size_t>& sizes);
+    Status SubmitScatterTask(const void* deviceSource, const std::vector<size_t>& sourceOffsets,
+                             const std::vector<void**>& devices,
+                             const std::vector<size_t>& sizes);
     Status Synchronize();
 
 private:
@@ -52,6 +55,9 @@ private:
     Status BuildDeviceToHostSpecs(void** devices, void* hostDevicePtr,
                                   const std::vector<size_t>& sizes,
                                   std::vector<AscendFftsCopySpec>& specs) const;
+    Status BuildDeviceToDeviceSpecs(const void* deviceSource, void** devices,
+                                    const std::vector<size_t>& sizes,
+                                    std::vector<AscendFftsCopySpec>& specs) const;
     Status LaunchSpecs(std::vector<AscendFftsCopySpec>&& specs, Lane& lane);
     Lane& NextLane();
     static Status AclStatus(aclError ret, const char* expr);

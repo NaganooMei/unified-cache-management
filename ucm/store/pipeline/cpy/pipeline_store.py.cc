@@ -47,6 +47,8 @@ public:
 
 class PipelineStore {
     using StoreLoader = LibraryLoader<StoreV1>;
+    using CacheScatterFn = Status (*)(StoreV1*, uintptr_t, const size_t*, void* const*, size_t,
+                                      size_t);
     template <typename T>
     struct BufferArrayView {
         const T* data;
@@ -79,6 +81,8 @@ class PipelineStore {
     std::list<std::shared_ptr<StoreV1>> stores_;
     std::list<std::shared_ptr<HealthBreakerStore>> healthBreakerStores_;
     StoreV1* entry_{nullptr};
+    StoreV1* cacheStore_{nullptr};
+    CacheScatterFn cacheScatterFn_{nullptr};
     StoreHealthConfig healthConfig_;
 
     StoreV1* StoreBack() const { return entry_; }
@@ -161,6 +165,18 @@ public:
         auto store = loader.CreateObject();
         if (!store) { throw std::runtime_error{"failed to create store(" + name + ")"}; }
         ThrowIfFailed(store->Setup(config));
+        if (name == "Cache") {
+            cacheStore_ = store.get();
+            cacheScatterFn_ = reinterpret_cast<CacheScatterFn>(
+                loader.FindOptionalSymbol("UcmCacheStoreScatterFromContiguousV1"));
+            const auto requireScatter =
+                storeDict.contains("cache_tp_broadcast_scatter") &&
+                py::cast<bool>(storeDict["cache_tp_broadcast_scatter"]);
+            if (requireScatter && cacheScatterFn_ == nullptr) {
+                throw std::runtime_error{
+                    "CacheStore does not provide UcmCacheStoreScatterFromContiguousV1"};
+            }
+        }
         loaders_.push_back(std::move(loader));
         stores_.push_back(std::move(store));
         entry_ = stores_.back().get();
@@ -231,6 +247,26 @@ public:
         }
         ThrowIfFailed(status);
     }
+    void ScatterFromContiguous(uintptr_t sourceAddr, const pybind11::buffer& sourceOffsets,
+                               const pybind11::buffer& destinationAddrs)
+    {
+        if (cacheStore_ == nullptr || cacheScatterFn_ == nullptr) {
+            throw std::runtime_error{"CacheStore scatter extension is unavailable"};
+        }
+        BufferArrayView<size_t> offsetArr{sourceOffsets};
+        Buffer2DArrayView<void*> addrArr{destinationAddrs};
+        if (sourceAddr == 0 || offsetArr.num == 0 || offsetArr.num != addrArr.rows) {
+            ThrowIfFailed(Status::InvalidParam("invalid scatter dim: {},{}", offsetArr.num,
+                                               addrArr.rows));
+        }
+        auto status = Status::OK();
+        {
+            pybind11::gil_scoped_release release;
+            status = cacheScatterFn_(cacheStore_, sourceAddr, offsetArr.data, addrArr.data,
+                                     addrArr.rows, addrArr.cols);
+        }
+        ThrowIfFailed(status);
+    }
 };
 
 }  // namespace UC::PipelineStore
@@ -260,4 +296,7 @@ PYBIND11_MODULE(ucmpipelinestore, m)
           py::arg("addrs").noconvert(), py::arg("prerequisite_handle") = 0);
     s.def("Check", &PipelineStore::Check);
     s.def("Wait", &PipelineStore::Wait);
+    s.def("ScatterFromContiguous", &PipelineStore::ScatterFromContiguous,
+          py::arg("source_addr"), py::arg("source_offsets").noconvert(),
+          py::arg("destination_addrs").noconvert());
 }

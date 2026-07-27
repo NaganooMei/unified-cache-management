@@ -62,6 +62,7 @@ struct Config {
     bool useGdr{false};
     bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
     std::string sdmaDirectLaunchGranularity{kSdmaDirectLaunchShard};
+    bool cacheTpBroadcastScatter{false};
 };
 
 }  // namespace UC::CacheStore

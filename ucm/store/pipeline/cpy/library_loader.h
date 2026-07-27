@@ -80,6 +80,12 @@ public:
         return Status::OK();
     }
     std::shared_ptr<Interface> CreateObject() { return std::shared_ptr<Interface>(maker_()); }
+    void* FindOptionalSymbol(const char* name) const
+    {
+        if (!handle_ || name == nullptr) { return nullptr; }
+        (void)dlerror();
+        return dlsym(handle_, name);
+    }
 
 private:
     using MakerFn = Interface* (*)();
