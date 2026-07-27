@@ -31,7 +31,6 @@ import multiprocessing
 import os
 import secrets
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -409,11 +408,13 @@ def setup_device(device_id: int):
     return f"{device_type}:{device_id}"
 
 
-def make_distributed_init_method():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    return f"tcp://127.0.0.1:{port}"
+def make_distributed_rendezvous_path(unique_id: str):
+    return f"/tmp/ucm_cache_fake_{unique_id}.rdzv"
+
+
+def make_distributed_init_method(unique_id: str):
+    # Avoid releasing a temporary TCP port before rank 0 starts its store.
+    return f"file://{make_distributed_rendezvous_path(unique_id)}"
 
 
 def initialize_collectives(device_id: int, init_method: str):
@@ -988,6 +989,11 @@ def cleanup_workers(workers, unique_id: str):
         except FileNotFoundError:
             pass
 
+    try:
+        os.unlink(make_distributed_rendezvous_path(unique_id))
+    except FileNotFoundError:
+        pass
+
 
 stop_requested = False
 
@@ -1007,7 +1013,7 @@ if __name__ == "__main__":
     process_context = multiprocessing.get_context("spawn")
     barrier = process_context.Barrier(worker_number)
     unique_id = secrets.token_hex(8)
-    distributed_init_method = make_distributed_init_method()
+    distributed_init_method = make_distributed_init_method(unique_id)
     shared_block_id_records = make_block_id_records()
     worker_block_id_records = (
         [shared_block_id_records] * worker_number
