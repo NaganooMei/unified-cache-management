@@ -62,10 +62,6 @@ warmup_epoch_number = 5
 # Measured load epoch whose psync Cache-to-Posix S2H operations are logged.
 # Measured epochs start from 0 after warmup. Set to None to disable the trace.
 s2h_trace_epoch = 1
-# MLA-only diagnostic: this worker refreshes every block from Posix before the
-# other workers load from the ready shared host buffer. Set to None to restore
-# normal shared-owner competition.
-fixed_s2h_worker_id = 0
 # Pause between adjacent epochs, in milliseconds.
 epoch_interval_ms = 15
 # Enable Cache SDMA Direct transfers.
@@ -437,9 +433,7 @@ def create_cache_worker(
     config["io_direct"] = True
     config["posix_data_trans_concurrency"] = posix_data_trans_concurrency
     config["posix_lookup_concurrency"] = 16
-    config["cache_load_backend_only"] = (
-        fixed_s2h_worker_id is None or device_id == fixed_s2h_worker_id
-    )
+    config["cache_load_backend_only"] = True
     config["unique_id"] = unique_id
     config["tensor_size_list"] = tensor_size_list
     config["shard_size"] = shard_size
@@ -529,22 +523,6 @@ def dump(
 
 
 def load(
-    epoch: int, device: str, device_id: int, worker, block_ids, warmup: bool
-) -> float:
-    dst_tensors = make_empty_tensors(device)
-    total_size = sum(tensor_size_list) * block_number
-    shard_indexes = [0 for _ in range(block_number)]
-    synchronize_device()
-    tp = time.perf_counter()
-    task = worker.load(block_ids, shard_indexes, dst_tensors)
-    worker.wait(task)
-    synchronize_device()
-    cost = time.perf_counter() - tp
-    print_result("load", epoch, device_id, cost, total_size, warmup)
-    return cost
-
-
-def load_with_fixed_s2h_worker(
     epoch: int,
     device: str,
     device_id: int,
@@ -553,19 +531,20 @@ def load_with_fixed_s2h_worker(
     warmup: bool,
     barrier: multiprocessing.Barrier,
 ) -> float:
-    if fixed_s2h_worker_id is None:
-        return load(epoch, device, device_id, worker, block_ids, warmup)
-
-    cost = 0.0
-    if device_id == fixed_s2h_worker_id:
-        cost = load(epoch, device, device_id, worker, block_ids, warmup)
-
-    # The fixed worker must finish the Posix refill before any other worker can
-    # acquire a ready shared-buffer handle and submit its H2D-only load.
+    dst_tensors = make_empty_tensors(device)
+    total_size = sum(tensor_size_list) * block_number
+    shard_indexes = [0 for _ in range(block_number)]
+    synchronize_device()
+    # Keep tensor allocation outside the measured window, then let every worker
+    # submit the same load epoch together. Cache fixes shared S2H ownership to
+    # device 0; each worker starts H2D as soon as the shared shard becomes ready.
     barrier.wait()
-
-    if device_id != fixed_s2h_worker_id:
-        cost = load(epoch, device, device_id, worker, block_ids, warmup)
+    tp = time.perf_counter()
+    task = worker.load(block_ids, shard_indexes, dst_tensors)
+    worker.wait(task)
+    synchronize_device()
+    cost = time.perf_counter() - tp
+    print_result("load", epoch, device_id, cost, total_size, warmup)
     return cost
 
 
@@ -689,7 +668,6 @@ def worker_loop(
         f"shard_size={shard_size}, dtype={torch.bfloat16}, "
         f"warmup_epoch_number={warmup_epoch_number}, "
         f"s2h_trace_epoch={s2h_trace_epoch}, "
-        f"fixed_s2h_worker_id={fixed_s2h_worker_id}, "
         f"epoch_interval_ms={epoch_interval_ms}, "
         f"storage_backends={storage_backends}, "
         f"posix_io_engine={posix_io_engine}, "
@@ -735,7 +713,7 @@ def worker_loop(
                 flush=True,
             )
         try:
-            cost = load_with_fixed_s2h_worker(
+            cost = load(
                 epoch,
                 device,
                 device_id,
@@ -810,16 +788,6 @@ if __name__ == "__main__":
         )
     if s2h_trace_epoch is not None and posix_io_engine != "psync":
         raise ValueError("S2H tracing currently requires posix_io_engine='psync'")
-    if fixed_s2h_worker_id is not None:
-        if not 0 <= fixed_s2h_worker_id < worker_number:
-            raise ValueError(
-                f"fixed_s2h_worker_id={fixed_s2h_worker_id} must be in "
-                f"[0, {worker_number}) or None"
-            )
-        if worker_mode != "mla" or not share_buffer_enable:
-            raise ValueError(
-                "fixed_s2h_worker_id requires MLA mode with share_buffer_enable=True"
-            )
     configure_ucm_logging()
     process_context = multiprocessing.get_context("spawn")
     barrier = process_context.Barrier(worker_number)

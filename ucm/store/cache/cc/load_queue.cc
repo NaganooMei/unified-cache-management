@@ -139,6 +139,7 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
                 UC_ERROR("Failed({}) to submit load task({}) to backend.", res.Error(), task->id);
                 UC::Metrics::UpdateStats(
                     NAME_TO_METRIC_ID("cache_backend_load_submit_errors_total"), 1.0);
+                shardTask.bufferHandle.MarkFailed();
                 task->Fail(res.Error());
                 failureSet_->Insert(task->id);
                 waiter->Done();
@@ -310,12 +311,16 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
                      task.task->id);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_backend_load_wait_errors_total"),
                                      1.0);
+            task.bufferHandle.MarkFailed();
             return s;
         }
         task.bufferHandle.MarkReady();
         return Status::OK();
     }
     while (!task.bufferHandle.Ready()) {
+        if (task.bufferHandle.Failed()) {
+            return Status::Error("fixed load owner backend load failed");
+        }
         if (failureSet_->Contains(task.task->id)) { return task.task->FailureStatus(); }
         std::this_thread::yield();
     }

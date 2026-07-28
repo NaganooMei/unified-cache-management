@@ -39,6 +39,8 @@ class TransBuffer {
     static constexpr Index npos = std::numeric_limits<Index>::max();
     std::shared_ptr<BufferStrategy> strategy_{nullptr};
     bool bypassHitOnLoad_{false};
+    bool fixedLoadOwner_{false};
+    int32_t deviceId_{-1};
 
 public:
     class Handle {
@@ -86,6 +88,8 @@ public:
         }
         bool Ready() const { return buf_->Ready(pos_); };
         void MarkReady() { buf_->MarkReady(pos_); };
+        bool Failed() const { return buf_->Failed(pos_); };
+        void MarkFailed() { buf_->MarkFailed(pos_); };
 
     private:
         friend class TransBuffer;
@@ -122,6 +126,9 @@ private:
     bool Ready(Index pos);
     void MarkReady(Index pos);
     void MarkNotReady(Index pos);
+    bool Failed(Index pos);
+    void MarkFailed(Index pos);
+    bool ClaimFixedLoad(Index pos, bool firstReference);
 };
 
 }  // namespace UC::CacheStore

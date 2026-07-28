@@ -35,6 +35,7 @@ namespace UC::CacheStore {
 
 static constexpr size_t nHashTableBucket = 16411;
 static constexpr auto invalidIndex = std::numeric_limits<size_t>::max();
+static constexpr int32_t fixedLoadOwnerDeviceId = 0;
 
 static inline size_t Hash(const Detail::BlockId& blockId, size_t shard)
 {
@@ -54,6 +55,8 @@ struct BufferMetaNode {
     size_t prev;
     size_t next;
     bool ready;
+    bool loading;
+    bool failed;
     void Init()
     {
         reference = 0;
@@ -61,6 +64,8 @@ struct BufferMetaNode {
         prev = invalidIndex;
         next = invalidIndex;
         ready = false;
+        loading = false;
+        failed = false;
     }
 };
 
@@ -499,6 +504,8 @@ public:
 Status TransBuffer::Setup(const Config& config)
 {
     bypassHitOnLoad_ = config.cacheLoadBackendOnly;
+    fixedLoadOwner_ = config.shareBufferEnable && config.deviceId >= 0;
+    deviceId_ = config.deviceId;
     try {
         if (!config.shareBufferEnable) {
             strategy_ = std::make_shared<LocalBufferStrategy>(
@@ -525,13 +532,18 @@ TransBuffer::Handle TransBuffer::Get(const Detail::BlockId& blockId, size_t shar
     strategy_->BucketLock(iBucket);
     auto iNode = FindAt(iBucket, blockId, shardIdx, owner);
     if (iNode != invalidIndex) {
-        if (bypassHitOnLoad_ && isLoad && owner && Ready(iNode)) { MarkNotReady(iNode); }
+        if (fixedLoadOwner_ && isLoad) {
+            owner = ClaimFixedLoad(iNode, owner);
+        } else if (bypassHitOnLoad_ && isLoad && owner && Ready(iNode)) {
+            MarkNotReady(iNode);
+        }
         strategy_->BucketUnlock(iBucket);
         return Handle{this, iNode, owner};
     }
     iNode = Alloc(blockId, shardIdx, iBucket, allowReserved);
+    if (fixedLoadOwner_ && isLoad) { owner = ClaimFixedLoad(iNode, true); }
     strategy_->BucketUnlock(iBucket);
-    return Handle(this, iNode, true);
+    return Handle(this, iNode, fixedLoadOwner_ && isLoad ? owner : true);
 }
 
 bool TransBuffer::Exist(const Detail::BlockId& blockId, size_t shardIdx)
@@ -607,6 +619,8 @@ size_t TransBuffer::Alloc(const Detail::BlockId& blockId, size_t shardIdx, size_
         meta->block = blockId;
         meta->shard = shardIdx;
         meta->ready = false;
+        meta->loading = false;
+        meta->failed = false;
         strategy_->NodeUnlock(iNode);
         return iNode;
     }
@@ -679,7 +693,10 @@ bool TransBuffer::Ready(Index pos)
 void TransBuffer::MarkReady(Index pos)
 {
     strategy_->NodeLock(pos);
-    strategy_->MetaAt(pos)->ready = true;
+    auto meta = strategy_->MetaAt(pos);
+    meta->ready = true;
+    meta->loading = false;
+    meta->failed = false;
     strategy_->NodeUnlock(pos);
 }
 
@@ -688,6 +705,44 @@ void TransBuffer::MarkNotReady(Index pos)
     strategy_->NodeLock(pos);
     strategy_->MetaAt(pos)->ready = false;
     strategy_->NodeUnlock(pos);
+}
+
+bool TransBuffer::Failed(Index pos)
+{
+    if (!fixedLoadOwner_) { return false; }
+    strategy_->NodeLock(pos);
+    auto failed = strategy_->MetaAt(pos)->failed;
+    strategy_->NodeUnlock(pos);
+    return failed;
+}
+
+void TransBuffer::MarkFailed(Index pos)
+{
+    if (!fixedLoadOwner_) { return; }
+    strategy_->NodeLock(pos);
+    auto meta = strategy_->MetaAt(pos);
+    meta->ready = false;
+    meta->loading = false;
+    meta->failed = true;
+    strategy_->NodeUnlock(pos);
+}
+
+bool TransBuffer::ClaimFixedLoad(Index pos, bool firstReference)
+{
+    strategy_->NodeLock(pos);
+    auto meta = strategy_->MetaAt(pos);
+    if (firstReference) {
+        if (bypassHitOnLoad_) { meta->ready = false; }
+        if (bypassHitOnLoad_ || meta->failed) {
+            meta->loading = false;
+            meta->failed = false;
+        }
+    }
+    const auto owner = deviceId_ == fixedLoadOwnerDeviceId && !meta->ready && !meta->loading &&
+                       !meta->failed;
+    if (owner) { meta->loading = true; }
+    strategy_->NodeUnlock(pos);
+    return owner;
 }
 
 }  // namespace UC::CacheStore
