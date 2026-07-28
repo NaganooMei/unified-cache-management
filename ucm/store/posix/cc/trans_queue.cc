@@ -21,10 +21,44 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "trans_queue.h"
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "posix_file.h"
+
+namespace {
+
+constexpr const char* S2H_TRACE_ENABLE_ENV = "UCM_CACHE_POSIX_S2H_TRACE";
+constexpr const char* S2H_TRACE_EPOCH_ENV = "UCM_CACHE_POSIX_S2H_TRACE_EPOCH";
+constexpr const char* S2H_TRACE_WORKER_ENV = "UCM_CACHE_POSIX_S2H_TRACE_WORKER";
+
+bool S2hTraceEnabled()
+{
+    const auto* enabled = std::getenv(S2H_TRACE_ENABLE_ENV);
+    return enabled != nullptr && std::strcmp(enabled, "1") == 0;
+}
+
+long S2hTraceValue(const char* name)
+{
+    const auto* value = std::getenv(name);
+    return value == nullptr ? -1 : std::strtol(value, nullptr, 10);
+}
+
+std::uint64_t MonotonicNs()
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+}  // namespace
 
 namespace UC::PosixStore {
 
@@ -175,14 +209,35 @@ Status TransQueue::S2H(IoUnit& ios)
         return s;
     }
     auto offset = shardSize_ * ios.shard.index;
+    size_t ioIndex = 0;
     for (const auto& addr : ios.shard.addrs) {
+        const auto traceS2h = S2hTraceEnabled();
+        size_t activeAtStart = 0;
+        std::uint64_t startNs = 0;
+        if (traceS2h) {
+            activeAtStart = activeS2h_.fetch_add(1, std::memory_order_relaxed) + 1;
+            startNs = MonotonicNs();
+        }
         s = file.Read(addr, ioSize_, offset);
+        if (traceS2h) {
+            const auto endNs = MonotonicNs();
+            const auto activeAfter = activeS2h_.fetch_sub(1, std::memory_order_relaxed) - 1;
+            UC_INFO_UNLIMITED(
+                "[S2H_TRACE] event=pread epoch={} worker={} pid={} tid={} posix_task={} "
+                "shard={} io_index={} offset={} size={} start_ns={} end_ns={} duration_ns={} "
+                "active_at_start={} active_after={} status={}",
+                S2hTraceValue(S2H_TRACE_EPOCH_ENV), S2hTraceValue(S2H_TRACE_WORKER_ENV),
+                getpid(), syscall(SYS_gettid), ios.task->id, ios.shard.index, ioIndex, offset,
+                ioSize_, startNs, endNs, endNs - startNs, activeAtStart, activeAfter,
+                s.Success() ? "ok" : "error");
+        }
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to read file({}:{}).", s, path, offset);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("posix_io_errors_total"), 1.0);
             return s;
         }
         offset += ioSize_;
+        ioIndex++;
     }
     return Status::OK();
 }

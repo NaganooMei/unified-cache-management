@@ -21,10 +21,34 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <cstdlib>
+#include <cstring>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "load_queue.h"
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "thread/cpu_affinity.h"
+
+namespace {
+
+constexpr const char* S2H_TRACE_ENABLE_ENV = "UCM_CACHE_POSIX_S2H_TRACE";
+constexpr const char* S2H_TRACE_EPOCH_ENV = "UCM_CACHE_POSIX_S2H_TRACE_EPOCH";
+constexpr const char* S2H_TRACE_WORKER_ENV = "UCM_CACHE_POSIX_S2H_TRACE_WORKER";
+
+bool S2hTraceEnabled()
+{
+    const auto* enabled = std::getenv(S2H_TRACE_ENABLE_ENV);
+    return enabled != nullptr && std::strcmp(enabled, "1") == 0;
+}
+
+long S2hTraceValue(const char* name)
+{
+    const auto* value = std::getenv(name);
+    return value == nullptr ? -1 : std::strtol(value, nullptr, 10);
+}
+
+}  // namespace
 
 namespace UC::CacheStore {
 
@@ -159,6 +183,13 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
                              static_cast<double>(backendSubmitCount));
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_shards_total"),
                              static_cast<double>(nShard));
+    if (S2hTraceEnabled()) {
+        UC_INFO_UNLIMITED(
+            "[S2H_TRACE] event=assign epoch={} worker={} pid={} tid={} cache_task={} "
+            "backend_tasks={} total_shards={}",
+            S2hTraceValue(S2H_TRACE_EPOCH_ENV), S2hTraceValue(S2H_TRACE_WORKER_ENV), getpid(),
+            syscall(SYS_gettid), task->id, backendSubmitCount, nShard);
+    }
 }
 
 void LoadQueue::TransferStage(std::promise<Status>& started)

@@ -24,6 +24,7 @@
 #ifndef UNIFIEDCACHE_POSIX_STORE_CC_TRANS_QUEUE_H
 #define UNIFIEDCACHE_POSIX_STORE_CC_TRANS_QUEUE_H
 
+#include <atomic>
 #include "global_config.h"
 #include "space_layout.h"
 #include "template/hashset.h"
@@ -54,6 +55,7 @@ private:
     size_t nShardPerBlock_;
     bool ioDirect_;
     size_t timeoutMs_;
+    std::atomic<size_t> activeS2h_{0};
 
 public:
     Status Setup(const Config& config, TaskIdSet* failureSet, const SpaceLayout* layout);

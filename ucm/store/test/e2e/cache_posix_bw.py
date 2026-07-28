@@ -52,13 +52,16 @@ layer_number = 78
 
 # ======================== Benchmark configuration =========================
 # Number of cache blocks transferred in each epoch.
-block_number = 100
+block_number = 460
 # Number of measured dump epochs.
-dump_epoch_number = 16
+dump_epoch_number = 1
 # Number of measured load epochs.
-load_epoch_number = 128
+load_epoch_number = 3
 # Warmup epochs excluded from the final statistics.
 warmup_epoch_number = 5
+# Measured load epoch whose psync Cache-to-Posix S2H operations are logged.
+# Measured epochs start from 0 after warmup. Set to None to disable the trace.
+s2h_trace_epoch = 1
 # Pause between adjacent epochs, in milliseconds.
 epoch_interval_ms = 15
 # Enable Cache SDMA Direct transfers.
@@ -71,6 +74,10 @@ posix_io_engine = "psync"
 posix_data_trans_concurrency = 128
 # Bind each worker and its UCM store threads to NUMA-local CPU cores.
 worker_cpu_affinity_enable = False
+
+S2H_TRACE_ENABLE_ENV = "UCM_CACHE_POSIX_S2H_TRACE"
+S2H_TRACE_EPOCH_ENV = "UCM_CACHE_POSIX_S2H_TRACE_EPOCH"
+S2H_TRACE_WORKER_ENV = "UCM_CACHE_POSIX_S2H_TRACE_WORKER"
 
 # MLA writes once from worker 0 and all workers load the same block ids, while
 # GQA workers use their own block ids. GLM and MiniMax support layerwise and
@@ -410,6 +417,12 @@ def configure_ucm_logging():
     os.environ["UC_LOGGER_LEVEL"] = "info"
 
 
+def configure_s2h_trace(enabled: bool, epoch: int, worker_id: int):
+    os.environ[S2H_TRACE_ENABLE_ENV] = "1" if enabled else "0"
+    os.environ[S2H_TRACE_EPOCH_ENV] = str(epoch)
+    os.environ[S2H_TRACE_WORKER_ENV] = str(worker_id)
+
+
 def create_cache_worker(
     pipeline_store_cls, unique_id: str, device_id: int, store_cpu_affinity_cores
 ):
@@ -609,6 +622,7 @@ def worker_loop(
     if worker_cpu_affinity_cores:
         os.sched_setaffinity(0, worker_cpu_affinity_cores)
     configure_ucm_logging()
+    configure_s2h_trace(False, -1, device_id)
 
     # Import UCM inside the spawned worker so its async logger owns a live
     # logging thread in this process.
@@ -643,6 +657,7 @@ def worker_loop(
         f"total_dump_bytes={total_dump_bytes}, "
         f"shard_size={shard_size}, dtype={torch.bfloat16}, "
         f"warmup_epoch_number={warmup_epoch_number}, "
+        f"s2h_trace_epoch={s2h_trace_epoch}, "
         f"epoch_interval_ms={epoch_interval_ms}, "
         f"storage_backends={storage_backends}, "
         f"posix_io_engine={posix_io_engine}, "
@@ -675,14 +690,35 @@ def worker_loop(
         warmup = load_idx < warmup_epoch_number
         epoch = load_idx if warmup else load_idx - warmup_epoch_number
         record_idx = load_idx % len(block_id_records)
-        cost = load(
-            epoch,
-            device,
-            device_id,
-            worker,
-            block_id_records[record_idx],
-            warmup,
+        trace_s2h = (
+            not warmup
+            and s2h_trace_epoch is not None
+            and epoch == s2h_trace_epoch
         )
+        configure_s2h_trace(trace_s2h, epoch, device_id)
+        if trace_s2h:
+            print(
+                f"[S2H_TRACE] event=epoch_begin epoch={epoch} "
+                f"worker={device_id} pid={os.getpid()}",
+                flush=True,
+            )
+        try:
+            cost = load(
+                epoch,
+                device,
+                device_id,
+                worker,
+                block_id_records[record_idx],
+                warmup,
+            )
+        finally:
+            if trace_s2h:
+                print(
+                    f"[S2H_TRACE] event=epoch_end epoch={epoch} "
+                    f"worker={device_id} pid={os.getpid()}",
+                    flush=True,
+                )
+            configure_s2h_trace(False, epoch, device_id)
         if not warmup:
             load_cost_records[device_id * load_epoch_number + epoch] = cost
         barrier.wait()
@@ -734,6 +770,13 @@ if __name__ == "__main__":
             f"{model_name} tensor_size_list is empty; fill it in MODEL_PROFILES "
             "before running the benchmark"
         )
+    if s2h_trace_epoch is not None and not 0 <= s2h_trace_epoch < load_epoch_number:
+        raise ValueError(
+            f"s2h_trace_epoch={s2h_trace_epoch} must be in "
+            f"[0, {load_epoch_number}) or None"
+        )
+    if s2h_trace_epoch is not None and posix_io_engine != "psync":
+        raise ValueError("S2H tracing currently requires posix_io_engine='psync'")
     configure_ucm_logging()
     process_context = multiprocessing.get_context("spawn")
     barrier = process_context.Barrier(worker_number)
