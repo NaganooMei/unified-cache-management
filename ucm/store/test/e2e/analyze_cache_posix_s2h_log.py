@@ -215,12 +215,16 @@ def summarize_epoch(epoch, records, show_threads):
         "worker  pid       assigned  preads  ok  failed  threads  local_peak"
     )
     for worker in workers:
-        pid_text = ",".join(str(pid) for pid in sorted(pids_by_worker[worker])) or "-"
-        local = interval_concurrency(intervals_by_worker[worker])
+        pid_text = (
+            ",".join(str(pid) for pid in sorted(pids_by_worker.get(worker, set())))
+            or "-"
+        )
+        local = interval_concurrency(intervals_by_worker.get(worker, []))
         print(
             f"{worker:>6}  {pid_text:<8}  {assigned_by_worker[worker]:>8}  "
             f"{preads_by_worker[worker]:>6}  {success_by_worker[worker]:>2}  "
-            f"{failed_by_worker[worker]:>6}  {len(threads_by_worker[worker]):>7}  "
+            f"{failed_by_worker[worker]:>6}  "
+            f"{len(threads_by_worker.get(worker, set())):>7}  "
             f"{local['peak']:>10}"
         )
 
