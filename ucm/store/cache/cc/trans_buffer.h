@@ -128,7 +128,8 @@ private:
     void MarkNotReady(Index pos);
     bool Failed(Index pos);
     void MarkFailed(Index pos);
-    bool ClaimFixedLoad(Index pos, bool firstReference);
+    bool ClaimFixedLoad(Index pos);
+    uint64_t DeviceMask() const;
 };
 
 }  // namespace UC::CacheStore

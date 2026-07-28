@@ -54,6 +54,7 @@ struct BufferMetaNode {
     size_t hash;
     size_t prev;
     size_t next;
+    uint64_t loadConsumers;
     bool ready;
     bool loading;
     bool failed;
@@ -63,6 +64,7 @@ struct BufferMetaNode {
         hash = invalidIndex;
         prev = invalidIndex;
         next = invalidIndex;
+        loadConsumers = std::numeric_limits<uint64_t>::max();
         ready = false;
         loading = false;
         failed = false;
@@ -533,7 +535,7 @@ TransBuffer::Handle TransBuffer::Get(const Detail::BlockId& blockId, size_t shar
     auto iNode = FindAt(iBucket, blockId, shardIdx, owner);
     if (iNode != invalidIndex) {
         if (fixedLoadOwner_ && isLoad) {
-            owner = ClaimFixedLoad(iNode, owner);
+            owner = ClaimFixedLoad(iNode);
         } else if (bypassHitOnLoad_ && isLoad && owner && Ready(iNode)) {
             MarkNotReady(iNode);
         }
@@ -541,7 +543,7 @@ TransBuffer::Handle TransBuffer::Get(const Detail::BlockId& blockId, size_t shar
         return Handle{this, iNode, owner};
     }
     iNode = Alloc(blockId, shardIdx, iBucket, allowReserved);
-    if (fixedLoadOwner_ && isLoad) { owner = ClaimFixedLoad(iNode, true); }
+    if (fixedLoadOwner_ && isLoad) { owner = ClaimFixedLoad(iNode); }
     strategy_->BucketUnlock(iBucket);
     return Handle(this, iNode, fixedLoadOwner_ && isLoad ? owner : true);
 }
@@ -618,6 +620,7 @@ size_t TransBuffer::Alloc(const Detail::BlockId& blockId, size_t shardIdx, size_
         ++meta->reference;
         meta->block = blockId;
         meta->shard = shardIdx;
+        meta->loadConsumers = std::numeric_limits<uint64_t>::max();
         meta->ready = false;
         meta->loading = false;
         meta->failed = false;
@@ -685,7 +688,15 @@ void TransBuffer::Release(Index pos)
 bool TransBuffer::Ready(Index pos)
 {
     strategy_->NodeLock(pos);
-    auto ready = strategy_->MetaAt(pos)->ready;
+    auto meta = strategy_->MetaAt(pos);
+    auto ready = meta->ready;
+    if (ready && fixedLoadOwner_ && bypassHitOnLoad_) {
+        const auto deviceMask = DeviceMask();
+        if (deviceMask != 0) {
+            ready = (meta->loadConsumers & deviceMask) == 0;
+            if (ready) { meta->loadConsumers |= deviceMask; }
+        }
+    }
     strategy_->NodeUnlock(pos);
     return ready;
 }
@@ -694,9 +705,17 @@ void TransBuffer::MarkReady(Index pos)
 {
     strategy_->NodeLock(pos);
     auto meta = strategy_->MetaAt(pos);
+    const auto backendLoad = meta->loading;
     meta->ready = true;
     meta->loading = false;
     meta->failed = false;
+    if (fixedLoadOwner_ && bypassHitOnLoad_) {
+        if (backendLoad) {
+            meta->loadConsumers |= DeviceMask();
+        } else {
+            meta->loadConsumers = std::numeric_limits<uint64_t>::max();
+        }
+    }
     strategy_->NodeUnlock(pos);
 }
 
@@ -727,22 +746,35 @@ void TransBuffer::MarkFailed(Index pos)
     strategy_->NodeUnlock(pos);
 }
 
-bool TransBuffer::ClaimFixedLoad(Index pos, bool firstReference)
+bool TransBuffer::ClaimFixedLoad(Index pos)
 {
     strategy_->NodeLock(pos);
     auto meta = strategy_->MetaAt(pos);
-    if (firstReference) {
-        if (bypassHitOnLoad_) { meta->ready = false; }
-        if (bypassHitOnLoad_ || meta->failed) {
-            meta->loading = false;
+    auto owner = false;
+    if (bypassHitOnLoad_) {
+        const auto ownerMask = uint64_t{1} << fixedLoadOwnerDeviceId;
+        owner = deviceId_ == fixedLoadOwnerDeviceId && !meta->loading &&
+                ((meta->loadConsumers & ownerMask) != 0 || meta->failed);
+        if (owner) {
+            meta->loadConsumers = 0;
+            meta->ready = false;
+            meta->loading = true;
             meta->failed = false;
         }
+    } else {
+        owner = deviceId_ == fixedLoadOwnerDeviceId && !meta->ready && !meta->loading &&
+                !meta->failed;
+        if (owner) { meta->loading = true; }
     }
-    const auto owner = deviceId_ == fixedLoadOwnerDeviceId && !meta->ready && !meta->loading &&
-                       !meta->failed;
-    if (owner) { meta->loading = true; }
     strategy_->NodeUnlock(pos);
     return owner;
+}
+
+uint64_t TransBuffer::DeviceMask() const
+{
+    constexpr int32_t maxTrackedDeviceNumber = std::numeric_limits<uint64_t>::digits;
+    if (deviceId_ < 0 || deviceId_ >= maxTrackedDeviceNumber) { return 0; }
+    return uint64_t{1} << deviceId_;
 }
 
 }  // namespace UC::CacheStore
