@@ -24,6 +24,7 @@
 #ifndef UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 #define UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 
+#include <deque>
 #include <future>
 #include <string>
 #include <thread>
@@ -68,6 +69,7 @@ private:
     SpscRingQueue<ShardTask> running_;
     std::thread dispatcher_;
     std::thread transfer_;
+    std::deque<ShardTask> backendPending_;
     std::vector<ShardTask> holder_;
 
 public:
@@ -81,6 +83,10 @@ private:
     void TransferStage(std::promise<Status>& started);
     void TransferOneTask(CopyStream& stream, ShardTask&& task);
     Status WaitBackendTaskReady(ShardTask& task);
+    Expected<bool> TryBackendTaskReady(ShardTask& task);
+    Status SubmitReadyShard(CopyStream& stream, ShardTask&& task);
+    Status DrainBackendPending(CopyStream& stream);
+    void ClearShardTaskState(CopyStream& stream);
     Status HostToDeviceAsync(CopyStream& stream, void* host, void** device);
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
     Status FlushSdmaDirectTaskBatch(CopyStream& stream);

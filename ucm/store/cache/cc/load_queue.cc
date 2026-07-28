@@ -181,50 +181,42 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
 {
     auto parentTask = task.task;
     const auto taskHandle = parentTask->id;
+    auto waiter = task.waiter;
     if (failureSet_->Contains(taskHandle)) {
-        if (task.waiter) {
-            ClearSdmaDirectHolders();
-            task.waiter->Done();
+        if (task.backendTaskHandle != 0) { (void)backend_->Wait(task.backendTaskHandle); }
+        if (waiter) {
+            if (UseSdmaDirectTaskLaunch()) {
+                ClearSdmaDirectHolders();
+            } else {
+                ClearShardTaskState(stream);
+            }
+            waiter->Done();
         }
         return;
     }
     auto s = Status::OK();
-    auto waiter = task.waiter;
     do {
-        auto tpBackendWait = NowTime::Now();
-        s = WaitBackendTaskReady(task);
-        if (s.Failure()) [[unlikely]] { break; }
-        auto tpBackendReady = NowTime::Now();
-        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
-                                 (tpBackendReady - tpBackendWait) * 1e3);
-        if (UseSdmaDirectTaskLaunch()) {
-            const auto launchBoundary = task.launchBoundary;
-            holder_.push_back(std::move(task));
-            if (!launchBoundary) { return; }
-            s = FlushSdmaDirectTaskBatch(stream);
-            if (s.Failure()) [[unlikely]] {
-                UC_ERROR("Failed({}) to flush H2D task batch for task({}).", s, taskHandle);
-                UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
+        if (!UseSdmaDirectTaskLaunch()) {
+            auto tpBackendWait = NowTime::Now();
+            auto ready = TryBackendTaskReady(task);
+            if (!ready) [[unlikely]] {
+                s = ready.Error();
                 break;
             }
-            if (waiter) { waiter->Done(); }
-            return;
-        }
+            if (!ready.Value()) {
+                backendPending_.push_back(std::move(task));
+            } else {
+                auto tpBackendReady = NowTime::Now();
+                UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
+                                         (tpBackendReady - tpBackendWait) * 1e3);
+                s = SubmitReadyShard(stream, std::move(task));
+                if (s.Failure()) [[unlikely]] { break; }
+            }
+            if (!waiter) { return; }
 
-        if (cacheSdmaDirect_) {
-            s = HostToDeviceAsync(stream, task.bufferHandle.DeviceData(), task.shard.addrs.data());
-            auto tpH2dSubmitted = NowTime::Now();
-            if (s.Failure()) [[unlikely]] {
-                UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
-                UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
-                break;
-            }
-            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
-                                     (tpH2dSubmitted - tpBackendReady) * 1e3);
-            if (!task.waiter) {
-                holder_.push_back(std::move(task));
-                return;
-            }
+            s = DrainBackendPending(stream);
+            if (s.Failure()) [[unlikely]] { break; }
+
             auto tpH2dSyncStart = NowTime::Now();
             s = stream.Synchronize();
             auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
@@ -233,40 +225,37 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to sync on stream for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
-                break;
             }
             break;
         }
 
-        s = HostToDeviceAsync(stream, task.bufferHandle.Data(), task.shard.addrs.data());
-        auto tpH2dSubmitted = NowTime::Now();
+        auto tpBackendWait = NowTime::Now();
+        s = WaitBackendTaskReady(task);
+        if (s.Failure()) [[unlikely]] { break; }
+        auto tpBackendReady = NowTime::Now();
+        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
+                                 (tpBackendReady - tpBackendWait) * 1e3);
+        const auto launchBoundary = task.launchBoundary;
+        holder_.push_back(std::move(task));
+        if (!launchBoundary) { return; }
+        s = FlushSdmaDirectTaskBatch(stream);
         if (s.Failure()) [[unlikely]] {
-            UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
+            UC_ERROR("Failed({}) to flush H2D task batch for task({}).", s, taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
-        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
-                                 (tpH2dSubmitted - tpBackendReady) * 1e3);
-        if (!task.waiter) {
-            holder_.push_back(std::move(task));
-            return;
-        }
-        auto tpH2dSyncStart = NowTime::Now();
-        s = stream.Synchronize();
-        auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
-        RecordH2dSyncMetrics(h2dSyncMs);
-        holder_.clear();
-        if (s.Failure()) [[unlikely]] {
-            UC_ERROR("Failed({}) to sync on stream for task({}).", s, taskHandle);
-            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
-            break;
-        }
+        if (waiter) { waiter->Done(); }
+        return;
     } while (0);
     if (s.Failure()) [[unlikely]] {
         parentTask->Fail(s);
         failureSet_->Insert(taskHandle);
     }
-    if (UseSdmaDirectTaskLaunch()) { ClearSdmaDirectHolders(); }
+    if (UseSdmaDirectTaskLaunch()) {
+        ClearSdmaDirectHolders();
+    } else if (waiter && s.Failure()) {
+        ClearShardTaskState(stream);
+    }
     if (waiter) { waiter->Done(); }
 }
 
@@ -289,6 +278,98 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
         std::this_thread::yield();
     }
     return Status::OK();
+}
+
+Expected<bool> LoadQueue::TryBackendTaskReady(ShardTask& task)
+{
+    if (task.backendTaskHandle != 0) {
+        auto ready = backend_->Check(task.backendTaskHandle);
+        if (!ready) [[unlikely]] {
+            UC_ERROR("Failed({}) to check backend({}) for task({}).", ready.Error(),
+                     task.backendTaskHandle, task.task->id);
+            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_backend_load_wait_errors_total"),
+                                     1.0);
+            auto error = ready.Error();
+            (void)backend_->Wait(task.backendTaskHandle);
+            task.backendTaskHandle = 0;
+            return error;
+        }
+        if (!ready.Value()) { return false; }
+        auto s = backend_->Wait(task.backendTaskHandle);
+        if (s.Failure()) [[unlikely]] {
+            UC_ERROR("Failed({}) to wait backend({}) for task({}).", s, task.backendTaskHandle,
+                     task.task->id);
+            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_backend_load_wait_errors_total"),
+                                     1.0);
+            return s;
+        }
+        task.backendTaskHandle = 0;
+        task.bufferHandle.MarkReady();
+        return true;
+    }
+    if (task.bufferHandle.Ready()) { return true; }
+    if (failureSet_->Contains(task.task->id)) { return task.task->FailureStatus(); }
+    return false;
+}
+
+Status LoadQueue::SubmitReadyShard(CopyStream& stream, ShardTask&& task)
+{
+    const auto taskHandle = task.task->id;
+    auto tpH2dSubmitStart = NowTime::Now();
+    auto s = HostToDeviceAsync(stream,
+                               cacheSdmaDirect_ ? task.bufferHandle.DeviceData()
+                                                : task.bufferHandle.Data(),
+                               task.shard.addrs.data());
+    auto tpH2dSubmitted = NowTime::Now();
+    if (s.Failure()) [[unlikely]] {
+        UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
+        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
+        return s;
+    }
+    UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
+                             (tpH2dSubmitted - tpH2dSubmitStart) * 1e3);
+    holder_.push_back(std::move(task));
+    return Status::OK();
+}
+
+Status LoadQueue::DrainBackendPending(CopyStream& stream)
+{
+    while (!backendPending_.empty()) {
+        if (stop_.load(std::memory_order_relaxed)) {
+            return Status::Error("load queue stopped while waiting for backend tasks");
+        }
+        bool progressed = false;
+        const auto pendingCount = backendPending_.size();
+        for (size_t i = 0; i < pendingCount; ++i) {
+            auto task = std::move(backendPending_.front());
+            backendPending_.pop_front();
+            auto tpBackendWait = NowTime::Now();
+            auto ready = TryBackendTaskReady(task);
+            if (!ready) [[unlikely]] { return ready.Error(); }
+            if (!ready.Value()) {
+                backendPending_.push_back(std::move(task));
+                continue;
+            }
+            auto tpBackendReady = NowTime::Now();
+            UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
+                                     (tpBackendReady - tpBackendWait) * 1e3);
+            auto s = SubmitReadyShard(stream, std::move(task));
+            if (s.Failure()) [[unlikely]] { return s; }
+            progressed = true;
+        }
+        if (!progressed) { std::this_thread::yield(); }
+    }
+    return Status::OK();
+}
+
+void LoadQueue::ClearShardTaskState(CopyStream& stream)
+{
+    for (auto& task : backendPending_) {
+        if (task.backendTaskHandle != 0) { (void)backend_->Wait(task.backendTaskHandle); }
+    }
+    backendPending_.clear();
+    if (!holder_.empty()) { (void)stream.Synchronize(); }
+    holder_.clear();
 }
 
 Status LoadQueue::HostToDeviceAsync(CopyStream& stream, void* host, void** device)
