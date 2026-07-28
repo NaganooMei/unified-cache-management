@@ -529,16 +529,11 @@ def load(
     worker,
     block_ids,
     warmup: bool,
-    barrier: multiprocessing.Barrier,
 ) -> float:
     dst_tensors = make_empty_tensors(device)
     total_size = sum(tensor_size_list) * block_number
     shard_indexes = [0 for _ in range(block_number)]
     synchronize_device()
-    # Keep tensor allocation outside the measured window, then let every worker
-    # submit the same load epoch together. Cache fixes shared S2H ownership to
-    # device 0; each worker starts H2D as soon as the shared shard becomes ready.
-    barrier.wait()
     tp = time.perf_counter()
     task = worker.load(block_ids, shard_indexes, dst_tensors)
     worker.wait(task)
@@ -720,7 +715,6 @@ def worker_loop(
                 worker,
                 block_id_records[record_idx],
                 warmup,
-                barrier,
             )
         finally:
             if trace_s2h:
