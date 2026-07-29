@@ -70,6 +70,7 @@ def parse_log(stream):
     epochs = collections.defaultdict(
         lambda: {
             "assignments": [],
+            "routes": [],
             "preads": [],
             "epoch_begin": [],
             "epoch_end": [],
@@ -94,6 +95,18 @@ def parse_log(stream):
                         "cache_task": parse_int(fields, "cache_task"),
                         "backend_tasks": parse_int(fields, "backend_tasks"),
                         "total_shards": parse_int(fields, "total_shards"),
+                    }
+                )
+            elif event == "route":
+                epochs[epoch]["routes"].append(
+                    {
+                        "worker": parse_int(fields, "worker"),
+                        "pid": parse_int(fields, "pid"),
+                        "tid": parse_int(fields, "tid"),
+                        "cache_task": parse_int(fields, "cache_task"),
+                        "block_pos": parse_int(fields, "block_pos"),
+                        "owner": parse_int(fields, "owner"),
+                        "policy": fields.get("policy", "unknown"),
                     }
                 )
             elif event == "pread":
@@ -170,8 +183,23 @@ def interval_concurrency(intervals):
     }
 
 
+def expected_route_owner(block_pos, block_number, worker_number, policy):
+    if policy == "round_robin":
+        return block_pos % worker_number
+    if policy != "contiguous":
+        return None
+
+    base = block_number // worker_number
+    remainder = block_number % worker_number
+    larger_range_end = (base + 1) * remainder
+    if block_pos < larger_range_end:
+        return block_pos // (base + 1)
+    return remainder + (block_pos - larger_range_end) // base
+
+
 def summarize_epoch(epoch, records, show_threads):
     assignments = records["assignments"]
+    routes = records["routes"]
     preads = records["preads"]
 
     assigned_by_worker = collections.Counter()
@@ -241,6 +269,51 @@ def summarize_epoch(epoch, records, show_threads):
     print(f"  failed preads          : {sum(failed_by_worker.values())}")
     print(f"  recorded bytes         : {total_bytes}")
     print(f"  workers with preads    : {len(intervals_by_worker)}")
+
+    if routes:
+        policies = sorted({record["policy"] for record in routes})
+        worker_number = len({record["worker"] for record in records["epoch_begin"]})
+        if worker_number == 0:
+            worker_number = max((record["owner"] for record in routes), default=-1) + 1
+        position_counts = collections.Counter(record["block_pos"] for record in routes)
+        route_errors = []
+        if len(policies) != 1:
+            route_errors.append(f"multiple policies: {policies}")
+        if len(routes) != expected_unique:
+            route_errors.append(f"routed={len(routes)}, expected={expected_unique}")
+        expected_positions = set(range(expected_unique))
+        actual_positions = set(position_counts)
+        if actual_positions != expected_positions:
+            route_errors.append(
+                f"missing={len(expected_positions - actual_positions)}, "
+                f"unexpected={len(actual_positions - expected_positions)}"
+            )
+        duplicate_positions = sum(count - 1 for count in position_counts.values())
+        if duplicate_positions:
+            route_errors.append(f"duplicate_positions={duplicate_positions}")
+        if len(policies) == 1 and worker_number > 0:
+            policy = policies[0]
+            for record in routes:
+                expected_owner = expected_route_owner(
+                    record["block_pos"], expected_unique, worker_number, policy
+                )
+                if expected_owner is None:
+                    route_errors.append(f"unknown policy={policy}")
+                    break
+                if record["owner"] != expected_owner or record["worker"] != expected_owner:
+                    route_errors.append(
+                        f"block_pos={record['block_pos']} owner={record['owner']} "
+                        f"worker={record['worker']} expected={expected_owner}"
+                    )
+                    break
+
+        print("\nDeterministic S2H routing")
+        print(f"  policy                 : {','.join(policies)}")
+        print(f"  worker number          : {worker_number}")
+        print(f"  routed backend tasks   : {len(routes)}")
+        print(f"  route validation       : {'PASS' if not route_errors else 'FAIL'}")
+        if route_errors:
+            print(f"  first route error      : {route_errors[0]}")
 
     print("\nGlobal pread concurrency")
     print(f"  average concurrency    : {global_concurrency['average']:.3f}")

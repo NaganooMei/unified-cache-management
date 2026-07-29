@@ -62,6 +62,8 @@ warmup_epoch_number = 5
 # Measured load epochs whose psync Cache-to-Posix S2H operations are logged.
 # Measured epochs start from 0 after warmup. Use an empty set to disable tracing.
 s2h_trace_epochs = {100, 200, 300, 400, 500}
+# S2H task distribution across workers: round_robin or contiguous.
+s2h_owner_policy = "round_robin"
 # Pause between adjacent epochs, in milliseconds.
 epoch_interval_ms = 15
 # Enable Cache SDMA Direct transfers.
@@ -434,6 +436,8 @@ def create_cache_worker(
     config["posix_data_trans_concurrency"] = posix_data_trans_concurrency
     config["posix_lookup_concurrency"] = 16
     config["cache_load_backend_only"] = True
+    config["cache_load_owner_policy"] = s2h_owner_policy
+    config["cache_load_owner_worker_number"] = worker_number
     config["unique_id"] = unique_id
     config["tensor_size_list"] = tensor_size_list
     config["shard_size"] = shard_size
@@ -658,6 +662,7 @@ def worker_loop(
         f"shard_size={shard_size}, dtype={torch.bfloat16}, "
         f"warmup_epoch_number={warmup_epoch_number}, "
         f"s2h_trace_epochs={sorted(s2h_trace_epochs)}, "
+        f"s2h_owner_policy={s2h_owner_policy}, "
         f"epoch_interval_ms={epoch_interval_ms}, "
         f"storage_backends={storage_backends}, "
         f"posix_io_engine={posix_io_engine}, "
@@ -779,6 +784,15 @@ if __name__ == "__main__":
         )
     if s2h_trace_epochs and posix_io_engine != "psync":
         raise ValueError("S2H tracing currently requires posix_io_engine='psync'")
+    if s2h_owner_policy not in ("round_robin", "contiguous"):
+        raise ValueError(
+            f"unsupported s2h_owner_policy={s2h_owner_policy!r}; "
+            "choose 'round_robin' or 'contiguous'"
+        )
+    if worker_mode != "mla" or not share_buffer_enable:
+        raise ValueError("balanced S2H ownership requires shared-buffer MLA mode")
+    if worker_number > 64:
+        raise ValueError("balanced S2H ownership supports at most 64 workers")
     configure_ucm_logging()
     process_context = multiprocessing.get_context("spawn")
     barrier = process_context.Barrier(worker_number)

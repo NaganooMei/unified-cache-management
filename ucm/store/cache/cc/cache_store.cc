@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <limits>
 #include <memory>
 #include <numeric>
 #include "buffer_manager.h"
@@ -149,6 +150,8 @@ private:
         config.GetNumber("timeout_ms", param.timeoutMs);
         config.GetNumber("cache_stream_number", param.streamNumber);
         config.GetNumber("cache_load_exclusive_buffer_number", param.loadExclusiveBufferNumber);
+        config.Get("cache_load_owner_policy", param.loadOwnerPolicy);
+        config.GetNumber("cache_load_owner_worker_number", param.loadOwnerWorkerNumber);
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
@@ -210,6 +213,26 @@ private:
         if (config.streamNumber < 1 || config.streamNumber > 32) {
             return Status::InvalidParam("invalid stream number({})", config.streamNumber);
         }
+        if (config.loadOwnerPolicy != kLoadOwnerPolicyCompete &&
+            config.loadOwnerPolicy != kLoadOwnerPolicyRoundRobin &&
+            config.loadOwnerPolicy != kLoadOwnerPolicyContiguous) {
+            return Status::InvalidParam("invalid load owner policy({})", config.loadOwnerPolicy);
+        }
+        if (config.loadOwnerPolicy != kLoadOwnerPolicyCompete) {
+            constexpr size_t maxTrackedLoadWorkers = std::numeric_limits<uint64_t>::digits;
+            if (!config.shareBufferEnable) {
+                return Status::InvalidParam("balanced load owner requires shared buffer");
+            }
+            if (config.loadOwnerWorkerNumber == 0 ||
+                config.loadOwnerWorkerNumber > maxTrackedLoadWorkers) {
+                return Status::InvalidParam("invalid load owner worker number({})",
+                                            config.loadOwnerWorkerNumber);
+            }
+            if (static_cast<size_t>(config.deviceId) >= config.loadOwnerWorkerNumber) {
+                return Status::InvalidParam("device({}) exceeds load owner worker number({})",
+                                            config.deviceId, config.loadOwnerWorkerNumber);
+            }
+        }
         return Status::OK();
     }
     void ShowConfig(const Config& config)
@@ -240,6 +263,8 @@ private:
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, config.runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
+        UC_INFO("Set {}::LoadOwnerPolicy to {}.", ns, config.loadOwnerPolicy);
+        UC_INFO("Set {}::LoadOwnerWorkerNumber to {}.", ns, config.loadOwnerWorkerNumber);
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
         UC_INFO("Set {}::SdmaDirectLaunchGranularity to {}.", ns,
                 config.sdmaDirectLaunchGranularity);

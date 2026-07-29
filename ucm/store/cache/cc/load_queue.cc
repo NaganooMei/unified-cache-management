@@ -70,6 +70,8 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     useGdr_ = config.useGdr;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
     sdmaDirectLaunchGranularity_ = config.sdmaDirectLaunchGranularity;
+    loadOwnerPolicy_ = config.loadOwnerPolicy;
+    loadOwnerWorkerNumber_ = config.loadOwnerWorkerNumber;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
@@ -127,9 +129,19 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     for (size_t i = 0; i < nShard; i++) {
         auto& shard = task->desc[i];
         ShardTask shardTask;
-        shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true, true);
+        const auto loadOwnerDeviceId = LoadOwnerDeviceId(i, nShard);
+        shardTask.bufferHandle =
+            buffer_->Get(shard.owner, shard.index, true, true, loadOwnerDeviceId);
         shardTask.backendTaskHandle = 0;
         if (shardTask.bufferHandle.Owner() && !shardTask.bufferHandle.Ready()) {
+            if (S2hTraceEnabled() && loadOwnerDeviceId >= 0) {
+                UC_INFO_UNLIMITED(
+                    "[S2H_TRACE] event=route epoch={} worker={} pid={} tid={} cache_task={} "
+                    "block_pos={} owner={} policy={}",
+                    S2hTraceValue(S2H_TRACE_EPOCH_ENV),
+                    S2hTraceValue(S2H_TRACE_WORKER_ENV), getpid(), syscall(SYS_gettid),
+                    task->id, i, loadOwnerDeviceId, loadOwnerPolicy_);
+            }
             Detail::TaskDesc backendTask{
                 Detail::Shard{shard.owner, shard.index, {shardTask.bufferHandle.Data()}}
             };
@@ -139,6 +151,7 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
                 UC_ERROR("Failed({}) to submit load task({}) to backend.", res.Error(), task->id);
                 UC::Metrics::UpdateStats(
                     NAME_TO_METRIC_ID("cache_backend_load_submit_errors_total"), 1.0);
+                shardTask.bufferHandle.MarkFailed();
                 task->Fail(res.Error());
                 failureSet_->Insert(task->id);
                 waiter->Done();
@@ -310,12 +323,16 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
                      task.task->id);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_backend_load_wait_errors_total"),
                                      1.0);
+            task.bufferHandle.MarkFailed();
             return s;
         }
         task.bufferHandle.MarkReady();
         return Status::OK();
     }
     while (!task.bufferHandle.Ready()) {
+        if (task.bufferHandle.Failed()) {
+            return Status::Error("deterministic load owner backend load failed");
+        }
         if (failureSet_->Contains(task.task->id)) { return task.task->FailureStatus(); }
         std::this_thread::yield();
     }
@@ -371,6 +388,22 @@ void LoadQueue::ClearSdmaDirectHolders() noexcept { holder_.clear(); }
 bool LoadQueue::UseSdmaDirectTaskLaunch() const noexcept
 {
     return cacheSdmaDirect_ && sdmaDirectLaunchGranularity_ == kSdmaDirectLaunchTask;
+}
+
+int32_t LoadQueue::LoadOwnerDeviceId(size_t shardPosition, size_t shardNumber) const noexcept
+{
+    if (loadOwnerPolicy_ == kLoadOwnerPolicyCompete) { return -1; }
+    if (loadOwnerPolicy_ == kLoadOwnerPolicyRoundRobin) {
+        return static_cast<int32_t>(shardPosition % loadOwnerWorkerNumber_);
+    }
+
+    const auto base = shardNumber / loadOwnerWorkerNumber_;
+    const auto remainder = shardNumber % loadOwnerWorkerNumber_;
+    const auto largerRangeEnd = (base + 1) * remainder;
+    if (shardPosition < largerRangeEnd) {
+        return static_cast<int32_t>(shardPosition / (base + 1));
+    }
+    return static_cast<int32_t>(remainder + (shardPosition - largerRangeEnd) / base);
 }
 
 }  // namespace UC::CacheStore

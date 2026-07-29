@@ -63,6 +63,8 @@ private:
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
     std::string sdmaDirectLaunchGranularity_{kSdmaDirectLaunchShard};
+    std::string loadOwnerPolicy_{kLoadOwnerPolicyCompete};
+    size_t loadOwnerWorkerNumber_{1};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;
@@ -87,6 +89,7 @@ private:
     void RecordH2dSyncMetrics(double h2dSyncMs) const;
     void ClearSdmaDirectHolders() noexcept;
     bool UseSdmaDirectTaskLaunch() const noexcept;
+    int32_t LoadOwnerDeviceId(size_t shardPosition, size_t shardNumber) const noexcept;
 };
 
 }  // namespace UC::CacheStore

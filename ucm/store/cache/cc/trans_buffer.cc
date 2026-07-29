@@ -53,14 +53,20 @@ struct BufferMetaNode {
     size_t hash;
     size_t prev;
     size_t next;
+    uint64_t loadConsumers;
     bool ready;
+    bool loading;
+    bool failed;
     void Init()
     {
         reference = 0;
         hash = invalidIndex;
         prev = invalidIndex;
         next = invalidIndex;
+        loadConsumers = std::numeric_limits<uint64_t>::max();
         ready = false;
+        loading = false;
+        failed = false;
     }
 };
 
@@ -499,6 +505,8 @@ public:
 Status TransBuffer::Setup(const Config& config)
 {
     bypassHitOnLoad_ = config.cacheLoadBackendOnly;
+    deterministicLoadOwner_ = config.loadOwnerPolicy != kLoadOwnerPolicyCompete;
+    deviceId_ = config.deviceId;
     try {
         if (!config.shareBufferEnable) {
             strategy_ = std::make_shared<LocalBufferStrategy>(
@@ -518,20 +526,28 @@ Status TransBuffer::Setup(const Config& config)
 }
 
 TransBuffer::Handle TransBuffer::Get(const Detail::BlockId& blockId, size_t shardIdx,
-                                     bool allowReserved, bool isLoad)
+                                     bool allowReserved, bool isLoad,
+                                     int32_t loadOwnerDeviceId)
 {
     auto iBucket = Hash(blockId, shardIdx);
     bool owner = false;
     strategy_->BucketLock(iBucket);
     auto iNode = FindAt(iBucket, blockId, shardIdx, owner);
     if (iNode != invalidIndex) {
-        if (bypassHitOnLoad_ && isLoad && owner && Ready(iNode)) { MarkNotReady(iNode); }
+        if (deterministicLoadOwner_ && isLoad) {
+            owner = ClaimDeterministicLoad(iNode, loadOwnerDeviceId);
+        } else if (bypassHitOnLoad_ && isLoad && owner && Ready(iNode)) {
+            MarkNotReady(iNode);
+        }
         strategy_->BucketUnlock(iBucket);
         return Handle{this, iNode, owner};
     }
     iNode = Alloc(blockId, shardIdx, iBucket, allowReserved);
+    if (deterministicLoadOwner_ && isLoad) {
+        owner = ClaimDeterministicLoad(iNode, loadOwnerDeviceId);
+    }
     strategy_->BucketUnlock(iBucket);
-    return Handle(this, iNode, true);
+    return Handle(this, iNode, deterministicLoadOwner_ && isLoad ? owner : true);
 }
 
 bool TransBuffer::Exist(const Detail::BlockId& blockId, size_t shardIdx)
@@ -606,7 +622,10 @@ size_t TransBuffer::Alloc(const Detail::BlockId& blockId, size_t shardIdx, size_
         ++meta->reference;
         meta->block = blockId;
         meta->shard = shardIdx;
+        meta->loadConsumers = std::numeric_limits<uint64_t>::max();
         meta->ready = false;
+        meta->loading = false;
+        meta->failed = false;
         strategy_->NodeUnlock(iNode);
         return iNode;
     }
@@ -671,7 +690,15 @@ void TransBuffer::Release(Index pos)
 bool TransBuffer::Ready(Index pos)
 {
     strategy_->NodeLock(pos);
-    auto ready = strategy_->MetaAt(pos)->ready;
+    auto meta = strategy_->MetaAt(pos);
+    auto ready = meta->ready;
+    if (ready && deterministicLoadOwner_ && bypassHitOnLoad_) {
+        const auto deviceMask = DeviceMask();
+        if (deviceMask != 0) {
+            ready = (meta->loadConsumers & deviceMask) == 0;
+            if (ready) { meta->loadConsumers |= deviceMask; }
+        }
+    }
     strategy_->NodeUnlock(pos);
     return ready;
 }
@@ -679,7 +706,18 @@ bool TransBuffer::Ready(Index pos)
 void TransBuffer::MarkReady(Index pos)
 {
     strategy_->NodeLock(pos);
-    strategy_->MetaAt(pos)->ready = true;
+    auto meta = strategy_->MetaAt(pos);
+    const auto backendLoad = meta->loading;
+    meta->ready = true;
+    meta->loading = false;
+    meta->failed = false;
+    if (deterministicLoadOwner_ && bypassHitOnLoad_) {
+        if (backendLoad) {
+            meta->loadConsumers |= DeviceMask();
+        } else {
+            meta->loadConsumers = std::numeric_limits<uint64_t>::max();
+        }
+    }
     strategy_->NodeUnlock(pos);
 }
 
@@ -688,6 +726,59 @@ void TransBuffer::MarkNotReady(Index pos)
     strategy_->NodeLock(pos);
     strategy_->MetaAt(pos)->ready = false;
     strategy_->NodeUnlock(pos);
+}
+
+bool TransBuffer::Failed(Index pos)
+{
+    if (!deterministicLoadOwner_) { return false; }
+    strategy_->NodeLock(pos);
+    auto failed = strategy_->MetaAt(pos)->failed;
+    strategy_->NodeUnlock(pos);
+    return failed;
+}
+
+void TransBuffer::MarkFailed(Index pos)
+{
+    if (!deterministicLoadOwner_) { return; }
+    strategy_->NodeLock(pos);
+    auto meta = strategy_->MetaAt(pos);
+    meta->ready = false;
+    meta->loading = false;
+    meta->failed = true;
+    strategy_->NodeUnlock(pos);
+}
+
+bool TransBuffer::ClaimDeterministicLoad(Index pos, int32_t loadOwnerDeviceId)
+{
+    constexpr int32_t maxTrackedDeviceNumber = std::numeric_limits<uint64_t>::digits;
+    if (loadOwnerDeviceId < 0 || loadOwnerDeviceId >= maxTrackedDeviceNumber) { return false; }
+    strategy_->NodeLock(pos);
+    auto meta = strategy_->MetaAt(pos);
+    auto owner = false;
+    if (bypassHitOnLoad_) {
+        const auto ownerMask = uint64_t{1} << loadOwnerDeviceId;
+        owner = deviceId_ == loadOwnerDeviceId && !meta->loading &&
+                ((meta->loadConsumers & ownerMask) != 0 || meta->failed);
+        if (owner) {
+            meta->loadConsumers = 0;
+            meta->ready = false;
+            meta->loading = true;
+            meta->failed = false;
+        }
+    } else {
+        owner = deviceId_ == loadOwnerDeviceId && !meta->ready && !meta->loading &&
+                !meta->failed;
+        if (owner) { meta->loading = true; }
+    }
+    strategy_->NodeUnlock(pos);
+    return owner;
+}
+
+uint64_t TransBuffer::DeviceMask() const
+{
+    constexpr int32_t maxTrackedDeviceNumber = std::numeric_limits<uint64_t>::digits;
+    if (deviceId_ < 0 || deviceId_ >= maxTrackedDeviceNumber) { return 0; }
+    return uint64_t{1} << deviceId_;
 }
 
 }  // namespace UC::CacheStore

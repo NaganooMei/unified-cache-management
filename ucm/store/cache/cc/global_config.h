@@ -39,6 +39,9 @@ namespace UC::CacheStore {
 
 inline constexpr const char* kSdmaDirectLaunchShard = "shard";
 inline constexpr const char* kSdmaDirectLaunchTask = "task";
+inline constexpr const char* kLoadOwnerPolicyCompete = "compete";
+inline constexpr const char* kLoadOwnerPolicyRoundRobin = "round_robin";
+inline constexpr const char* kLoadOwnerPolicyContiguous = "contiguous";
 
 struct Config {
     StoreV1* storeBackend{};
@@ -57,6 +60,8 @@ struct Config {
     size_t timeoutMs{30000};
     size_t streamNumber{4};
     bool cacheLoadBackendOnly{false};
+    std::string loadOwnerPolicy{kLoadOwnerPolicyCompete};
+    size_t loadOwnerWorkerNumber{1};
     std::vector<uintptr_t> gpuKvBufferAddrs{};
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
