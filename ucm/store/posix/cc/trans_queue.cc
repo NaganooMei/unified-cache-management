@@ -224,11 +224,12 @@ Status TransQueue::S2H(IoUnit& ios)
             const auto activeAfter = activeS2h_.fetch_sub(1, std::memory_order_relaxed) - 1;
             UC_INFO_UNLIMITED(
                 "[S2H_TRACE] event=pread epoch={} worker={} pid={} tid={} posix_task={} "
-                "shard={} io_index={} offset={} size={} start_ns={} end_ns={} duration_ns={} "
-                "active_at_start={} active_after={} status={}",
+                "block_hash={} shard={} io_index={} offset={} size={} start_ns={} end_ns={} "
+                "duration_ns={} active_at_start={} active_after={} status={}",
                 S2hTraceValue(S2H_TRACE_EPOCH_ENV), S2hTraceValue(S2H_TRACE_WORKER_ENV),
-                getpid(), syscall(SYS_gettid), ios.task->id, ios.shard.index, ioIndex, offset,
-                ioSize_, startNs, endNs, endNs - startNs, activeAtStart, activeAfter,
+                getpid(), syscall(SYS_gettid), ios.task->id,
+                Detail::BlockIdHasher{}(ios.shard.owner), ios.shard.index, ioIndex, offset, ioSize_,
+                startNs, endNs, endNs - startNs, activeAtStart, activeAfter,
                 s.Success() ? "ok" : "error");
         }
         if (s.Failure()) [[unlikely]] {

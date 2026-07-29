@@ -30,6 +30,7 @@ import sys
 TRACE_MARKER = "[S2H_TRACE]"
 FIELD_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)")
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+READY_WAIT_THRESHOLD_NS = 10_000
 
 
 def parse_args():
@@ -50,6 +51,11 @@ def parse_args():
         action="store_true",
         help="Print task counts for every Posix PID/TID pair.",
     )
+    parser.add_argument(
+        "--show-xfer-worker",
+        type=int,
+        help="Print per-shard backend-wait/H2D timing for this worker.",
+    )
     return parser.parse_args()
 
 
@@ -66,11 +72,19 @@ def parse_int(fields, name):
     return int(value)
 
 
+def parse_optional_int(fields, name, default=-1):
+    value = fields.get(name)
+    return default if value is None else int(value)
+
+
 def parse_log(stream):
     epochs = collections.defaultdict(
         lambda: {
             "assignments": [],
             "preads": [],
+            "xfers": [],
+            "load_begin": [],
+            "load_end": [],
             "epoch_begin": [],
             "epoch_end": [],
         }
@@ -103,6 +117,7 @@ def parse_log(stream):
                         "pid": parse_int(fields, "pid"),
                         "tid": parse_int(fields, "tid"),
                         "posix_task": parse_int(fields, "posix_task"),
+                        "block_hash": parse_optional_int(fields, "block_hash"),
                         "shard": parse_int(fields, "shard"),
                         "io_index": parse_int(fields, "io_index"),
                         "offset": parse_int(fields, "offset"),
@@ -113,6 +128,48 @@ def parse_log(stream):
                         "active_at_start": parse_int(fields, "active_at_start"),
                         "active_after": parse_int(fields, "active_after"),
                         "status": fields.get("status", "unknown"),
+                    }
+                )
+            elif event == "xfer":
+                epochs[epoch]["xfers"].append(
+                    {
+                        "worker": parse_int(fields, "worker"),
+                        "pid": parse_int(fields, "pid"),
+                        "tid": parse_int(fields, "tid"),
+                        "cache_task": parse_int(fields, "cache_task"),
+                        "shard_pos": parse_int(fields, "shard_pos"),
+                        "total_shards": parse_int(fields, "total_shards"),
+                        "block_hash": parse_optional_int(fields, "block_hash"),
+                        "shard": parse_int(fields, "shard"),
+                        "backend_owner": parse_int(fields, "backend_owner"),
+                        "wait_start_ns": parse_int(fields, "wait_start_ns"),
+                        "ready_ns": parse_int(fields, "ready_ns"),
+                        "wait_ns": parse_int(fields, "wait_ns"),
+                        "h2d_start_ns": parse_int(fields, "h2d_start_ns"),
+                        "h2d_end_ns": parse_int(fields, "h2d_end_ns"),
+                        "h2d_submit_ns": parse_int(fields, "h2d_submit_ns"),
+                        "sync_start_ns": parse_int(fields, "sync_start_ns"),
+                        "sync_end_ns": parse_int(fields, "sync_end_ns"),
+                        "sync_ns": parse_int(fields, "sync_ns"),
+                        "final": parse_int(fields, "final"),
+                        "status": fields.get("status", "unknown"),
+                    }
+                )
+            elif event == "load_begin":
+                epochs[epoch]["load_begin"].append(
+                    {
+                        "worker": parse_int(fields, "worker"),
+                        "pid": parse_int(fields, "pid"),
+                        "start_ns": parse_int(fields, "start_ns"),
+                    }
+                )
+            elif event == "load_end":
+                epochs[epoch]["load_end"].append(
+                    {
+                        "worker": parse_int(fields, "worker"),
+                        "pid": parse_int(fields, "pid"),
+                        "end_ns": parse_int(fields, "end_ns"),
+                        "duration_ns": parse_int(fields, "duration_ns"),
                     }
                 )
             elif event in ("epoch_begin", "epoch_end"):
@@ -170,7 +227,183 @@ def interval_concurrency(intervals):
     }
 
 
-def summarize_epoch(epoch, records, show_threads):
+def summarize_overlap(records, show_xfer_worker):
+    xfers = records["xfers"]
+    if not xfers:
+        if records["load_begin"]:
+            print(
+                "\nS2H/H2D overlap trace: no xfer records. Rebuild/install the "
+                "modified UCM C++ library and use shard launch mode."
+            )
+        return
+
+    xfers_by_worker = collections.defaultdict(list)
+    for record in xfers:
+        xfers_by_worker[record["worker"]].append(record)
+
+    load_begin_by_worker = {
+        record["worker"]: record["start_ns"] for record in records["load_begin"]
+    }
+    load_duration_by_worker = {
+        record["worker"]: record["duration_ns"] for record in records["load_end"]
+    }
+    pread_ready_by_shard = {}
+    for record in records["preads"]:
+        if record["status"] != "ok" or record["block_hash"] < 0:
+            continue
+        key = (record["block_hash"], record["shard"])
+        pread_ready_by_shard[key] = max(
+            pread_ready_by_shard.get(key, 0), record["end_ns"]
+        )
+
+    print(
+        "\nBackend-ready wait in ucm_load_xfer "
+        f"(immediate means <= {READY_WAIT_THRESHOLD_NS / 1000:.0f} us)"
+    )
+    print(
+        "worker  shards  owner  immediate  waited  wait_sum_ms  "
+        "wait_p99_us  wait_max_us"
+    )
+    overlap_by_worker = {}
+    hol_by_worker = {}
+    for worker in sorted(xfers_by_worker):
+        worker_xfers = sorted(
+            xfers_by_worker[worker], key=lambda record: record["shard_pos"]
+        )
+        waits_ns = sorted(record["wait_ns"] for record in worker_xfers)
+        immediate = sum(duration <= READY_WAIT_THRESHOLD_NS for duration in waits_ns)
+        owner_count = sum(record["backend_owner"] for record in worker_xfers)
+        print(
+            f"{worker:>6}  {len(worker_xfers):>6}  {owner_count:>5}  "
+            f"{immediate:>9}  {len(worker_xfers) - immediate:>6}  "
+            f"{sum(waits_ns) / 1e6:>11.3f}  "
+            f"{percentile(waits_ns, 99) / 1000:>11.3f}  "
+            f"{max(waits_ns, default=0) / 1000:>11.3f}"
+        )
+
+        h2d_xfers = sorted(
+            (
+                record
+                for record in worker_xfers
+                if record["h2d_end_ns"] > record["h2d_start_ns"]
+            ),
+            key=lambda record: record["h2d_start_ns"],
+        )
+        gaps_ns = [
+            max(0, current["h2d_start_ns"] - previous["h2d_end_ns"])
+            for previous, current in zip(h2d_xfers, h2d_xfers[1:])
+        ]
+        first_h2d_delay_ns = 0
+        if h2d_xfers and worker in load_begin_by_worker:
+            first_h2d_delay_ns = max(
+                0, h2d_xfers[0]["h2d_start_ns"] - load_begin_by_worker[worker]
+            )
+        submit_span_ns = 0
+        if h2d_xfers:
+            submit_span_ns = h2d_xfers[-1]["h2d_end_ns"] - h2d_xfers[0]["h2d_start_ns"]
+        overlap_by_worker[worker] = {
+            "h2d_count": len(h2d_xfers),
+            "first_h2d_delay_ns": first_h2d_delay_ns,
+            "submit_span_ns": submit_span_ns,
+            "gap_sum_ns": sum(gaps_ns),
+            "gap_max_ns": max(gaps_ns, default=0),
+            "sync_ns": max((record["sync_ns"] for record in worker_xfers), default=0),
+            "load_ns": load_duration_by_worker.get(worker, 0),
+        }
+
+        hol_waits = 0
+        hol_later_ready_total = 0
+        hol_later_ready_max = 0
+        for index, record in enumerate(worker_xfers):
+            if record["wait_ns"] <= READY_WAIT_THRESHOLD_NS:
+                continue
+            later_ready = 0
+            for later in worker_xfers[index + 1 :]:
+                ready_ns = pread_ready_by_shard.get(
+                    (later["block_hash"], later["shard"]), 0
+                )
+                if ready_ns and ready_ns < record["ready_ns"]:
+                    later_ready += 1
+            if later_ready:
+                hol_waits += 1
+                hol_later_ready_total += later_ready
+                hol_later_ready_max = max(hol_later_ready_max, later_ready)
+        hol_by_worker[worker] = {
+            "waits": hol_waits,
+            "later_ready_total": hol_later_ready_total,
+            "later_ready_max": hol_later_ready_max,
+        }
+
+    if pread_ready_by_shard:
+        print("\nFIFO head-of-line evidence")
+        print("worker  blocked_heads  later_ready_total  later_ready_max")
+        for worker in sorted(hol_by_worker):
+            hol = hol_by_worker[worker]
+            print(
+                f"{worker:>6}  {hol['waits']:>13}  "
+                f"{hol['later_ready_total']:>17}  {hol['later_ready_max']:>15}"
+            )
+
+    print("\nH2D feed timing (CPU submission timeline, not device execution time)")
+    print(
+        "worker  h2ds  first_h2d_ms  submit_span_ms  gap_sum_ms  "
+        "gap_max_us  final_sync_ms  load_ms"
+    )
+    for worker in sorted(overlap_by_worker):
+        timing = overlap_by_worker[worker]
+        print(
+            f"{worker:>6}  {timing['h2d_count']:>4}  "
+            f"{timing['first_h2d_delay_ns'] / 1e6:>12.3f}  "
+            f"{timing['submit_span_ns'] / 1e6:>14.3f}  "
+            f"{timing['gap_sum_ns'] / 1e6:>10.3f}  "
+            f"{timing['gap_max_ns'] / 1000:>10.3f}  "
+            f"{timing['sync_ns'] / 1e6:>13.3f}  "
+            f"{timing['load_ns'] / 1e6:>7.3f}"
+        )
+
+    measured_loads = [
+        (worker, timing["load_ns"])
+        for worker, timing in overlap_by_worker.items()
+        if timing["load_ns"] > 0
+    ]
+    if measured_loads:
+        slowest_worker, slowest_load_ns = max(measured_loads, key=lambda item: item[1])
+        print("\nOverlap headline")
+        print(f"  slowest load worker    : {slowest_worker}")
+        print(f"  group load makespan    : {slowest_load_ns / 1e6:.3f} ms")
+        print(
+            "  interpretation         : backend wait and submit gaps are transfer-thread "
+            "feed stalls; only stalls that empty the device queue are exposed in end-to-end time"
+        )
+
+    if show_xfer_worker is not None:
+        details = sorted(
+            xfers_by_worker.get(show_xfer_worker, []),
+            key=lambda record: record["shard_pos"],
+        )
+        print(f"\nPer-shard transfer timing: worker {show_xfer_worker}")
+        print(
+            "shard_pos  shard  owner  wait_us  feed_gap_us  h2d_submit_us  "
+            "sync_us  final  status"
+        )
+        previous_h2d_end_ns = 0
+        for record in details:
+            feed_gap_ns = 0
+            if previous_h2d_end_ns and record["h2d_start_ns"]:
+                feed_gap_ns = max(0, record["h2d_start_ns"] - previous_h2d_end_ns)
+            print(
+                f"{record['shard_pos']:>9}  {record['shard']:>5}  "
+                f"{record['backend_owner']:>5}  {record['wait_ns'] / 1000:>7.3f}  "
+                f"{feed_gap_ns / 1000:>11.3f}  "
+                f"{record['h2d_submit_ns'] / 1000:>13.3f}  "
+                f"{record['sync_ns'] / 1000:>7.3f}  {record['final']:>5}  "
+                f"{record['status']}"
+            )
+            if record["h2d_end_ns"]:
+                previous_h2d_end_ns = record["h2d_end_ns"]
+
+
+def summarize_epoch(epoch, records, show_threads, show_xfer_worker):
     assignments = records["assignments"]
     preads = records["preads"]
 
@@ -211,9 +444,7 @@ def summarize_epoch(epoch, records, show_threads):
     print("\n" + "=" * 78)
     print(f"S2H trace summary: measured load epoch {epoch}")
     print("=" * 78)
-    print(
-        "worker  pid       assigned  preads  ok  failed  threads  local_peak"
-    )
+    print("worker  pid       assigned  preads  ok  failed  threads  local_peak")
     for worker in workers:
         pid_text = (
             ",".join(str(pid) for pid in sorted(pids_by_worker.get(worker, set())))
@@ -250,11 +481,15 @@ def summarize_epoch(epoch, records, show_threads):
 
     if durations_us:
         print("\nPread latency")
-        print(f"  average                : {sum(durations_us) / len(durations_us):.3f} us")
+        print(
+            f"  average                : {sum(durations_us) / len(durations_us):.3f} us"
+        )
         print(f"  p50                    : {percentile(durations_us, 50):.3f} us")
         print(f"  p90                    : {percentile(durations_us, 90):.3f} us")
         print(f"  p99                    : {percentile(durations_us, 99):.3f} us")
         print(f"  maximum                : {durations_us[-1]:.3f} us")
+
+    summarize_overlap(records, show_xfer_worker)
 
     if show_threads:
         print("\nPosix thread task distribution")
@@ -282,7 +517,7 @@ def main():
         return 2
 
     for epoch in selected_epochs:
-        summarize_epoch(epoch, epochs[epoch], args.show_threads)
+        summarize_epoch(epoch, epochs[epoch], args.show_threads, args.show_xfer_worker)
 
     if malformed:
         print(

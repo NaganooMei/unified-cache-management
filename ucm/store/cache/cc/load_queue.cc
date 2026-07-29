@@ -21,6 +21,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <sys/syscall.h>
@@ -46,6 +48,14 @@ long S2hTraceValue(const char* name)
 {
     const auto* value = std::getenv(name);
     return value == nullptr ? -1 : std::strtol(value, nullptr, 10);
+}
+
+std::uint64_t MonotonicNs()
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
 }
 
 }  // namespace
@@ -74,6 +84,7 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
     holder_.reserve(1024);
+    transferTrace_.reserve(1024);
     dispatcher_ = std::thread{&LoadQueue::DispatchStage, this};
     std::promise<Status> started;
     auto fut = started.get_future();
@@ -117,6 +128,9 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     auto tpWait = NowTime::Now();
     const auto nShard = task->desc.size();
     const auto taskLaunch = UseSdmaDirectTaskLaunch();
+    const auto traceS2h = S2hTraceEnabled();
+    const auto traceEpoch = traceS2h ? S2hTraceValue(S2H_TRACE_EPOCH_ENV) : -1;
+    const auto traceWorker = traceS2h ? S2hTraceValue(S2H_TRACE_WORKER_ENV) : -1;
     size_t backendSubmitCount = 0;
     std::vector<ShardTask> readyTasks;
     std::vector<ShardTask> pendingTasks;
@@ -127,6 +141,12 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     for (size_t i = 0; i < nShard; i++) {
         auto& shard = task->desc[i];
         ShardTask shardTask;
+        shardTask.traceEnabled = traceS2h;
+        shardTask.traceEpoch = traceEpoch;
+        shardTask.traceWorker = traceWorker;
+        shardTask.traceShardPosition = i;
+        shardTask.traceShardNumber = nShard;
+        shardTask.traceBlockHash = traceS2h ? Detail::BlockIdHasher{}(shard.owner) : 0;
         shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true, true);
         shardTask.backendTaskHandle = 0;
         if (shardTask.bufferHandle.Owner() && !shardTask.bufferHandle.Ready()) {
@@ -183,12 +203,12 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
                              static_cast<double>(backendSubmitCount));
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_shards_total"),
                              static_cast<double>(nShard));
-    if (S2hTraceEnabled()) {
+    if (traceS2h) {
         UC_INFO_UNLIMITED(
             "[S2H_TRACE] event=assign epoch={} worker={} pid={} tid={} cache_task={} "
             "backend_tasks={} total_shards={}",
-            S2hTraceValue(S2H_TRACE_EPOCH_ENV), S2hTraceValue(S2H_TRACE_WORKER_ENV), getpid(),
-            syscall(SYS_gettid), task->id, backendSubmitCount, nShard);
+            traceEpoch, traceWorker, getpid(), syscall(SYS_gettid), task->id, backendSubmitCount,
+            nShard);
     }
 }
 
@@ -216,15 +236,50 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         if (task.waiter) {
             ClearSdmaDirectHolders();
             task.waiter->Done();
+            FlushTransferTrace();
         }
         return;
     }
     auto s = Status::OK();
     auto waiter = task.waiter;
+    const auto traceS2h = task.traceEnabled;
+    const auto backendOwner = task.backendTaskHandle != 0;
+    std::uint64_t backendWaitStartNs = 0;
+    std::uint64_t backendReadyNs = 0;
+    auto traceTransfer = [&](std::uint64_t h2dStartNs, std::uint64_t h2dEndNs,
+                             std::uint64_t syncStartNs, std::uint64_t syncEndNs,
+                             const char* status) {
+        if (!traceS2h) { return; }
+        TransferTrace trace;
+        trace.epoch = task.traceEpoch;
+        trace.worker = task.traceWorker;
+        trace.pid = getpid();
+        trace.tid = syscall(SYS_gettid);
+        trace.cacheTask = taskHandle;
+        trace.shardPosition = task.traceShardPosition;
+        trace.shardNumber = task.traceShardNumber;
+        trace.blockHash = task.traceBlockHash;
+        trace.shardIndex = task.shard.index;
+        trace.backendOwner = backendOwner;
+        trace.waitStartNs = backendWaitStartNs;
+        trace.readyNs = backendReadyNs;
+        trace.h2dStartNs = h2dStartNs;
+        trace.h2dEndNs = h2dEndNs;
+        trace.syncStartNs = syncStartNs;
+        trace.syncEndNs = syncEndNs;
+        trace.final = waiter != nullptr;
+        trace.status = status;
+        transferTrace_.push_back(trace);
+    };
     do {
         auto tpBackendWait = NowTime::Now();
+        if (traceS2h) { backendWaitStartNs = MonotonicNs(); }
         s = WaitBackendTaskReady(task);
-        if (s.Failure()) [[unlikely]] { break; }
+        if (traceS2h) { backendReadyNs = MonotonicNs(); }
+        if (s.Failure()) [[unlikely]] {
+            traceTransfer(0, 0, 0, 0, "backend_error");
+            break;
+        }
         auto tpBackendReady = NowTime::Now();
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
                                  (tpBackendReady - tpBackendWait) * 1e3);
@@ -243,9 +298,12 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         }
 
         if (cacheSdmaDirect_) {
+            const auto h2dStartNs = traceS2h ? MonotonicNs() : 0;
             s = HostToDeviceAsync(stream, task.bufferHandle.DeviceData(), task.shard.addrs.data());
+            const auto h2dEndNs = traceS2h ? MonotonicNs() : 0;
             auto tpH2dSubmitted = NowTime::Now();
             if (s.Failure()) [[unlikely]] {
+                traceTransfer(h2dStartNs, h2dEndNs, 0, 0, "h2d_error");
                 UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
@@ -253,25 +311,33 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
                                      (tpH2dSubmitted - tpBackendReady) * 1e3);
             if (!task.waiter) {
+                traceTransfer(h2dStartNs, h2dEndNs, 0, 0, "ok");
                 holder_.push_back(std::move(task));
                 return;
             }
             auto tpH2dSyncStart = NowTime::Now();
+            const auto syncStartNs = traceS2h ? MonotonicNs() : 0;
             s = stream.Synchronize();
+            const auto syncEndNs = traceS2h ? MonotonicNs() : 0;
             auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
             RecordH2dSyncMetrics(h2dSyncMs);
             holder_.clear();
             if (s.Failure()) [[unlikely]] {
+                traceTransfer(h2dStartNs, h2dEndNs, syncStartNs, syncEndNs, "sync_error");
                 UC_ERROR("Failed({}) to sync on stream for task({}).", s, taskHandle);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
                 break;
             }
+            traceTransfer(h2dStartNs, h2dEndNs, syncStartNs, syncEndNs, "ok");
             break;
         }
 
+        const auto h2dStartNs = traceS2h ? MonotonicNs() : 0;
         s = HostToDeviceAsync(stream, task.bufferHandle.Data(), task.shard.addrs.data());
+        const auto h2dEndNs = traceS2h ? MonotonicNs() : 0;
         auto tpH2dSubmitted = NowTime::Now();
         if (s.Failure()) [[unlikely]] {
+            traceTransfer(h2dStartNs, h2dEndNs, 0, 0, "h2d_error");
             UC_ERROR("Failed({}) to do H2D for task({}).", s, taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
@@ -279,26 +345,34 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
                                  (tpH2dSubmitted - tpBackendReady) * 1e3);
         if (!task.waiter) {
+            traceTransfer(h2dStartNs, h2dEndNs, 0, 0, "ok");
             holder_.push_back(std::move(task));
             return;
         }
         auto tpH2dSyncStart = NowTime::Now();
+        const auto syncStartNs = traceS2h ? MonotonicNs() : 0;
         s = stream.Synchronize();
+        const auto syncEndNs = traceS2h ? MonotonicNs() : 0;
         auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
         RecordH2dSyncMetrics(h2dSyncMs);
         holder_.clear();
         if (s.Failure()) [[unlikely]] {
+            traceTransfer(h2dStartNs, h2dEndNs, syncStartNs, syncEndNs, "sync_error");
             UC_ERROR("Failed({}) to sync on stream for task({}).", s, taskHandle);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
+        traceTransfer(h2dStartNs, h2dEndNs, syncStartNs, syncEndNs, "ok");
     } while (0);
     if (s.Failure()) [[unlikely]] {
         parentTask->Fail(s);
         failureSet_->Insert(taskHandle);
     }
     if (UseSdmaDirectTaskLaunch()) { ClearSdmaDirectHolders(); }
-    if (waiter) { waiter->Done(); }
+    if (waiter) {
+        waiter->Done();
+        FlushTransferTrace();
+    }
 }
 
 Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
@@ -364,6 +438,24 @@ Status LoadQueue::FlushSdmaDirectTaskBatch(CopyStream& stream)
 void LoadQueue::RecordH2dSyncMetrics(double h2dSyncMs) const
 {
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_sync_ms"), h2dSyncMs);
+}
+
+void LoadQueue::FlushTransferTrace()
+{
+    for (const auto& trace : transferTrace_) {
+        UC_INFO_UNLIMITED(
+            "[S2H_TRACE] event=xfer epoch={} worker={} pid={} tid={} cache_task={} "
+            "shard_pos={} total_shards={} block_hash={} shard={} backend_owner={} "
+            "wait_start_ns={} ready_ns={} wait_ns={} h2d_start_ns={} h2d_end_ns={} "
+            "h2d_submit_ns={} sync_start_ns={} sync_end_ns={} sync_ns={} final={} status={}",
+            trace.epoch, trace.worker, trace.pid, trace.tid, trace.cacheTask,
+            trace.shardPosition, trace.shardNumber, trace.blockHash, trace.shardIndex,
+            trace.backendOwner ? 1 : 0, trace.waitStartNs, trace.readyNs,
+            trace.readyNs - trace.waitStartNs, trace.h2dStartNs, trace.h2dEndNs,
+            trace.h2dEndNs - trace.h2dStartNs, trace.syncStartNs, trace.syncEndNs,
+            trace.syncEndNs - trace.syncStartNs, trace.final ? 1 : 0, trace.status);
+    }
+    transferTrace_.clear();
 }
 
 void LoadQueue::ClearSdmaDirectHolders() noexcept { holder_.clear(); }

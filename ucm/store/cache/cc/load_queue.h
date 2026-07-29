@@ -24,6 +24,7 @@
 #ifndef UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 #define UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 
+#include <cstdint>
 #include <future>
 #include <string>
 #include <thread>
@@ -49,7 +50,33 @@ class LoadQueue {
         TransBuffer::Handle bufferHandle;
         Detail::TaskHandle backendTaskHandle;
         WaiterPtr waiter;
+        bool traceEnabled{false};
+        long traceEpoch{-1};
+        long traceWorker{-1};
+        size_t traceShardPosition{0};
+        size_t traceShardNumber{0};
+        size_t traceBlockHash{0};
         bool launchBoundary{false};
+    };
+    struct TransferTrace {
+        long epoch{-1};
+        long worker{-1};
+        long pid{-1};
+        long tid{-1};
+        Detail::TaskHandle cacheTask{0};
+        size_t shardPosition{0};
+        size_t shardNumber{0};
+        size_t blockHash{0};
+        size_t shardIndex{0};
+        bool backendOwner{false};
+        std::uint64_t waitStartNs{0};
+        std::uint64_t readyNs{0};
+        std::uint64_t h2dStartNs{0};
+        std::uint64_t h2dEndNs{0};
+        std::uint64_t syncStartNs{0};
+        std::uint64_t syncEndNs{0};
+        bool final{false};
+        const char* status{"unknown"};
     };
 
 private:
@@ -69,6 +96,7 @@ private:
     std::thread dispatcher_;
     std::thread transfer_;
     std::vector<ShardTask> holder_;
+    std::vector<TransferTrace> transferTrace_;
 
 public:
     ~LoadQueue();
@@ -85,6 +113,7 @@ private:
     Status HostToDeviceTaskAsync(CopyStream& stream, std::vector<ShardTask>& tasks);
     Status FlushSdmaDirectTaskBatch(CopyStream& stream);
     void RecordH2dSyncMetrics(double h2dSyncMs) const;
+    void FlushTransferTrace();
     void ClearSdmaDirectHolders() noexcept;
     bool UseSdmaDirectTaskLaunch() const noexcept;
 };

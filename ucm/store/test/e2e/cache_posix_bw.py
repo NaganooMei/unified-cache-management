@@ -530,10 +530,26 @@ def load(
     shard_indexes = [0 for _ in range(block_number)]
     synchronize_device()
     tp = time.perf_counter()
+    trace_s2h = not warmup and epoch in s2h_trace_epochs
+    trace_start_ns = time.perf_counter_ns() if trace_s2h else 0
+    if trace_s2h:
+        print(
+            f"[S2H_TRACE] event=load_begin epoch={epoch} "
+            f"worker={device_id} pid={os.getpid()} start_ns={trace_start_ns}",
+            flush=True,
+        )
     task = worker.load(block_ids, shard_indexes, dst_tensors)
     worker.wait(task)
     synchronize_device()
     cost = time.perf_counter() - tp
+    if trace_s2h:
+        trace_end_ns = time.perf_counter_ns()
+        print(
+            f"[S2H_TRACE] event=load_end epoch={epoch} "
+            f"worker={device_id} pid={os.getpid()} end_ns={trace_end_ns} "
+            f"duration_ns={trace_end_ns - trace_start_ns}",
+            flush=True,
+        )
     print_result("load", epoch, device_id, cost, total_size, warmup)
     return cost
 
@@ -690,10 +706,7 @@ def worker_loop(
         warmup = load_idx < warmup_epoch_number
         epoch = load_idx if warmup else load_idx - warmup_epoch_number
         record_idx = load_idx % len(block_id_records)
-        trace_s2h = (
-            not warmup
-            and epoch in s2h_trace_epochs
-        )
+        trace_s2h = not warmup and epoch in s2h_trace_epochs
         configure_s2h_trace(trace_s2h, epoch, device_id)
         if trace_s2h:
             print(
