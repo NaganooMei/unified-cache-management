@@ -35,7 +35,6 @@ import subprocess
 import sys
 import time
 
-import numpy as np
 import torch
 
 store_pipeline = "Cache|Fake"
@@ -62,8 +61,13 @@ load_epoch_number = 128
 warmup_epoch_number = 5
 # Pause between adjacent epochs, in milliseconds.
 epoch_interval_ms = 15
-# Load modes executed sequentially in one run for direct A/B comparison.
-load_benchmark_modes = ("sdma16worker", "broadcast16worker")
+# Use one root H2D followed by HCCL broadcast and local FFTS scatter.
+enable_tp_broadcast_load = False
+# The selected mode is intentionally derived from one switch so Cache|Fake and
+# Cache|Posix exercise the same normal-or-broadcast benchmark contract.
+load_benchmark_modes = (
+    ("broadcast16worker",) if enable_tp_broadcast_load else ("sdma16worker",)
+)
 # Run a dedicated full-data correctness phase before timed load warmups.
 accuracy_check_enable = True
 # Enable Cache SDMA Direct transfers. Both comparison modes require it.
@@ -213,15 +217,15 @@ allowed_load_benchmark_modes = {"sdma16worker", "broadcast16worker"}
 unknown_load_modes = set(load_benchmark_modes) - allowed_load_benchmark_modes
 if unknown_load_modes:
     raise ValueError(f"unsupported load benchmark modes: {sorted(unknown_load_modes)}")
-if load_benchmark_modes and worker_number != 16:
+if enable_tp_broadcast_load and worker_number != 16:
     raise ValueError(
         f"the sdma16worker/broadcast16worker comparison requires 16 workers, "
         f"got {worker_number}"
     )
-if "broadcast16worker" in load_benchmark_modes and worker_mode != "mla":
+if enable_tp_broadcast_load and worker_mode != "mla":
     raise ValueError("broadcast16worker currently requires an MLA model profile")
-if load_benchmark_modes and not cache_sdma_direct:
-    raise ValueError("load bandwidth comparison requires cache_sdma_direct=True")
+if enable_tp_broadcast_load and not cache_sdma_direct:
+    raise ValueError("broadcast load requires cache_sdma_direct=True")
 
 
 def parse_cpu_list(cpu_list: str):
@@ -427,19 +431,6 @@ def initialize_collectives(device_id: int, init_method: str):
         rank=device_id,
         world_size=worker_number,
     )
-    if device_type == "cuda":
-        return torch.cuda.Stream()
-    return torch.npu.Stream()
-
-
-def broadcast_tensor(tensor: torch.Tensor, stream):
-    if device_type == "cuda":
-        with torch.cuda.stream(stream):
-            torch.distributed.broadcast(tensor, src=0)
-    else:
-        with torch.npu.stream(stream):
-            torch.distributed.broadcast(tensor, src=0)
-    stream.synchronize()
 
 
 def synchronize_device():
@@ -470,7 +461,7 @@ def create_cache_worker(
     config["cache_stream_number"] = 4
     config["cache_sdma_direct"] = cache_sdma_direct
     config["cache_sdma_direct_launch_granularity"] = "shard"
-    config["cache_tp_broadcast_scatter"] = "broadcast16worker" in load_benchmark_modes
+    config["cache_tp_broadcast_scatter"] = enable_tp_broadcast_load
     config["timeout_ms"] = 30000
     config["device_id"] = device_id
     if store_cpu_affinity_cores:
@@ -555,70 +546,16 @@ def make_accuracy_tensors(device: str, record_idx: int):
     return tensors
 
 
-def make_broadcast_buffer(device: str):
-    dtype = torch.bfloat16
-    element_size = torch.empty((), dtype=dtype).element_size()
-    if bytes_per_epoch % element_size != 0:
-        raise ValueError(
-            f"broadcast payload {bytes_per_epoch} is not divisible by {element_size}"
-        )
-    return torch.empty([bytes_per_epoch // element_size], dtype=dtype, device=device)
-
-
-def make_contiguous_block_addrs(buffer: torch.Tensor):
-    tensor_offsets = np.asarray(
-        [0] + list(np.cumsum(tensor_size_list[:-1], dtype=np.uint64)),
-        dtype=np.uint64,
-    )
-    block_offsets = np.arange(block_number, dtype=np.uint64) * bytes_per_block
-    return (
-        np.uint64(buffer.data_ptr()) + block_offsets[:, None] + tensor_offsets[None, :]
-    )
-
-
-def make_source_offsets():
-    return np.arange(block_number, dtype=np.uint64) * bytes_per_block
-
-
-def make_tensor_addrs(tensors):
-    return np.asarray(
-        [[tensor.data_ptr() for tensor in row] for row in tensors],
-        dtype=np.uint64,
-    )
-
-
 def verify_tensor_rows(expected_tensors, actual_tensors, stage: str, device_id: int):
     for block_idx, (expected_row, actual_row) in enumerate(
         zip(expected_tensors, actual_tensors)
     ):
-        for tensor_idx, (expected, actual) in enumerate(
-            zip(expected_row, actual_row)
-        ):
+        for tensor_idx, (expected, actual) in enumerate(zip(expected_row, actual_row)):
             if not torch.equal(expected, actual):
                 raise RuntimeError(
                     f"{stage} accuracy check failed on worker {device_id}, "
                     f"block {block_idx}, tensor {tensor_idx}"
                 )
-
-
-def verify_contiguous_buffer(
-    expected_tensors, buffer: torch.Tensor, stage: str, device_id: int
-):
-    element_size = buffer.element_size()
-    byte_offset = 0
-    for block_idx, row in enumerate(expected_tensors):
-        for tensor_idx, (expected, tensor_size) in enumerate(
-            zip(row, tensor_size_list)
-        ):
-            element_offset = byte_offset // element_size
-            element_number = tensor_size // element_size
-            actual = buffer.narrow(0, element_offset, element_number)
-            if not torch.equal(expected, actual):
-                raise RuntimeError(
-                    f"{stage} accuracy check failed on worker {device_id}, "
-                    f"block {block_idx}, tensor {tensor_idx}"
-                )
-            byte_offset += tensor_size
 
 
 def dump(
@@ -665,54 +602,28 @@ def load_broadcast16worker(
     worker,
     block_ids,
     warmup: bool,
-    barrier: multiprocessing.Barrier,
-    broadcast_buffer: torch.Tensor,
-    broadcast_buffer_addrs: np.ndarray,
-    source_offsets: np.ndarray,
-    broadcast_stream,
 ):
     dst_tensors = make_empty_tensors(device)
-    destination_addrs = make_tensor_addrs(dst_tensors)
     shard_indexes = [0 for _ in range(block_number)]
 
     synchronize_device()
-    total_start = time.perf_counter()
-    root_load_cost = 0.0
-    if device_id == 0:
-        root_load_start = time.perf_counter()
-        task = worker.load_data(
-            block_ids,
-            shard_indexes,
-            broadcast_buffer_addrs,
-        )
-        worker.wait(task)
-        root_load_cost = time.perf_counter() - root_load_start
-
-    # Keep HCCL timing separate from the time spent waiting for the root H2D.
-    barrier.wait()
-    broadcast_start = time.perf_counter()
-    broadcast_tensor(broadcast_buffer, broadcast_stream)
-    broadcast_cost = time.perf_counter() - broadcast_start
-
-    scatter_start = time.perf_counter()
-    worker.scatter_from_contiguous(
-        broadcast_buffer.data_ptr(),
-        source_offsets,
-        destination_addrs,
+    stats = worker.load_broadcast(
+        block_ids,
+        shard_indexes,
+        dst_tensors,
+        src_rank=0,
     )
-    scatter_cost = time.perf_counter() - scatter_start
-    total_cost = time.perf_counter() - total_start
 
     print_broadcast_result(
         epoch,
         device_id,
-        root_load_cost,
-        broadcast_cost,
-        scatter_cost,
-        total_cost,
+        stats.root_load_cost,
+        stats.broadcast_cost,
+        stats.scatter_cost,
+        stats.total_cost,
         warmup,
     )
-    return root_load_cost, broadcast_cost, scatter_cost, total_cost
+    return stats
 
 
 def validate_load_accuracy(
@@ -721,68 +632,37 @@ def validate_load_accuracy(
     worker,
     block_ids,
     barrier: multiprocessing.Barrier,
-    broadcast_buffer: torch.Tensor,
-    broadcast_buffer_addrs: np.ndarray,
-    source_offsets: np.ndarray,
-    broadcast_stream,
 ):
     record_idx = 0
     shard_indexes = [0 for _ in range(block_number)]
     expected_tensors = make_accuracy_tensors(device, record_idx)
 
-    if "sdma16worker" in load_benchmark_modes:
-        dst_tensors = make_empty_tensors(device)
-        barrier.wait()
+    dst_tensors = make_empty_tensors(device)
+    barrier.wait()
+    if enable_tp_broadcast_load:
+        worker.load_broadcast(
+            block_ids,
+            shard_indexes,
+            dst_tensors,
+            src_rank=0,
+        )
+    else:
         task = worker.load(block_ids, shard_indexes, dst_tensors)
         worker.wait(task)
-        synchronize_device()
-        verify_tensor_rows(
-            expected_tensors, dst_tensors, "sdma16worker load", device_id
-        )
-        barrier.wait()
-
-    if "broadcast16worker" in load_benchmark_modes:
-        barrier.wait()
-        if device_id == 0:
-            task = worker.load_data(
-                block_ids,
-                shard_indexes,
-                broadcast_buffer_addrs,
-            )
-            worker.wait(task)
-            verify_contiguous_buffer(
-                expected_tensors,
-                broadcast_buffer,
-                "broadcast root load",
-                device_id,
-            )
-
-        barrier.wait()
-        broadcast_tensor(broadcast_buffer, broadcast_stream)
-        verify_contiguous_buffer(
-            expected_tensors,
-            broadcast_buffer,
-            "HCCL broadcast",
-            device_id,
-        )
-
-        dst_tensors = make_empty_tensors(device)
-        worker.scatter_from_contiguous(
-            broadcast_buffer.data_ptr(),
-            source_offsets,
-            make_tensor_addrs(dst_tensors),
-        )
-        verify_tensor_rows(
-            expected_tensors, dst_tensors, "FFTS scatter", device_id
-        )
-        barrier.wait()
 
     synchronize_device()
+    verify_tensor_rows(
+        expected_tensors,
+        dst_tensors,
+        "broadcast load" if enable_tp_broadcast_load else "normal load",
+        device_id,
+    )
     barrier.wait()
     if device_id == 0:
         print(
             "accuracy check passed: "
-            f"modes={load_benchmark_modes}, record_idx={record_idx}, "
+            f"enable_tp_broadcast_load={enable_tp_broadcast_load}, "
+            f"record_idx={record_idx}, "
             f"bytes={bytes_per_epoch}"
         )
 
@@ -960,7 +840,8 @@ def worker_loop(
         device_id,
     )
     device = setup_device(device_id)
-    broadcast_stream = initialize_collectives(device_id, distributed_init_method)
+    if enable_tp_broadcast_load:
+        initialize_collectives(device_id, distributed_init_method)
     worker = create_cache_worker(
         UcmPipelineStore, unique_id, device_id, store_cpu_affinity_cores
     )
@@ -981,7 +862,7 @@ def worker_loop(
         f"shard_size={shard_size}, dtype={torch.bfloat16}, "
         f"warmup_epoch_number={warmup_epoch_number}, "
         f"epoch_interval_ms={epoch_interval_ms}, "
-        f"load_benchmark_modes={load_benchmark_modes}, "
+        f"enable_tp_broadcast_load={enable_tp_broadcast_load}, "
         f"accuracy_check_enable={accuracy_check_enable}, "
         f"cache_sdma_direct={cache_sdma_direct}, "
         f"share_buffer_enable={share_buffer_enable}, "
@@ -1015,9 +896,6 @@ def worker_loop(
         wait_backend_ready(scheduler, backend_block_ids)
     barrier.wait()
 
-    broadcast_buffer = make_broadcast_buffer(device)
-    broadcast_buffer_addrs = make_contiguous_block_addrs(broadcast_buffer)
-    source_offsets = make_source_offsets()
     if accuracy_check_enable:
         validate_load_accuracy(
             device,
@@ -1025,10 +903,6 @@ def worker_loop(
             worker,
             block_id_records[0],
             barrier,
-            broadcast_buffer,
-            broadcast_buffer_addrs,
-            source_offsets,
-            broadcast_stream,
         )
 
     total_load_epoch_number = warmup_epoch_number + load_epoch_number
@@ -1052,33 +926,27 @@ def worker_loop(
                 if not warmup:
                     sdma_cost_records[device_id * load_epoch_number + epoch] = cost
             else:
-                root_load_cost, hccl_cost, scatter_cost, total_cost = (
-                    load_broadcast16worker(
-                        epoch,
-                        device,
-                        device_id,
-                        worker,
-                        block_ids,
-                        warmup,
-                        barrier,
-                        broadcast_buffer,
-                        broadcast_buffer_addrs,
-                        source_offsets,
-                        broadcast_stream,
-                    )
+                stats = load_broadcast16worker(
+                    epoch,
+                    device,
+                    device_id,
+                    worker,
+                    block_ids,
+                    warmup,
                 )
                 if not warmup:
                     record_offset = device_id * load_epoch_number + epoch
-                    broadcast_hccl_records[record_offset] = hccl_cost
-                    broadcast_scatter_records[record_offset] = scatter_cost
-                    broadcast_total_records[record_offset] = total_cost
+                    broadcast_hccl_records[record_offset] = stats.broadcast_cost
+                    broadcast_scatter_records[record_offset] = stats.scatter_cost
+                    broadcast_total_records[record_offset] = stats.total_cost
                     if device_id == 0:
-                        broadcast_root_load_records[epoch] = root_load_cost
+                        broadcast_root_load_records[epoch] = stats.root_load_cost
             barrier.wait()
             if load_idx + 1 < total_load_epoch_number:
                 time.sleep(epoch_interval_ms / 1000)
 
-    torch.distributed.destroy_process_group()
+    if enable_tp_broadcast_load:
+        torch.distributed.destroy_process_group()
     sys.stdout.flush()
     sys.stderr.flush()
     with completed_worker_number.get_lock():

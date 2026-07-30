@@ -1,46 +1,50 @@
-# UCM Ascend A3 TP16 Broadcast Load 设计方案
+# UCM Ascend A3 TP16 Broadcast Load 设计与实现
 
-## 1. 目标与范围
+## 1. 文档状态
 
-本文设计用于 GLM-5.1 在 Ascend A3、MLA、`use_layerwise=true`、TP16 场景下的 KV Cache Load 加速。
+本文描述当前 `codex/sdma-4-stream` 分支已经实现的 TP16 Broadcast Load 数据面，以及尚未进入当前实现的后续工作。
 
-当前共享内存方案中，CacheStore 只从后端加载一次数据到共享 Host Buffer，但 16 个 Worker 仍会分别从同一片共享内存执行 H2D。单卡读取带宽正常，16 卡并发读取时可能受到 NUMA、内存控制器或共享内存访问竞争影响，导致单 Worker 带宽明显下降。
+当前实现范围：
 
-本方案将数据路径调整为：
+- GLM-5.1；
+- Ascend A3；
+- MLA；
+- `use_layerwise=true/false` 的同步整块 Payload；
+- TP16；
+- PipelineStore V1 同步 `load_broadcast`；
+- `cache_fake_bw.py` 和 `cache_posix_bw.py` 性能与精度验证；
+- Root CacheStore Load；
+- HCCL Broadcast；
+- C++ FFTS SDMA D2D Scatter；
+- SDMA Direct 4-lane、shard 级 H2D 提交。
 
-1. 每个 TP Group 选择组内 rank 0 作为 Root Worker。
-2. Root Worker 通过现有 CacheStore Load 和 SDMA Direct，将一层 KV 数据直接加载到连续 NPU Broadcast Buffer。
-3. HCCL 将连续 Buffer 广播到同一 TP Group 的其他 15 张卡。
-4. 每张卡使用 C++ FFTS SDMA D2D Scatter，将连续 Buffer 写入本卡真实 KV Tensor。
-5. Python 只负责任务编排、HCCL 调用和生命周期管理，不承担 KV 数据拷贝。
+当前实现不包含 vLLM 生产 Connector 开关。`enable_tp_broadcast_load` 目前只是两个 E2E Benchmark 的选择开关；生产 Connector 接入、跨层流水和计算流 Event 依赖仍属于后续工作。
 
-本阶段不考虑 GLM-5.2 Shared Indexer、不规则 Tensor 布局、GQA 和非 Layerwise 模式。
+## 2. 背景与目标
 
-## 2. 方案决策
+共享 MLA 场景中，CacheStore 只保留一份 Host KV Payload，但普通 TP16 Load 仍由 16 个 Worker 分别从同一片共享 Host Buffer 执行 H2D。
 
-最终采用“连续 Buffer 优先”的数据路径：
+实测表现为：
 
-```text
-共享 Host Buffer
-    -> Root SDMA Direct H2D
-    -> Root 连续 NPU Broadcast Buffer
-    -> HCCL Broadcast
-    -> 每卡连续 NPU Broadcast Buffer
-    -> 每卡 FFTS SDMA D2D Scatter
-    -> 每卡真实 KV Tensor
-```
+- 单 Worker H2D 带宽正常；
+- 16 个 Worker 同时读取共享内存时，最慢 rank 带宽明显下降；
+- 共享内存形态难以改变；
+- 性能劣化可能与 NUMA、内存控制器、Host 注册映射或并发访问竞争有关。
 
-不采用“Root 先加载到 KV Tensor，再 Gather 到连续 Buffer”的原因是该路径会在 Root 上增加一次额外 D2D Gather，同时延长 HCCL 开始前的串行路径。
+Broadcast Load 的目标是将共享 Host Buffer 的读取者从 16 个减少为 1 个：
 
-Root 和非 Root 最终都执行相同的 Scatter。这样 Root 不需要特殊的 KV 写入路径，各 rank 的 Broadcast 后处理完全一致。
+1. TP rank 0 作为 Root；
+2. Root 将当前层全部有效 Block 加载到本卡连续 NPU Buffer；
+3. HCCL 将该连续 Buffer 广播到其余 15 张卡；
+4. 每张卡使用 FFTS SDMA D2D Scatter 写入本卡真实 KV Tensor。
 
-## 3. TP16 Load 示意图
+## 3. 总体数据路径
 
-### 3.1 当前基线：16 个 Worker 分别从共享内存执行 H2D
+### 3.1 普通 TP16 Load
 
 ```mermaid
 flowchart LR
-    SHM["共享 Host Buffer<br/>单份 KV 数据"]
+    SHM["共享 Host Buffer<br/>单份 KV Payload"]
 
     SHM --> H0["R0 SDMA H2D"] --> K0["R0 KV Tensor"]
     SHM --> H1["R1 SDMA H2D"] --> K1["R1 KV Tensor"]
@@ -51,28 +55,28 @@ flowchart LR
     class SHM pressure;
 ```
 
-基线路径虽然只发生一次 Backend 到共享 Host Buffer 的加载，但会产生 16 路并发 Host 读取和 H2D，竞争点仍然集中在共享内存及其底层 NUMA/内存通路。
+该路径只有一份 Host Payload，但产生 16 路 Host 读取和 H2D。
 
-### 3.2 Broadcast 方案：Root H2D、TP16 HCCL、每卡本地 Scatter
+### 3.2 当前 Broadcast Load
 
 ```mermaid
 flowchart LR
-    subgraph REQUEST["一个请求 / 当前层"]
-        B0["Block 0<br/>T0 | T1 | ... | Tm"]
-        B1["Block 1<br/>T0 | T1 | ... | Tm"]
-        BN["... Block N<br/>T0 | T1 | ... | Tm"]
+    subgraph REQUEST["一个请求的当前层"]
+        B0["Block 0<br/>T0 | T1 | T2"]
+        B1["Block 1<br/>T0 | T1 | T2"]
+        BN["... Block N<br/>T0 | T1 | T2"]
     end
 
-    B0 --> LOAD["仅 TP Root 读取共享内存<br/>4-lane SDMA Direct H2D"]
+    B0 --> LOAD["仅 R0 读取共享 Host Buffer<br/>SDMA Direct shard H2D"]
     B1 --> LOAD
     BN --> LOAD
 
-    LOAD --> ROOTBUF["R0 连续 Buffer<br/>[B0.T0][B0.T1]...[B1.T0]...[BN.Tm]"]
-    ROOTBUF --> HCCL["HCCL Broadcast<br/>TP16"]
+    LOAD --> ROOTBUF["R0 连续 Buffer<br/>包含当前层全部 Block"]
+    ROOTBUF --> HCCL["HCCL Broadcast<br/>一次连续 Payload"]
 
     HCCL --> P0["R0 Buffer<br/>FFTS Scatter<br/>R0 KV Tensor"]
     HCCL --> P1["R1 Buffer<br/>FFTS Scatter<br/>R1 KV Tensor"]
-    HCCL --> PM["R2 ... R14<br/>各卡 Buffer + Scatter + KV"]
+    HCCL --> PM["R2 ... R14<br/>Buffer + Scatter + KV"]
     HCCL --> P15["R15 Buffer<br/>FFTS Scatter<br/>R15 KV Tensor"]
 
     classDef host fill:#fff2cc,stroke:#b7950b,color:#111;
@@ -85,130 +89,151 @@ flowchart LR
     class P0,P1,PM,P15 kv;
 ```
 
-方案只保留一路共享内存读取。HCCL 负责卡间分发，FFTS Scatter 只访问各卡本地 HBM，不再让 15 个非 Root Worker 读取共享 Host Buffer。
+当前实现不先把 Root 数据写入真实 KV Tensor，也不使用 `torch.stack` Gather。CacheStore H2D 的目标地址直接指向连续 Buffer，从而避免 Root 上额外的 D2D Gather。
 
-图中的核心数据变换是：一个请求在当前层包含多个 Block；Root 将这些 Block 的 Tensor 分片直接拷入一个连续 Buffer；HCCL 一次广播这段连续 Payload；每张卡再根据源偏移和本卡 KV 地址矩阵，把各个 Block 拆回真实 KV Tensor。
+## 4. 连续 Buffer 布局与大小
 
-如果一台机器上存在多个 TP Group，则每个 TP Group 分别选择自己的组内 rank 0。不同 DP Group 之间不执行 Broadcast，也不使用全局 rank 0 作为唯一 Root。
+### 4.1 内存布局
 
-## 4. 连续 Buffer 布局
-
-GLM-5.1 Layerwise KV 布局按每层固定 Tensor 数量和固定单 Block Tensor 大小处理。连续 Buffer 按请求、Block、Tensor 的顺序排列：
+GLM-5.1 Layerwise 模式下，每个 Block 包含 3 个 Tensor。连续 Buffer 使用 Block-major、Tensor-minor 布局：
 
 ```text
-Request 0:
-  Block 0: Tensor 0 | Tensor 1 | ... | Tensor M-1
-  Block 1: Tensor 0 | Tensor 1 | ... | Tensor M-1
-  ...
-
-Request 1:
-  Block 0: Tensor 0 | Tensor 1 | ... | Tensor M-1
-  ...
+[B0.T0][B0.T1][B0.T2]
+[B1.T0][B1.T1][B1.T2]
+...
+[BN.T0][BN.T1][BN.T2]
 ```
 
-Broadcast 完成后，每张卡都对自己的连续 Buffer 执行同样的本地拆分：
+地址矩阵形状为 `[block_number, 3]`：
 
-```mermaid
-flowchart LR
-    BUFFER["本卡连续 Buffer<br/>[B0.T0][B0.T1] ... [B1.T0][B1.T1] ... [BN.Tm]"]
-    SPECS["C++ 构造 FFTS D2D Copy Specs<br/>source offset + destination address + size"]
+```text
+buffer_base
+    + block_index * bytes_per_block
+    + prefix_sum(tensor_size_list, tensor_index)
+```
 
-    BUFFER --> SPECS
-    SPECS --> KV0["KV Tensor 0<br/>Block 0 slot | Block 1 slot | ... | Block N slot"]
-    SPECS --> KV1["KV Tensor 1<br/>Block 0 slot | Block 1 slot | ... | Block N slot"]
-    SPECS --> KVM["... KV Tensor M<br/>Block 0 slot | Block 1 slot | ... | Block N slot"]
+Root 使用该地址矩阵调用 `load_data`。Broadcast 完成后，Scatter 使用相同的 Block 起始偏移和每张卡真实 KV 地址矩阵恢复离散布局。
 
-    classDef buffer fill:#e8daef,stroke:#7d3c98,color:#111;
-    classDef scatter fill:#d6eaf8,stroke:#2471a3,color:#111;
-    classDef kv fill:#d5f5e3,stroke:#1e8449,color:#111;
-    class BUFFER buffer;
-    class SPECS scatter;
-    class KV0,KV1,KVM kv;
+### 4.2 大小公式
+
+```text
+bytes_per_block = sum(tensor_size_list)
+bytes_per_epoch = bytes_per_block * block_number
+broadcast_buffer_bytes_per_rank = bytes_per_epoch
+```
+
+GLM-5.1 当前层的 3 个 Tensor 为：
+
+```text
+131072 + 16384 + 32768
+= 180224 bytes
+= 176 KiB / Block
+```
+
+示例：
+
+| Block 数 | 每张 NPU 的 Broadcast Buffer |
+| ---: | ---: |
+| 100 | 17.1875 MiB |
+| 460 | 79.0625 MiB |
+
+每个 Worker 第一次调用 `UcmPipelineStore.load_broadcast` 时按目标 Tensor 形状懒分配一块 Broadcast Buffer，随后在精度阶段、warmup 和全部测量 epoch 中复用。当前实现不是每个 Block 分配一块 Buffer，也不会每个 epoch 重复分配 Broadcast Buffer。
+
+性能阶段还会创建同等 Payload 大小的目标 KV Tensor。精度阶段还会临时创建独立 Expected Tensor，因此峰值 Device 内存高于单独的 Broadcast Buffer 大小。
+
+## 5. Root H2D 的真实执行粒度
+
+“一次加载当前层全部 Block”需要区分 UCM 任务粒度和 SDMA 物理提交粒度。
+
+### 5.1 Python 和 UCM 任务粒度
+
+所有 rank 对当前 Payload 调用一次：
+
+```python
+stats = worker.load_broadcast(
+    block_ids,
+    shard_indexes,
+    destination_tensors,
+    src_rank=0,
+)
 ```
 
 其中：
 
-- 每个 Block 的字节数等于当前层 `tensor_size_list` 之和。
-- Root Load 使用现有二维目标地址矩阵，但矩阵中的地址指向连续 Broadcast Buffer 的各个切片。
-- HCCL 将整层有效 Payload 作为一个连续 Tensor 广播。
-- Scatter 使用源偏移和真实 KV 地址矩阵恢复每个 Block 的 Tensor 分布。
-- Broadcast Buffer 按需扩容并跨层复用，不在每层或每个请求重复申请。
+- `block_ids` 包含当前 epoch 的全部 Block；
+- `shard_indexes` 长度等于 Block 数；
+- `destination_tensors` 形状为 `[block_number, tensor_number]`。
 
-## 5. 类图
+`UcmPipelineStore` 根据目标 Tensor 形状创建连续 Buffer 和 `[block_number, tensor_number]` 地址矩阵。Root 内部调用 `load_data` 和 `wait`；PipelineStore 将地址矩阵的每一行转换为一个 `Shard`。因此一个 Python Load 对应一个父任务，父任务包含 N 个 Shard。
+
+### 5.2 当前 shard 级 SDMA Direct
+
+Benchmark 明确配置：
+
+```python
+cache_sdma_direct_launch_granularity = "shard"
+```
+
+因此 LoadQueue 为每个 Shard 分别执行一次 H2D 提交：
+
+```text
+Shard 0 / Block 0 -> SubmitLoadObject -> 3 个 FFTS Copy Specs -> lane 0
+Shard 1 / Block 1 -> SubmitLoadObject -> 3 个 FFTS Copy Specs -> lane 1
+Shard 2 / Block 2 -> SubmitLoadObject -> 3 个 FFTS Copy Specs -> lane 2
+Shard 3 / Block 3 -> SubmitLoadObject -> 3 个 FFTS Copy Specs -> lane 3
+Shard 4 / Block 4 -> SubmitLoadObject -> 3 个 FFTS Copy Specs -> lane 0
+...
+```
+
+中间 Shard 只提交、不立即同步。最后一个 Shard 才触发 `Synchronize`，等待 4 条 lane 全部完成，随后 `worker.wait(task)` 返回。
+
+所以当前实际语义是：
+
+- 一个 UCM 父任务包含当前层全部 Block；
+- 每个 Block 是一次独立的 SDMA Direct H2D 提交；
+- 每次提交包含该 Block 的 3 个 Tensor Copy Specs；
+- Block 提交在 4 条 lane 上轮转；
+- 全部 Block H2D 完成后，才开始整块 HCCL Broadcast。
+
+如果配置为 `task` 粒度，才会把多个 Shard 合成 `SubmitLoadTask`。当前 Benchmark 不使用该路径。
+
+## 6. 当前类与调用关系
 
 ```mermaid
 classDiagram
-    class UCMLayerWiseConnector {
-        +enable_tp_broadcast_load
-        +tp_group
-        +broadcast_stream
-        +broadcast_buffer
-        +start_load_kv()
-        +wait_for_layer_load()
-        -submit_broadcast_load_for_layer()
-        -broadcast_and_scatter_layer()
-        -ensure_broadcast_buffer()
+    class CacheBwWorker {
+        <<Benchmark orchestration>>
+        +worker_loop()
+        +load_broadcast16worker()
+        +validate_load_accuracy()
     }
 
-    class BroadcastLayerContext {
-        +layer_id
-        +payload_bytes
-        +buffer
-        +request_slices
-        +root_load_tasks
-    }
-
-    class BroadcastRequestSlice {
-        +request_id
-        +offset_bytes
-        +block_count
-        +destination_addrs
-        +load_status
-    }
-
-    class GroupCoordinator {
-        +broadcast(tensor, src)
+    class TorchDistributed {
+        +init_process_group()
+        +broadcast()
+        +destroy_process_group()
     }
 
     class UcmPipelineStore {
+        +load_broadcast()
         +load_data()
+        +load()
         +wait()
         +scatter_from_contiguous()
+        -broadcast_resources
+        -broadcast_streams
     }
 
     class PipelineStore {
-        -cacheStore
-        -cacheScatterFn
-        +Stack()
         +Load()
         +Wait()
         +ScatterFromContiguous()
-    }
-
-    class LibraryLoader {
-        +LoadLibrary()
-        +CreateObject()
-        +FindOptionalSymbol()
-    }
-
-    class CacheStoreExtensionV1 {
-        <<C ABI>>
-        +UcmCacheStoreScatterFromContiguousV1()
-    }
-
-    class StoreV1 {
-        <<interface>>
-        +Load()
-        +Wait()
-    }
-
-    class HealthBreakerStore {
-        +Load()
-        +Wait()
+        -cacheScatterFn
     }
 
     class CacheStore {
         +Load()
+        +Wait()
         +ScatterFromContiguous()
         -scatterCopier
     }
@@ -219,18 +244,15 @@ classDiagram
     }
 
     class LoadQueue {
+        +DispatchOneTask()
         +TransferOneTask()
+        +HostToDeviceAsync()
     }
 
     class CopyStream {
+        +SetupSdmaDirect()
         +HostToDeviceAsync()
         +Synchronize()
-    }
-
-    class Stream {
-        <<interface>>
-        +HostToDeviceAsync()
-        +Synchronized()
     }
 
     class AscendSdmaDirectStream {
@@ -242,6 +264,7 @@ classDiagram
         +SubmitLoadTask()
         +SubmitScatterTask()
         +Synchronize()
+        -NextLane()
     }
 
     class FftsSdmaDispatcher {
@@ -249,87 +272,96 @@ classDiagram
         +Launch()
     }
 
-    UCMLayerWiseConnector *-- BroadcastLayerContext
-    BroadcastLayerContext *-- BroadcastRequestSlice
-    UCMLayerWiseConnector --> GroupCoordinator : HCCL broadcast
-    UCMLayerWiseConnector --> UcmPipelineStore : load and scatter
+    CacheBwWorker --> UcmPipelineStore
+    UcmPipelineStore --> TorchDistributed : status + payload broadcast
     UcmPipelineStore --> PipelineStore : pybind
-    PipelineStore --> StoreV1 : regular Load and Wait
-    PipelineStore --> LibraryLoader
-    LibraryLoader --> CacheStoreExtensionV1 : dlsym optional symbol
-    PipelineStore --> CacheStoreExtensionV1 : cached function pointer
-    CacheStoreExtensionV1 --> CacheStore : direct extension call
-    StoreV1 <|-- CacheStore
-    StoreV1 <|-- HealthBreakerStore
-    HealthBreakerStore o-- StoreV1 : regular operation wrapper
-    CacheStore --> TransManager : root load
+    PipelineStore --> CacheStore : Store Load / optional Scatter ABI
+    CacheStore --> TransManager : root Load
     TransManager --> LoadQueue
-    LoadQueue --> CopyStream : H2D
-    CopyStream --> Stream
-    Stream <|-- AscendSdmaDirectStream
+    LoadQueue --> CopyStream
+    CopyStream --> AscendSdmaDirectStream
     AscendSdmaDirectStream --> AscendSdmaDirectCopier
-    CacheStore --> AscendSdmaDirectCopier : dedicated D2D scatter
+    CacheStore --> AscendSdmaDirectCopier : D2D Scatter
     AscendSdmaDirectCopier --> FftsSdmaDispatcher
 ```
 
-类职责划分如下：
+职责划分：
 
-- `UCMLayerWiseConnector`：决定 Root、构造连续 Buffer 地址、调用 HCCL、触发 Scatter。
-- `GroupCoordinator`：复用 vLLM 已建立的 TP Process Group；Ascend 后端实际执行 HCCL Broadcast。
-- `UcmPipelineStore` 和 `PipelineStore`：提供 Python 到 C++ 的薄封装，不处理数据拷贝。
-- `StoreV1`：保持现有接口不变，Load、Wait 等普通 Store 操作继续通过它调用。
-- `LibraryLoader`：除现有 Store Factory 外，增加可选符号查询能力。
-- `CacheStoreExtensionV1`：由 `libcachestore.so` 导出的可选 C ABI；只承载 CacheStore 特有的 Scatter。
-- `PipelineStore`：在加载 CacheStore 时保存真实 CacheStore 指针和 Scatter 函数指针，不依赖基类虚函数。
-- `HealthBreakerStore`：保持不变，只包装普通 Store 操作；本地 HBM D2D Scatter 不经过健康熔断层。
-- `CacheStore`：校验 Scatter 参数，调用专用 `AscendSdmaDirectCopier`，并在返回前完成同步。
-- `AscendSdmaDirectCopier`：将连续源地址和离散 KV 目标地址转换为 FFTS D2D Copy Specs。
-- `FftsSdmaDispatcher`：构建并提交真正的 D2D Scatter 任务。
+- `cache_fake_bw.py` 和 `cache_posix_bw.py`：多进程编排、精度门禁和统计；
+- `UcmPipelineStore`：复用连续 Buffer，执行 Root Load 状态同步、HCCL Broadcast 和 Scatter，并将 Block ID、Shard Index 和地址矩阵传给 pybind；
+- `PipelineStore`：构建 C++ TaskDesc，调用普通 Store Load，并通过可选 ABI 调用 CacheStore Scatter；
+- `CacheStore`：管理 LoadQueue 和专用 Scatter Copier；
+- `LoadQueue`：把父任务拆成 Shard，等待 Host Payload Ready，提交 H2D；
+- `AscendSdmaDirectCopier`：生成 FFTS Copy Specs、选择 lane 并提交；
+- `TorchDistributed`：在 NPU 上通过 HCCL 执行 Broadcast。
 
-## 6. 关键接口说明
+## 7. 重要接口
 
-### 6.1 配置接口
-
-新增顶层实验开关：
-
-```yaml
-enable_tp_broadcast_load: true
-```
-
-默认值为 `false`，以便在同一个 SDMA 4-stream 分支上完成 A/B 对比。
-
-启用条件：
-
-- Ascend A3；
-- MLA；
-- `use_layerwise=true`；
-- TP Size 大于 1；
-- 使用 CacheStore Pipeline；
-- `cache_sdma_direct=true`。
-
-任一条件不满足时应在初始化阶段明确报错，不进行静默降级，避免性能实验误用普通路径。
-
-Connector 在创建 Worker Store 时，将内部配置 `cache_tp_broadcast_scatter=true` 传给 CacheStore。该内部配置不要求用户重复填写。
-
-### 6.2 Root 连续 Buffer Load
-
-复用现有接口，不新增 H2D Load API：
+### 7.1 Benchmark 配置
 
 ```python
-store.load_data(block_ids, shard_indices, destination_addrs)
+enable_tp_broadcast_load = False
+accuracy_check_enable = True
+cache_sdma_direct = True
 ```
 
-区别仅在 `destination_addrs`：
+`enable_tp_broadcast_load=False` 使用普通 `load + wait`；设置为 `True` 后，Cache|Fake 和 Cache|Posix 都通过 `UcmPipelineStore.load_broadcast` 执行同步 Broadcast Load。
 
-- 基线路径指向真实 KV Tensor；
-- Broadcast 路径在 Root 上指向连续 Broadcast Buffer 的各 Tensor 切片；
-- 非 Root 不调用 `load_data`。
+Worker Store 内部配置：
 
-因此无需调用当前不支持的 SDMA Direct 单指针 H2D 接口。LoadQueue 仍通过已有的多地址、可变 Size 接口构造 H2D Copy Specs，SDMA 4-lane 行为也保持不变。
+```python
+cache_stream_number = 4
+cache_sdma_direct_launch_granularity = "shard"
+cache_tp_broadcast_scatter = True
+```
 
-### 6.3 Python Scatter 接口
+`cache_tp_broadcast_scatter` 只为 CacheStore 启用本地 D2D Scatter 扩展，不是生产用户配置。
 
-新增：
+`cache_stream_number=4` 不控制 SDMA Direct lane 数量。当前分支的 4 条 SDMA Direct lane 由 `AscendSdmaDirectCopier` 内部固定配置；`cache_stream_number` 仍属于普通 CopyStream 配置。
+
+### 7.2 PipelineStore V1 同步 Broadcast Load
+
+```python
+stats = store.load_broadcast(
+    block_ids,
+    shard_indices,
+    destination_tensors,
+    src_rank=0,
+)
+```
+
+该接口在每个 rank 上同步返回，执行顺序固定为：
+
+1. Root H2D 到连续 Buffer；
+2. Root Load 状态 Broadcast；
+3. 整块 Payload HCCL Broadcast；
+4. 每个 rank 同步 FFTS Scatter。
+
+返回值包含 Root H2D、HCCL、Scatter 和端到端耗时。当前没有 Chunk、双 Buffer 或异步 Scatter。
+
+### 7.3 连续地址 Load
+
+```python
+store.load_data(
+    block_ids,
+    shard_indices,
+    destination_addrs,
+)
+```
+
+该接口仍走现有 `PipelineStore.Load` 和 `StoreV1::Load`，没有增加新的 Load 基类接口。
+
+Broadcast 路径中，Root 的 `destination_addrs` 指向连续 Buffer 切片；普通 SDMA 路径则指向真实 KV Tensor。
+
+### 7.4 HCCL Broadcast
+
+```python
+store.load_broadcast(...)
+```
+
+`UcmPipelineStore` 内部先广播一个 Device Status Tensor。Root Load 失败时，所有 rank 统一跳过 Payload Broadcast 并报错；成功时，再在专用通信 Stream 上对整块连续 Tensor 调用一次 HCCL Broadcast，并同步等待完成。
+
+### 7.5 C++ FFTS Scatter
 
 ```python
 store.scatter_from_contiguous(
@@ -339,244 +371,229 @@ store.scatter_from_contiguous(
 )
 ```
 
-参数语义：
+参数：
 
-| 参数 | 类型 | 形状 | 说明 |
-| --- | --- | --- | --- |
-| `source_addr` | `int` | 标量 | 连续 NPU Broadcast Buffer 首地址 |
-| `source_offsets` | `numpy.uint64` | `[N]` | N 个有效 Block 在连续 Buffer 中的起始偏移 |
-| `destination_addrs` | `numpy.uint64` | `[N, M]` | N 个 Block、每个 Block M 个真实 KV Tensor 地址 |
+| 参数 | 形状 | 说明 |
+| --- | --- | --- |
+| `source_addr` | 标量 | 本卡连续 Broadcast Buffer 首地址 |
+| `source_offsets` | `[N]` | 每个 Block 在连续 Buffer 中的起始偏移 |
+| `destination_addrs` | `[N, M]` | 每个 Block 的 M 个真实 KV Tensor 地址 |
 
-该接口为同步接口。返回成功时，本卡真实 KV Tensor 已经可以被后续 Forward 使用。
+Scatter 不加入 `StoreV1` 基类。PipelineStore 通过 CacheStore 动态库导出的可选 C ABI 调用真实 CacheStore 对象。
 
-### 6.4 CacheStore 可选扩展接口
+Scatter 为同步接口：
 
-Scatter 不加入 `StoreV1`，也不要求 PosixStore、Ds3fsStore、EmptyStore、HealthBreakerStore 等其他实现增加无关接口。
+1. 构造全部 D2D Copy Specs；
+2. 调用一次 `FftsSdmaDispatcher::BuildCopies`；
+3. 在 `NextLane()` 选择的一条 lane 上 Launch；
+4. `Synchronize()` 等待 Scatter 完成后返回。
 
-`libcachestore.so` 单独导出带版本号的可选 C ABI：
+当前一个整层 Scatter Task 不强制拆到 4 条 lane。
 
-```cpp
-extern "C" Status UcmCacheStoreScatterFromContiguousV1(
-    StoreV1* cacheStore,
-    uintptr_t sourceAddr,
-    const size_t* sourceOffsets,
-    void* const* destinationAddrs,
-    size_t rows,
-    size_t cols);
-```
+### 7.6 分布式 Rendezvous
 
-对应的函数指针类型由 PipelineStore 持有：
-
-```cpp
-using CacheScatterFn = Status (*)(
-    StoreV1* cacheStore,
-    uintptr_t sourceAddr,
-    const size_t* sourceOffsets,
-    void* const* destinationAddrs,
-    size_t rows,
-    size_t cols);
-```
-
-这里的 `StoreV1*` 只是现有 Factory 返回的对象指针类型，不增加虚函数，也不通过该指针调用 Scatter。扩展函数位于 CacheStore 动态库内部，可以安全地把该指针还原为实际 CacheStore 对象并调用其内部方法。
-
-`LibraryLoader` 增加通用的可选符号查询：
-
-```cpp
-template <class Function>
-Function FindOptionalSymbol(const char* name) const;
-```
-
-当 `PipelineStore::Stack` 加载名为 `Cache` 的 Store 时：
-
-1. 通过现有 Factory 创建 CacheStore 对象。
-2. 在 HealthBreaker 包装之前保存真实 CacheStore 指针。
-3. 从同一个动态库解析 `UcmCacheStoreScatterFromContiguousV1`。
-4. 将对象指针和函数指针保存在 PipelineStore 中。
-5. 如果配置启用了 Broadcast，但扩展符号不存在，则初始化直接失败。
-
-PipelineStore 新增的 pybind 方法只负责解析 NumPy Buffer 并调用缓存的函数指针：
-
-```cpp
-void PipelineStore::ScatterFromContiguous(
-    uintptr_t sourceAddr,
-    const pybind11::buffer& sourceOffsets,
-    const pybind11::buffer& destinationAddrs);
-```
-
-接口约束：
-
-- `sourceAddr` 必须是当前 Device 上的连续 Buffer 地址；
-- `sourceOffsets` 行数必须与 `destinationAddrs` 行数一致；
-- `destinationAddrs` 列数必须与 CacheStore 的 `tensor_size_list` 一致；
-- NumPy 地址数组在同步调用返回前保持有效；
-- CacheStore 完成 FFTS Scatter 和 Stream 同步后才返回；
-- `stores_` 保证真实 CacheStore 对象存活，`loaders_` 保证动态库及函数指针持续有效。
-
-HealthBreaker 只保护 Backend/Cache Load、Dump、Wait 等 Store 操作。Scatter 是 Load 成功和 HCCL 完成之后的本卡 HBM D2D 搬运，因此直接调用真实 CacheStore 扩展，不经过 HealthBreaker，也不改变其基类接口。
-
-### 6.5 SDMA Direct D2D 接口
-
-不修改通用 `Stream` 或 `CopyStream` 接口。CacheStore 为 Broadcast Scatter 单独持有一个 `AscendSdmaDirectCopier`，并新增：
-
-```cpp
-Status SubmitScatterTask(
-    const void* source,
-    const std::vector<size_t>& sourceOffsets,
-    const std::vector<void**>& destinations,
-    const std::vector<size_t>& tensorSizes);
-```
-
-Scatter Copier 在第一次 Scatter 调用时懒初始化。这样 `sdma16worker` 基线阶段仍然只创建和使用原有 4 条 SDMA Direct lane，不会因为启用对比功能而提前多占一组 Scatter Stream；首次初始化成本由 Broadcast warmup 吸收。
-
-对第 `i` 个 Block、第 `j` 个 Tensor，FFTS Copy Spec 为：
+Parent 使用每轮唯一的 FileStore 路径：
 
 ```text
-source + sourceOffsets[i] + prefixSum(tensorSizes, j)
-    -> destinations[i][j]
-copy bytes = tensorSizes[j]
+file:///tmp/ucm_cache_fake_<unique_id>.rdzv
 ```
 
-同一层的所有有效 Copy Specs 合并后交给一次 `FftsSdmaDispatcher::BuildCopies` 和 `Launch`，减少逐 Tensor 提交开销。
+所有 16 个 Worker 使用相同 `init_method` 初始化 HCCL Process Group。Worker 退出后，Parent 清理 rendezvous 文件。
 
-当前 SDMA 4-stream 分支中的四条 lane 用于不同提交之间的轮转；单个聚合 Scatter Task 由一条 lane 提交，其内部并行度由 FFTS Ready Context 控制。第一版不额外把一个 Layer Scatter 强制拆成四个任务，避免增加同步与 Launch 开销。
+该设计避免了“先探测随机 TCP 端口、关闭 socket、rank 0 稍后重新监听”造成的 `EADDRINUSE` 竞争窗口。FileStore 只替代 PyTorch rendezvous；HCCL 自身通信端口配置仍由 HCCL 环境变量管理。
 
-## 7. 调用与同步顺序
+## 8. 当前时序
+
+### 8.1 整体 Benchmark 顺序
+
+```mermaid
+flowchart LR
+    INIT["启动16个Worker<br/>FileStore rendezvous"]
+    DUMP["Dump warmup + Dump测量"]
+    READY["等待 Backend/Cache Ready"]
+    ACC["独立全链路精度校验"]
+    MODE{"enable_tp_broadcast_load"}
+    SDMA["普通Load<br/>5轮warmup + 128轮测量"]
+    BCAST["同步Broadcast Load<br/>5轮warmup + 128轮测量"]
+    SUMMARY["最慢rank统计与Summary"]
+
+    INIT --> DUMP --> READY --> ACC --> MODE
+    MODE -->|false| SDMA --> SUMMARY
+    MODE -->|true| BCAST --> SUMMARY
+```
+
+精度校验位于 Dump 测量之后、Load 性能测试之前。精度失败时，不执行后续 Load 性能测试，也不打印最终 Summary；已经完成的 Dump 测量不会回滚。
+
+### 8.2 单轮 Broadcast Load
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant R0 as R0 UCMLayerWiseConnector
-    participant P0 as R0 PipelineStore
-    participant C0 as R0 CacheStore
-    participant SHM as Shared Host Buffer
-    participant HCCL as HCCL TP16 Group
-    participant RX as R1...R15 Connector
-    participant PX as R1...R15 PipelineStore
-    participant CX as R1...R15 CacheStore
-    participant F0 as R0 FFTS SDMA
-    participant FX as R1...R15 FFTS SDMA
+    participant R0 as Rank 0 PipelineStore V1
+    participant RX as Rank 1...15 PipelineStore V1
+    participant LQ as CacheStore LoadQueue
+    participant SDMA as 4-lane SDMA Direct
+    participant HCCL as HCCL TP16
+    participant SC as Per-rank FFTS Scatter
     participant KV as Per-rank KV Tensor
 
-    Note over R0,RX: start_load_kv：所有 rank 使用相同请求和 Block 元数据
-    R0->>R0: 申请或复用连续 Buffer<br/>构造 Block/Tensor 切片地址
-    R0->>P0: load_data(block_ids, shard_indices, buffer_addrs)
-    P0->>C0: StoreV1::Load
-    C0->>SHM: 获取共享 Host Buffer 数据
-    C0-->>P0: 返回异步 Load Task
-    P0-->>R0: 保存 Root Load Task
-    RX->>RX: 申请同尺寸连续 Buffer<br/>保存真实 KV 目标地址
-    Note over RX: 非 Root 不调用 UCM Load
+    Note over R0,RX: load_broadcast() 懒分配并复用同尺寸连续 Buffer
+    R0->>LQ: load_data(all block_ids, buffer_addrs)
+    LQ->>LQ: 一个父任务，包含 N 个 Shard
 
-    Note over R0,RX: wait_for_layer_load：进入当前层使用前的同步点
-    R0->>P0: Wait(root_load_task)
-    P0->>C0: StoreV1::Wait
-    C0->>C0: 等待 4-lane SDMA Direct H2D 完成<br/>Shared Host -> R0 连续 Buffer
-    C0-->>R0: Root Payload Ready
-
-    R0->>HCCL: broadcast(status, src=0)<br/>broadcast(payload, src=0)
-    RX->>HCCL: 参与相同顺序的 collective
-    HCCL-->>R0: R0 Buffer Ready
-    HCCL-->>RX: R1...R15 Buffer Ready
-    Note over R0,RX: Broadcast Stream synchronize
-
-    par Root 本地 Scatter
-        R0->>P0: ScatterFromContiguous(source, offsets, kv_addrs)
-        Note over P0: 调用加载 CacheStore 时缓存的<br/>cacheScatterFn(rawCacheStore)
-        P0->>C0: UcmCacheStoreScatterFromContiguousV1
-        C0->>F0: BuildCopies + Launch
-        F0->>KV: R0 Buffer -> R0 KV Tensor
-        F0-->>R0: Scatter Stream synchronized
-    and 非 Root 本地 Scatter
-        RX->>PX: ScatterFromContiguous(source, offsets, kv_addrs)
-        Note over PX: 不经过 StoreV1 和 HealthBreaker
-        PX->>CX: UcmCacheStoreScatterFromContiguousV1
-        CX->>FX: BuildCopies + Launch
-        FX->>KV: 各卡 Buffer -> 各卡 KV Tensor
-        FX-->>RX: Scatter Stream synchronized
+    loop 每个 Block / Shard
+        LQ->>SDMA: SubmitLoadObject(3 tensor specs, NextLane)
     end
 
-    R0->>P0: 异步提交下一层 Root Load
-    Note over R0,RX: 当前层 KV Ready，wait_for_layer_load 返回并进入 Forward
+    LQ->>SDMA: 最后一个 Shard 后 Synchronize 4 lanes
+    SDMA-->>R0: Root Buffer Ready
+
+    R0->>HCCL: broadcast(status=success)
+    RX->>HCCL: receive root status
+    R0->>HCCL: broadcast(full buffer, src=0)
+    RX->>HCCL: broadcast(full buffer, src=0)
+    HCCL-->>R0: stream synchronize
+    HCCL-->>RX: stream synchronize
+
+    par Rank 0 Scatter
+        R0->>SC: scatter_from_contiguous()
+        SC->>KV: Buffer -> R0 KV
+    and Rank 1...15 Scatter
+        RX->>SC: scatter_from_contiguous()
+        SC->>KV: Buffer -> local KV
+    end
+
+    SC-->>R0: Scatter synchronized
+    SC-->>RX: Scatter synchronized
 ```
 
-每层执行顺序固定如下：
+当前 Root H2D、HCCL 和 Scatter 完全串行，没有实现 Chunk Pipeline 或 Event overlap。
 
-1. 所有 rank 根据相同的 Layer Metadata 准备等长连续 Buffer 和目标地址信息。
-2. 仅 TP Root 提交 UCM Load；H2D 目标地址指向 Root 连续 Buffer。
-3. TP Root 等待本层所有 Load Task 完成。
-4. Root 生成每个请求的 Load 状态向量。
-5. 所有 rank 在专用 NPU Broadcast Stream 上，按固定顺序调用状态 Broadcast 和 Payload Broadcast。
-6. Broadcast Stream 同步，确保 HCCL 已完成对本卡连续 Buffer 的写入。
-7. 所有 rank 调用 C++ `scatter_from_contiguous`。
-8. C++ FFTS Scatter Stream 完成 D2D 并同步。
-9. `wait_for_layer_load` 返回，模型开始使用本层 KV Tensor。
-10. Connector 复用同一连续 Buffer，异步提交下一层 Root Load。
+## 9. 精度校验
 
-状态和 Payload 始终保持相同 collective 顺序，防止部分 rank 因 Root Load 失败而跳过 collective 导致死锁。Payload 可以无条件广播；Scatter 只处理状态成功的请求切片。失败请求在所有 TP rank 上统一标记为 Load 失败。
+`accuracy_check_enable=True` 时，脚本使用固定 CPU Seed 生成 0 到 250 的整数 Payload，再转换为 BF16。该范围在 BF16 中可精确表达，因此复制链路使用 `torch.equal` 做全量精确比较，不使用误差容忍。
 
-第一版使用明确的同步边界保证正确性。性能数据稳定后，再评估使用 ACL Event 串联 Root H2D、HCCL Stream、FFTS Scatter Stream 和计算 Stream。
+精度阶段根据 `enable_tp_broadcast_load` 选择普通 Load 或同步 Broadcast Load，并对每个 rank 的全部目标 KV Tensor 做最终全量校验。Root 连续 Buffer、HCCL 和 Scatter 的中间步骤由同一个 `load_broadcast` 接口封装，不再由 Benchmark 分阶段读取。
 
-## 8. A/B 对比与指标
+Expected Tensor 独立生成，不以 Root Load 结果作为期望值，因此能够识别 Root Load 本身的数据错误。
 
-在同一个 SDMA 4-stream 分支、相同模型、相同 Block 数量和相同 TP16 拓扑下，仅切换 `enable_tp_broadcast_load`：
+任一阶段失败都会报告：
 
-第一版先在 `cache_fake_bw.py` 中直接验证数据面，不接入 vLLM Connector 生产流程。脚本一次启动 16 个 Worker，并顺序执行：
+- 阶段名称；
+- Worker/rank；
+- Block；
+- Tensor。
 
-```python
-load_benchmark_modes = ("sdma16worker", "broadcast16worker")
-cache_sdma_direct = True
-```
-
-- `sdma16worker`：16 个 Worker 同时调用普通 CacheStore Load。
-- `broadcast16worker`：只有 rank 0 Load 到连续 Buffer，TP16 执行 HCCL Broadcast，随后每个 rank 调用 CacheStore Scatter 扩展。
-- 两种模式使用相同的 Block ID、Tensor Size、Worker、共享内存和 SDMA 4-lane 配置。
-- Scatter Copier 在首次 Broadcast warmup 时初始化，避免影响先执行的 SDMA 基线。
-- 首个 Broadcast warmup 会抽样检查 HCCL Payload，并逐 Tensor 检查 Scatter 结果。
-
-| 模式 | Root H2D | 非 Root H2D | 卡间通信 | KV 写入 |
-| --- | --- | --- | --- | --- |
-| 基线 | 共享内存到本卡 KV | 15 路共享内存到本卡 KV | 无 | H2D 直接写 KV |
-| Broadcast | 共享内存到连续 Buffer | 无 | HCCL Broadcast | 每卡 FFTS D2D Scatter |
-
-至少记录以下耗时：
-
-- Root Load/H2D 完成时间；
-- HCCL Broadcast 时间；
-- FFTS Scatter 时间；
-- 单层 Broadcast Load 总时间；
-- Payload 字节数；
-- 按最慢 rank 计算的有效带宽；
-- 相对当前 16 卡并发共享内存 Load 的加速比。
-
-总路径收益条件为：
+所有精度比较都位于性能计时之外，不写入 latency 或 bandwidth record。成功时由 rank 0 打印：
 
 ```text
-Root H2D 时间 + HCCL Broadcast 时间 + FFTS Scatter 时间
-    < 16 卡并发共享内存 Load 的最慢 rank 时间
+accuracy check passed: enable_tp_broadcast_load=True, record_idx=0, bytes=...
 ```
 
-性能判断必须使用 TP Group 最慢 rank，不能只观察 Root 或单卡平均值。
+## 10. 性能统计口径
 
-## 9. 实现边界
+### 10.1 最慢 rank
 
-本方案第一阶段只包含：
+对带有 `slowest rank` 的指标，每个 epoch 先从 16 个 rank 中取耗时最大值：
 
-- GLM-5.1 固定 Layerwise KV 布局；
-- 单个 PP Stage 内的 TP Group Broadcast；
+```text
+epoch_cost = max(rank_0_cost, rank_1_cost, ..., rank_15_cost)
+```
+
+随后对 128 个 epoch cost 计算 avg、min、p50、p90、p99 和 max。
+
+适用指标：
+
+- `sdma16worker slowest rank`；
+- `broadcast16worker slowest rank`；
+- `broadcast HCCL slowest rank`；
+- `broadcast FFTS scatter slowest rank`。
+
+`broadcast root H2D` 只统计 rank 0。
+
+各阶段的最慢 rank 可能不同，因此不能严格用“Root H2D 最慢值 + HCCL 最慢值 + Scatter 最慢值”推导 Broadcast Total。
+
+### 10.2 带宽与加速比
+
+每个样本的有效带宽：
+
+```text
+bandwidth = bytes_per_epoch / sample_cost
+```
+
+Summary 中的平均带宽是所有样本带宽的平均值，不等于 `bytes_per_epoch / 平均延迟`。
+
+每个 epoch 的加速比：
+
+```text
+speedup[epoch] =
+    sdma_slowest_cost[epoch] / broadcast_slowest_cost[epoch]
+```
+
+最终 speedup 统计来自 128 个逐 epoch 比值。
+
+## 11. 当前实测结果
+
+最近一次 A3 TP16 运行结果：
+
+该表记录当次运行的 Summary；Payload 大小和 Block 数量应以同一次运行启动日志中的 `bytes_per_epoch`、`block_number` 为准。不同 Payload 大小的结果不能直接横向比较。
+
+| 指标 | 平均延迟 | 平均有效带宽 |
+| --- | ---: | ---: |
+| SDMA 16-worker 最慢 rank | 11.744 ms | 7.156 GB/s |
+| Broadcast 端到端最慢 rank | 7.409 ms | 11.701 GB/s |
+| Root H2D | 2.856 ms | 29.590 GB/s |
+| HCCL 最慢 rank | 1.764 ms | 47.541 GB/s |
+| FFTS Scatter 最慢 rank | 1.219 ms | 68.542 GB/s |
+
+逐 epoch 平均加速比为 `1.660x`。
+
+该结果说明：
+
+- 单 Root H2D 恢复到接近单卡正常带宽，验证了减少共享 Host 并发读取的方向；
+- 连续 Buffer + FFTS Scatter 不是主要瓶颈；
+- HCCL 与串行阶段累加决定当前端到端上限；
+- 当前方案有效，但尚未实现 H2D、HCCL、Scatter overlap。
+
+## 12. 当前边界与后续方向
+
+当前已经实现：
+
+- 单机 TP16 Benchmark；
+- PipelineStore V1 同步 `load_broadcast`；
+- Cache|Fake 和 Cache|Posix 可选 Broadcast 开关；
 - Root 连续 Buffer Load；
-- HCCL Broadcast；
-- CacheStore 动态库可选 Scatter 扩展，`StoreV1` 和 HealthBreaker 接口保持不变；
-- C++ FFTS SDMA D2D Scatter；
-- 同步正确性路径和分段性能指标。
+- Root Load 状态在 Benchmark Process Group 内统一广播；
+- shard 级 4-lane SDMA Direct H2D；
+- 一次整层 HCCL Broadcast；
+- C++ FFTS D2D Scatter；
+- FileStore rendezvous；
+- 全 Payload 精度门禁；
+- 最慢 rank 性能统计。
 
-以下内容不进入第一阶段：
+当前尚未实现：
 
-- GLM-5.2 Shared Indexer 或 Ghost Slot；
-- GQA 和非 MLA 模型；
-- 非 Layerwise 模式；
-- 跨 DP Group 或跨 PP Stage Broadcast；
-- Python `torch.stack`、`copy_`、`foreach_copy_` 数据搬运；
-- 向 `StoreV1` 增加 Scatter 虚函数；
-- Root KV Tensor 到连续 Buffer 的额外 Gather；
-- HCCL Communicator 的 C++ 生命周期管理；
-- H2D、HCCL、Scatter、Forward 的全异步 Event Pipeline。
+- vLLM `UCMLayerWiseConnector` 生产接入；
+- vLLM 用户侧 `enable_tp_broadcast_load` 配置；
+- 多请求切片与失败请求过滤；
+- 单 Block Buffer；
+- 多 Block Chunk Buffer；
+- 双 Buffer 或三 Buffer Pipeline；
+- H2D、HCCL、Scatter、Forward 的 Event overlap；
+- 跨 PP Stage 或跨 DP Group Broadcast；
+- GQA、非 MLA 和 GLM-5.2 Shared Indexer。
+
+如果后续需要降低 Buffer 内存或增加阶段重叠，推荐采用“多 Block Chunk + 双 Buffer”，而不是直接退化为一个 Block 一次 HCCL：
+
+```text
+Buffer A: HCCL chunk N / Scatter chunk N
+Buffer B: Root H2D chunk N+1
+```
+
+真正实现该流水还需要：
+
+- Chunk 级 Block/地址切片；
+- 所有 rank 保持完全相同的 HCCL collective 顺序；
+- Scatter 异步提交或 Event 接口；
+- 防止 Buffer 在 Scatter 完成前被下一轮 H2D 覆盖；
+- 单独评估小 Payload HCCL 启动开销。

@@ -26,9 +26,10 @@ import array
 import copy
 import ctypes
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 import numpy as np
 import torch
@@ -84,6 +85,22 @@ class UcmPipelineStoreTransTask(Task):
     task_id: int
 
 
+@dataclass
+class UcmPipelineStoreBroadcastStats:
+    root_load_cost: float
+    broadcast_cost: float
+    scatter_cost: float
+    total_cost: float
+
+
+@dataclass
+class _BroadcastResource:
+    buffer: torch.Tensor
+    load_addrs: np.ndarray
+    source_offsets: np.ndarray
+    status: torch.Tensor
+
+
 class UcmPipelineStore(UcmKVStoreBaseV1):
     def __init__(self, config: Dict[str, object]) -> None:
         super().__init__(config)
@@ -93,6 +110,9 @@ class UcmPipelineStore(UcmKVStoreBaseV1):
         if builder is None:
             raise ValueError(f"unknown store pipeline: {config['store_pipeline']}")
         builder(config, self.store_)
+        self._broadcast_enabled = bool(config.get("cache_tp_broadcast_scatter", False))
+        self._broadcast_resources: Dict[tuple, _BroadcastResource] = {}
+        self._broadcast_streams: Dict[str, Any] = {}
 
     def cc_store(self) -> int:
         return self.store_.Self()
@@ -192,6 +212,166 @@ class UcmPipelineStore(UcmKVStoreBaseV1):
                 f"offsets={offsets.shape[0]}, addrs={addrs.shape[0]}"
             )
         self.store_.ScatterFromContiguous(int(source_addr), offsets, addrs)
+
+    @staticmethod
+    def _broadcast_tensor_sizes(
+        tensors: List[List[torch.Tensor]],
+    ) -> tuple[torch.device, torch.dtype, tuple[int, ...]]:
+        if not tensors or not tensors[0]:
+            raise ValueError("broadcast load requires a non-empty tensor matrix")
+
+        column_number = len(tensors[0])
+        first = tensors[0][0]
+        device = first.device
+        dtype = first.dtype
+        tensor_sizes = tuple(
+            tensor.numel() * tensor.element_size() for tensor in tensors[0]
+        )
+        for row_index, row in enumerate(tensors):
+            if len(row) != column_number:
+                raise ValueError(
+                    "broadcast tensor column mismatch: "
+                    f"row0={column_number}, row{row_index}={len(row)}"
+                )
+            row_sizes = tuple(tensor.numel() * tensor.element_size() for tensor in row)
+            if row_sizes != tensor_sizes:
+                raise ValueError(
+                    "broadcast tensor size mismatch: "
+                    f"row0={tensor_sizes}, row{row_index}={row_sizes}"
+                )
+            for tensor in row:
+                if tensor.device != device or tensor.dtype != dtype:
+                    raise ValueError(
+                        "broadcast load requires tensors with one device and dtype"
+                    )
+        return device, dtype, tensor_sizes
+
+    def _get_broadcast_resource(
+        self, tensors: List[List[torch.Tensor]]
+    ) -> _BroadcastResource:
+        device, dtype, tensor_sizes = self._broadcast_tensor_sizes(tensors)
+        row_number = len(tensors)
+        bytes_per_row = sum(tensor_sizes)
+        total_bytes = row_number * bytes_per_row
+        element_size = tensors[0][0].element_size()
+        if total_bytes % element_size != 0:
+            raise ValueError(
+                f"broadcast payload {total_bytes} is not aligned to {element_size}"
+            )
+
+        key = (str(device), dtype, row_number, tensor_sizes)
+        resource = self._broadcast_resources.get(key)
+        if resource is not None:
+            return resource
+
+        buffer = torch.empty([total_bytes // element_size], dtype=dtype, device=device)
+        tensor_offsets = np.asarray(
+            [0] + list(np.cumsum(tensor_sizes[:-1], dtype=np.uint64)),
+            dtype=np.uint64,
+        )
+        source_offsets = np.arange(row_number, dtype=np.uint64) * bytes_per_row
+        load_addrs = (
+            np.uint64(buffer.data_ptr())
+            + source_offsets[:, None]
+            + tensor_offsets[None, :]
+        )
+        resource = _BroadcastResource(
+            buffer=buffer,
+            load_addrs=np.ascontiguousarray(load_addrs, dtype=np.uint64),
+            source_offsets=np.ascontiguousarray(source_offsets, dtype=np.uint64),
+            status=torch.empty([1], dtype=torch.int32, device=device),
+        )
+        self._broadcast_resources[key] = resource
+        return resource
+
+    def _get_broadcast_stream(self, device: torch.device):
+        key = str(device)
+        stream = self._broadcast_streams.get(key)
+        if stream is not None:
+            return stream
+        if device.type == "cuda":
+            stream = torch.cuda.Stream(device=device)
+        elif device.type == "npu":
+            stream = torch.npu.Stream()
+        else:
+            raise ValueError(f"unsupported broadcast device: {device}")
+        self._broadcast_streams[key] = stream
+        return stream
+
+    @staticmethod
+    def _run_broadcast(
+        tensor: torch.Tensor, src_rank: int, process_group, stream
+    ) -> None:
+        if tensor.device.type == "cuda":
+            with torch.cuda.stream(stream):
+                torch.distributed.broadcast(tensor, src=src_rank, group=process_group)
+        else:
+            with torch.npu.stream(stream):
+                torch.distributed.broadcast(tensor, src=src_rank, group=process_group)
+        stream.synchronize()
+
+    def load_broadcast(
+        self,
+        block_ids: List[bytes],
+        shard_index: List[int],
+        dst_tensor: List[List[torch.Tensor]],
+        src_rank: int = 0,
+        process_group=None,
+    ) -> UcmPipelineStoreBroadcastStats:
+        if not self._broadcast_enabled:
+            raise RuntimeError(
+                "broadcast load requires cache_tp_broadcast_scatter=True"
+            )
+        if not torch.distributed.is_initialized():
+            raise RuntimeError("broadcast load requires an initialized process group")
+        if len(block_ids) != len(dst_tensor) or len(shard_index) != len(block_ids):
+            raise ValueError(
+                "broadcast load dimension mismatch: "
+                f"blocks={len(block_ids)}, indexes={len(shard_index)}, "
+                f"destinations={len(dst_tensor)}"
+            )
+
+        resource = self._get_broadcast_resource(dst_tensor)
+        stream = self._get_broadcast_stream(resource.buffer.device)
+        destination_addrs = self._tensor_normalize(dst_tensor)
+        total_start = time.perf_counter()
+
+        root_load_cost = 0.0
+        root_error = None
+        if torch.distributed.get_rank() == src_rank:
+            root_load_start = time.perf_counter()
+            try:
+                task = self.load_data(block_ids, shard_index, resource.load_addrs)
+                self.wait(task)
+            except Exception as error:  # Keep all ranks in the status collective.
+                root_error = error
+            root_load_cost = time.perf_counter() - root_load_start
+
+        resource.status.fill_(0 if root_error is not None else 1)
+        torch.distributed.broadcast(resource.status, src=src_rank, group=process_group)
+        if int(resource.status.item()) == 0:
+            if root_error is not None:
+                raise root_error
+            raise RuntimeError(f"broadcast root rank {src_rank} failed to load data")
+
+        broadcast_start = time.perf_counter()
+        self._run_broadcast(resource.buffer, src_rank, process_group, stream)
+        broadcast_cost = time.perf_counter() - broadcast_start
+
+        scatter_start = time.perf_counter()
+        self.scatter_from_contiguous(
+            resource.buffer.data_ptr(),
+            resource.source_offsets,
+            destination_addrs,
+        )
+        scatter_cost = time.perf_counter() - scatter_start
+        total_cost = time.perf_counter() - total_start
+        return UcmPipelineStoreBroadcastStats(
+            root_load_cost=root_load_cost,
+            broadcast_cost=broadcast_cost,
+            scatter_cost=scatter_cost,
+            total_cost=total_cost,
+        )
 
     def wait(self, task: Task) -> None:
         return self.store_.Wait(task.task_id)
