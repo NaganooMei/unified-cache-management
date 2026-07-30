@@ -431,6 +431,14 @@ def initialize_collectives(device_id: int, init_method: str):
         rank=device_id,
         world_size=worker_number,
     )
+    # ProcessGroupHCCL creates and caches the device communicator lazily on the
+    # first collective. Initialize it while all ranks are still aligned instead
+    # of letting non-root ranks enter it while root is doing storage/H2D work.
+    warmup_tensor = torch.zeros(
+        [1], dtype=torch.int32, device=f"{device_type}:{device_id}"
+    )
+    torch.distributed.broadcast(warmup_tensor, src=0)
+    synchronize_device()
 
 
 def synchronize_device():

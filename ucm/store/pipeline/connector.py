@@ -348,7 +348,7 @@ class UcmPipelineStore(UcmKVStoreBaseV1):
             root_load_cost = time.perf_counter() - root_load_start
 
         resource.status.fill_(0 if root_error is not None else 1)
-        torch.distributed.broadcast(resource.status, src=src_rank, group=process_group)
+        self._run_broadcast(resource.status, src_rank, process_group, stream)
         if int(resource.status.item()) == 0:
             if root_error is not None:
                 raise root_error
