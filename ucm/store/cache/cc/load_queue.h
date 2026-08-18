@@ -25,6 +25,7 @@
 #define UNIFIEDCACHE_CACHE_STORE_CC_LOAD_QUEUE_H
 
 #include <future>
+#include <string>
 #include <thread>
 #include <vector>
 #include "copy_stream.h"
@@ -48,6 +49,23 @@ class LoadQueue {
         TransBuffer::Handle bufferHandle;
         Detail::TaskHandle backendTaskHandle;
         WaiterPtr waiter;
+        size_t shardIndex{0};
+    };
+    struct TaskTrace {
+        Detail::TaskHandle taskHandle{0};
+        double firstSubmitTp{0.0};
+        double lastSubmitTp{0.0};
+        double backendWaitSumMs{0.0};
+        double backendWaitMaxMs{0.0};
+        double submitSumMs{0.0};
+        double submitMaxMs{0.0};
+        size_t backendWaitMaxShard{0};
+        size_t submitMaxShard{0};
+        size_t submitMaxStream{0};
+        size_t processedShards{0};
+        std::vector<size_t> streamShards;
+        std::vector<size_t> streamBytes;
+        std::vector<double> streamSubmitMs;
     };
 
 private:
@@ -56,10 +74,13 @@ private:
     TransBuffer* buffer_{nullptr};
     StoreV1* backend_{nullptr};
     int32_t deviceId_{-1};
+    std::string uniqueId_{};
     std::vector<size_t> tensorSizes_{};
+    size_t transferBytesPerShard_{0};
     size_t streamNumber_{1};
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
+    bool cacheSdmaTrace_{false};
     std::vector<ssize_t> cpuAffinityCores_{};
     size_t localRankSize_{};
     SpscRingQueue<TaskPair> waiting_;
@@ -67,6 +88,7 @@ private:
     std::thread dispatcher_;
     std::thread transfer_;
     std::vector<ShardTask> holder_;
+    TaskTrace taskTrace_{};
 
 public:
     ~LoadQueue();
@@ -79,8 +101,13 @@ private:
     void TransferStage(std::promise<Status>& started);
     void TransferOneTask(CopyStream& stream, ShardTask&& task);
     Status WaitBackendTaskReady(ShardTask& task);
-    Status HostToDeviceAsync(CopyStream& stream, void* host, void** device);
+    Status HostToDeviceAsync(CopyStream& stream, void* host, void** device,
+                             size_t* streamIndex = nullptr);
     void RecordH2dSyncMetrics(double h2dSyncMs) const;
+    void ResetTaskTrace(Detail::TaskHandle taskHandle);
+    void LogTaskTrace(const TransTask& task, const Latch& waiter, const Status& status,
+                      double syncStartTp, double syncEndTp,
+                      const std::vector<double>& streamSyncWaitMs) const;
 };
 
 }  // namespace UC::CacheStore

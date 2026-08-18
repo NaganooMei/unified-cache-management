@@ -71,6 +71,7 @@ user-guide/rerope/rerope
 developer-guide/contribute
 developer-guide/deepdive_ucm
 developer-guide/add_metrics
+developer-guide/cache_sdma_direct_performance_trace
 developer-guide/extending_store
 :::
 

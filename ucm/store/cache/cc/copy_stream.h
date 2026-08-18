@@ -24,8 +24,10 @@
 #ifndef UNIFIEDCACHE_CACHE_STORE_CC_COPY_STREAM_H
 #define UNIFIEDCACHE_CACHE_STORE_CC_COPY_STREAM_H
 
+#include <vector>
 #include "logger/logger.h"
 #include "status/status.h"
+#include "time/now_time.h"
 #include "trans/device.h"
 
 namespace UC::CacheStore {
@@ -96,11 +98,13 @@ public:
         streamIndex_ = 0;
         return Status::OK();
     }
-    std::shared_ptr<Trans::Stream> NextStream() noexcept
+    std::shared_ptr<Trans::Stream> NextStream(size_t* selectedIndex = nullptr) noexcept
     {
         if (streamNumber_ == 0) [[unlikely]] { return nullptr; }
-        auto& stream = streams_[streamIndex_];
+        const auto index = streamIndex_;
+        auto& stream = streams_[index];
         streamIndex_ = (streamIndex_ + 1) % streamNumber_;
+        if (selectedIndex != nullptr) { *selectedIndex = index; }
         return stream;
     }
     Status AppendCallback(std::function<void(bool)> cb) noexcept
@@ -108,15 +112,17 @@ public:
         if (streams_.empty()) [[unlikely]] { return Status::Error(); }
         return streams_.front()->AppendCallback(std::move(cb));
     }
-    Status HostToDeviceAsync(void* host, void** device, const std::vector<size_t>& sizes) noexcept
+    Status HostToDeviceAsync(void* host, void** device, const std::vector<size_t>& sizes,
+                             size_t* selectedIndex = nullptr) noexcept
     {
-        auto stream = NextStream();
+        auto stream = NextStream(selectedIndex);
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         return stream->HostToDeviceAsync(host, device, sizes);
     }
-    Status DeviceToHostAsync(void** device, void* host, const std::vector<size_t>& sizes) noexcept
+    Status DeviceToHostAsync(void** device, void* host, const std::vector<size_t>& sizes,
+                             size_t* selectedIndex = nullptr) noexcept
     {
-        auto stream = NextStream();
+        auto stream = NextStream(selectedIndex);
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         return stream->DeviceToHostAsync(device, host, sizes);
     }
@@ -131,11 +137,19 @@ public:
         }
         return status;
     }
-    Status Synchronize() noexcept
+    Status Synchronize(std::vector<double>* streamWaitMs = nullptr) noexcept
     {
+        if (streamWaitMs != nullptr) {
+            streamWaitMs->clear();
+            streamWaitMs->reserve(streams_.size());
+        }
         auto status = Status::OK();
         for (auto& stream : streams_) {
+            const auto tp = streamWaitMs != nullptr ? NowTime::Now() : 0.0;
             auto s = stream->Synchronized();
+            if (streamWaitMs != nullptr) {
+                streamWaitMs->push_back((NowTime::Now() - tp) * 1e3);
+            }
             if (s.Success()) { continue; }
             UC_ERROR("Failed({}) to synchronize stream on device({}).", s, deviceId_);
             if (status.Success()) { status = s; }

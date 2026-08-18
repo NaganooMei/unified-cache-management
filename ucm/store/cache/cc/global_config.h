@@ -58,6 +58,7 @@ struct Config {
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};
     bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
+    bool cacheSdmaTrace{false};
     size_t localRankSize{8};
 };
 

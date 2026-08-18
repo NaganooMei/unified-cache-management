@@ -55,10 +55,13 @@ private:
     TransBuffer* buffer_{nullptr};
     StoreV1* backend_{nullptr};
     int32_t deviceId_{-1};
+    std::string uniqueId_{};
     std::vector<size_t> tensorSizes_{};
+    size_t transferBytesPerShard_{0};
     size_t streamNumber_{1};
     bool useGdr_{false};
     bool cacheSdmaDirect_{false};
+    bool cacheSdmaTrace_{false};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<DumpCtx> dumping_;
@@ -73,8 +76,9 @@ public:
 private:
     void DispatchStage(std::promise<Status>& started);
     void DispatchOneTask(CopyStream& stream, TaskPair&& pair);
-    Status DumpOneTask(CopyStream& stream, TaskPtr task);
-    Status DeviceToHostAsync(CopyStream& stream, void** device, void* host);
+    Status DumpOneTask(CopyStream& stream, TaskPtr task, double queueWaitMs);
+    Status DeviceToHostAsync(CopyStream& stream, void** device, void* host,
+                             size_t* streamIndex = nullptr);
     void BackendDumpStage();
 };
 

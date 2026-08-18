@@ -320,6 +320,8 @@ class FAWALoadTask:
     store: UcmKVStoreBaseV1
     task: Task
     key_count: int
+    submitted_at: float = 0.0
+    batch_seq: int = 0
 
 
 @dataclass
@@ -1117,6 +1119,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         """Submit one store load and retain block ids for failure reporting."""
 
         shard_indices = [0] * len(keys)
+        submit_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
         task = self._rank_consistency.submit_load(
             store,
             {request_id: keys},
@@ -1124,12 +1127,26 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             shard_indices,
             ptrs,
         )
+        submitted_at = time.perf_counter() if self._sdma_trace_enabled else 0.0
+        if self._sdma_trace_enabled:
+            logger.info(
+                "[UCM_SDMA_TRACE] event=fawa_load_submit "
+                f"batch={self._sdma_trace_batch_seq} request_id={request_id} "
+                f"label={label} task={getattr(task, 'task_id', -1)} "
+                f"keys={len(keys)} store={self.unique_id}_fawa_{label.lower()} "
+                "dp_rank="
+                f"{self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank} "
+                f"submit_ms={(submitted_at - submit_start) * 1e3:.3f}."
+            )
         return FAWALoadTask(
             request_id=request_id,
             label=label,
             store=store,
             task=task,
             key_count=len(keys),
+            submitted_at=submitted_at,
+            batch_seq=self._sdma_trace_batch_seq,
         )
 
     def _handle_load_err(self, request_id: str):
@@ -1146,14 +1163,35 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
     ) -> None:
         """Wait a load task and mark its anchor blocks invalid on failure."""
 
+        wait_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
+        status = "OK"
         try:
             self._rank_consistency.wait_load(load_task.task)
         except Exception as e:
+            status = type(e).__name__
             logger.error(
                 f"request {load_task.request_id} wait FAWA load "
                 f"task label={load_task.label} error. {type(e).__name__}: {e}"
             )
             self._handle_load_err(load_task.request_id)
+        finally:
+            if self._sdma_trace_enabled:
+                wait_end = time.perf_counter()
+                logger.info(
+                    "[UCM_SDMA_TRACE] event=fawa_load_complete "
+                    f"batch={load_task.batch_seq} "
+                    f"request_id={load_task.request_id} "
+                    f"label={load_task.label} "
+                    f"task={getattr(load_task.task, 'task_id', -1)} "
+                    f"keys={load_task.key_count} "
+                    f"store={self.unique_id}_fawa_{load_task.label.lower()} "
+                    "dp_rank="
+                    f"{self._vllm_config.parallel_config.data_parallel_rank} "
+                    f"tp_rank={self.tp_rank} device={self.local_rank} "
+                    f"wait_block_ms={(wait_end - wait_start) * 1e3:.3f} "
+                    f"lifetime_ms={(wait_end - load_task.submitted_at) * 1e3:.3f} "
+                    f"status={status}."
+                )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         res = self._invalid_block_ids
@@ -1172,6 +1210,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         """Submit one store dump for FA or WA rows."""
 
         shard_indices = [0] * len(keys)
+        submit_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
         task = self._rank_consistency.submit_dump(
             store,
             block_ids_by_request,
@@ -1180,6 +1219,18 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             ptrs,
             event_handle,
         )
+        if self._sdma_trace_enabled:
+            submit_end = time.perf_counter()
+            logger.info(
+                "[UCM_SDMA_TRACE] event=fawa_dump_submit "
+                f"label={label} task={getattr(task, 'task_id', -1)} "
+                f"keys={len(keys)} requests={len(block_ids_by_request)} "
+                f"request_ids={','.join(sorted(block_ids_by_request))} "
+                f"store={self.unique_id}_fawa_{label.lower()} "
+                f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank} "
+                f"submit_ms={(submit_end - submit_start) * 1e3:.3f}."
+            )
         return FAWADumpTask(
             label=label,
             store=store,
@@ -1268,11 +1319,25 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         "fawa_worker_start_load_kv_ms",
     )
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        trace_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
+        if self._sdma_trace_enabled:
+            self._sdma_trace_batch_seq += 1
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, UCMFAWAConnectorMetadata):
             raise RuntimeError(f"Unexpected FAWA metadata type: {type(metadata)}")
 
         tasks: list[FAWALoadTask] = []
+        if self._sdma_trace_enabled:
+            request_count = sum(
+                1 for request in metadata.request_meta.values() if request.load_keys
+            )
+            logger.info(
+                "[UCM_SDMA_TRACE] event=fawa_load_batch_begin "
+                f"batch={self._sdma_trace_batch_seq} requests={request_count} "
+                f"store_prefix={self.unique_id}_fawa "
+                f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank}."
+            )
         for request_id, request in metadata.request_meta.items():
             if not request.load_keys:
                 continue
@@ -1321,6 +1386,15 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 self._handle_load_err(request_id)
 
         self._wait_all_load_task(tasks)
+        if self._sdma_trace_enabled:
+            logger.info(
+                "[UCM_SDMA_TRACE] event=fawa_load_batch_complete "
+                f"batch={self._sdma_trace_batch_seq} tasks={len(tasks)} "
+                f"store_prefix={self.unique_id}_fawa "
+                f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank} "
+                f"total_ms={(time.perf_counter() - trace_start) * 1e3:.3f}."
+            )
 
     @fawa_latency_metric(
         "fawa_worker_wait_wait_all_load_task_ms",

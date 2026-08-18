@@ -161,6 +161,7 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
+        config.Get("cache_sdma_trace", param.cacheSdmaTrace);
         config.GetNumber("local_rank_size", param.localRankSize);
         return param;
     }
@@ -247,6 +248,7 @@ private:
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, config.streamNumber);
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, config.cacheSdmaDirect);
+        UC_INFO("Set {}::CacheSdmaTrace to {}.", ns, config.cacheSdmaTrace);
         UC_INFO("Set {}::LoadExclusiveBufferNumber to {}.", ns, config.loadExclusiveBufferNumber);
         UC_INFO("Set {}::GpuKvBufferNumber to {}.", ns, config.gpuKvBufferAddrs.size());
         UC_INFO("Set {}::UseGdr to {}.", ns, config.useGdr);

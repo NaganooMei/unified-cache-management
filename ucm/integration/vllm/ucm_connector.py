@@ -958,6 +958,9 @@ class PendingDumpTask:
     request_ids: set[str]
     event_handle: int = 0
     wait_for_save_start_ms: float = 0.0
+    submitted_at: float = 0.0
+    trace_mode: str = "direct"
+    trace_layer: int = -1
 
 
 class RequestHasher:
@@ -1101,6 +1104,9 @@ class UCMDirectConnector(KVConnectorBase_V1):
         self.launch_config = ucm_config.get_config()
         self.connector_configs = self.launch_config.get("ucm_connectors", [])
         assert len(self.connector_configs) > 0, "no storage connector name in config."
+        connector_config = self.connector_configs[0].get("ucm_connector_config", {})
+        self._sdma_trace_enabled = bool(connector_config.get("cache_sdma_trace", False))
+        self._sdma_trace_batch_seq = 0
         share_buffer_enable = (
             self.connector_configs[0]
             .get("ucm_connector_config", {})
@@ -1640,15 +1646,32 @@ class UCMDirectConnector(KVConnectorBase_V1):
         )
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        trace_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
+        if self._sdma_trace_enabled:
+            self._sdma_trace_batch_seq += 1
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, UCMConnectorMetadata)
 
         request_to_task: dict[str, Task] = {}
+        request_to_submit_tp: dict[str, float] = {}
         is_load = False
         num_loaded_block = 0
         num_loaded_request = 0
         load_start_time = time.perf_counter() * 1000
         request_to_load_blocks: dict[str, int] = {}
+        if self._sdma_trace_enabled:
+            request_count = sum(
+                1
+                for request in metadata.request_meta.values()
+                if request.load_block_ids[0]
+            )
+            logger.info(
+                "[UCM_SDMA_TRACE] event=direct_load_batch_begin "
+                f"batch={self._sdma_trace_batch_seq} requests={request_count} "
+                f"store={self.unique_id} "
+                f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank}."
+            )
         for request_id, request in metadata.request_meta.items():
             if len(request.load_block_ids[0]) == 0:
                 continue
@@ -1677,6 +1700,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 total_ptrs = self.kv_cache_layout.extract_block_addrs(vllm_block_ids)
                 total_ptrs = total_ptrs.reshape(total_ptrs.shape[0], -1)
                 shard_indexs = [0] * len(ucm_block_ids)
+                submit_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
                 task = self._rank_consistency.submit_load(
                     self.store,
                     {request_id: ucm_block_ids},
@@ -1684,8 +1708,22 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     shard_indexs,
                     total_ptrs,
                 )
+                submitted_at = time.perf_counter() if self._sdma_trace_enabled else 0.0
                 request_to_task[request_id] = task
+                request_to_submit_tp[request_id] = submitted_at
                 request_to_load_blocks[request_id] = len(ucm_block_ids)
+                if self._sdma_trace_enabled:
+                    logger.info(
+                        "[UCM_SDMA_TRACE] event=direct_load_submit "
+                        f"batch={self._sdma_trace_batch_seq} "
+                        f"request_id={request_id} "
+                        f"task={getattr(task, 'task_id', -1)} "
+                        f"blocks={len(ucm_block_ids)} "
+                        f"store={self.unique_id} "
+                        f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                        f"tp_rank={self.tp_rank} device={self.local_rank} "
+                        f"submit_ms={(submitted_at - submit_start) * 1e3:.3f}."
+                    )
             except Exception as e:
                 logger.error(
                     f"request {request_id} submit load task error. "
@@ -1700,9 +1738,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 num_loaded_block -= len(ucm_block_ids)
 
         for request_id, task in request_to_task.items():
+            wait_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
+            status = "OK"
             try:
                 self._rank_consistency.wait_load(task)
             except Exception as e:
+                status = type(e).__name__
                 logger.error(
                     f"request {request_id} wait load task error. "
                     f"{type(e).__name__}: {e}"
@@ -1714,6 +1755,23 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 )
                 self._connector_worker_meta.mark_failed(request_id)
                 num_loaded_block -= request_to_load_blocks.get(request_id, 0)
+            finally:
+                if self._sdma_trace_enabled:
+                    wait_end = time.perf_counter()
+                    logger.info(
+                        "[UCM_SDMA_TRACE] event=direct_load_complete "
+                        f"batch={self._sdma_trace_batch_seq} "
+                        f"request_id={request_id} "
+                        f"task={getattr(task, 'task_id', -1)} "
+                        f"blocks={request_to_load_blocks.get(request_id, 0)} "
+                        f"store={self.unique_id} "
+                        f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                        f"tp_rank={self.tp_rank} device={self.local_rank} "
+                        f"wait_block_ms={(wait_end - wait_start) * 1e3:.3f} "
+                        f"lifetime_ms="
+                        f"{(wait_end - request_to_submit_tp[request_id]) * 1e3:.3f} "
+                        f"status={status}."
+                    )
 
         load_end_time = time.perf_counter() * 1000
         load_duration_ms = load_end_time - load_start_time
@@ -1728,6 +1786,16 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 "load_bytes_total": load_bytes,
             }
             ucmmetrics.update_stats(load_stats)
+        if self._sdma_trace_enabled:
+            logger.info(
+                "[UCM_SDMA_TRACE] event=direct_load_batch_complete "
+                f"batch={self._sdma_trace_batch_seq} tasks={len(request_to_task)} "
+                f"blocks={num_loaded_block} "
+                f"store={self.unique_id} "
+                f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank} "
+                f"total_ms={(time.perf_counter() - trace_start) * 1e3:.3f}."
+            )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
@@ -1753,6 +1821,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
     def _wait_pending_dump_task(self, pending_dump_task: PendingDumpTask) -> None:
         wait_start_ms = time.perf_counter() * 1000
+        status = "OK"
         try:
             self._rank_consistency.wait_dump(pending_dump_task.task)
             wait_end_ms = time.perf_counter() * 1000
@@ -1766,7 +1835,29 @@ class UCMDirectConnector(KVConnectorBase_V1):
             )
             if stats:
                 ucmmetrics.update_stats(stats)
+        except Exception as e:
+            status = type(e).__name__
+            raise
         finally:
+            if self._sdma_trace_enabled:
+                trace_end = time.perf_counter()
+                submitted_at = pending_dump_task.submitted_at
+                lifetime_ms = (
+                    (trace_end - submitted_at) * 1e3 if submitted_at > 0.0 else 0.0
+                )
+                logger.info(
+                    "[UCM_SDMA_TRACE] event=connector_dump_complete "
+                    f"mode={pending_dump_task.trace_mode} "
+                    f"layer={pending_dump_task.trace_layer} "
+                    f"task={getattr(pending_dump_task.task, 'task_id', -1)} "
+                    f"requests={len(pending_dump_task.request_ids)} "
+                    f"request_ids={','.join(sorted(pending_dump_task.request_ids))} "
+                    f"store={self.unique_id} "
+                    f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                    f"tp_rank={self.tp_rank} device={self.local_rank} "
+                    f"wait_block_ms={trace_end * 1e3 - wait_start_ms:.3f} "
+                    f"lifetime_ms={lifetime_ms:.3f} status={status}."
+                )
             self._release_dump_event_handle(pending_dump_task)
 
     def _release_dump_event_handle(self, pending_dump_task: PendingDumpTask) -> None:
@@ -1889,6 +1980,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 total_ptrs = total_ptrs.reshape(total_ptrs.shape[0], -1)
                 shard_indexs = [0] * len(total_ucm_block_ids)
                 event_handle = self._get_dump_event_handle()
+                submit_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
                 task = self._rank_consistency.submit_dump(
                     self.store,
                     block_ids_by_request,
@@ -1897,6 +1989,19 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     total_ptrs,
                     event_handle,
                 )
+                submitted_at = time.perf_counter() if self._sdma_trace_enabled else 0.0
+                if self._sdma_trace_enabled:
+                    logger.info(
+                        "[UCM_SDMA_TRACE] event=direct_dump_submit "
+                        f"task={getattr(task, 'task_id', -1)} "
+                        f"requests={len(dump_request_ids)} "
+                        f"request_ids={','.join(sorted(dump_request_ids))} "
+                        f"blocks={len(total_ucm_block_ids)} "
+                        f"store={self.unique_id} "
+                        f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                        f"tp_rank={self.tp_rank} device={self.local_rank} "
+                        f"submit_ms={(submitted_at - submit_start) * 1e3:.3f}."
+                    )
             except Exception as e:
                 logger.error(f"dump kv cache failed. {type(e).__name__}: {e}")
                 if self.enable_event_sync and event_handle and self.device is not None:
@@ -1916,6 +2021,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     request_ids=set(dump_request_ids),
                     event_handle=event_handle,
                     wait_for_save_start_ms=wait_for_save_start_ms,
+                    submitted_at=submitted_at,
                 )
             )
 
@@ -2060,6 +2166,7 @@ class UCMLayerWiseConnector(UCMDirectConnector):
         self.dump_total_ptrs: np.ndarray | None = None
         self.request_data: list[tuple[str, list, list, np.ndarray]] = []
         self._failure_req_ids: set[str] = set()
+        self._sdma_trace_layer_submit_tp: dict[tuple[int, str], float] = {}
         self._layerwise_prev_wait_end: Optional[float] = None
         self._layerwise_batch_start: Optional[float] = None
         self._layerwise_batch_wait_blocking_total_ms = 0.0
@@ -2191,6 +2298,7 @@ class UCMLayerWiseConnector(UCMDirectConnector):
             layer_ptrs = np.ascontiguousarray(self.dump_total_ptrs[local_layer_id])
             shard_indexs = [layer_id] * len(total_ucm_block_ids)
             event_handle = self._get_dump_event_handle()
+            submit_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
             task = self._rank_consistency.submit_dump(
                 self.store,
                 block_ids_by_request,
@@ -2199,11 +2307,28 @@ class UCMLayerWiseConnector(UCMDirectConnector):
                 layer_ptrs,
                 event_handle,
             )
+            submitted_at = time.perf_counter() if self._sdma_trace_enabled else 0.0
+            if self._sdma_trace_enabled:
+                logger.info(
+                    "[UCM_SDMA_TRACE] event=layerwise_dump_submit "
+                    f"batch={self._sdma_trace_batch_seq} layer={layer_id} "
+                    f"task={getattr(task, 'task_id', -1)} "
+                    f"requests={len(dump_request_ids)} "
+                    f"request_ids={','.join(sorted(dump_request_ids))} "
+                    f"blocks={len(total_ucm_block_ids)} "
+                    f"store={self.unique_id} "
+                    f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                    f"tp_rank={self.tp_rank} device={self.local_rank} "
+                    f"submit_ms={(submitted_at - submit_start) * 1e3:.3f}."
+                )
             self._pending_dump_tasks.append(
                 PendingDumpTask(
                     task=task,
                     request_ids=set(dump_request_ids),
                     event_handle=event_handle,
+                    submitted_at=submitted_at,
+                    trace_mode="layerwise",
+                    trace_layer=layer_id,
                 )
             )
         except Exception as e:
@@ -2251,6 +2376,7 @@ class UCMLayerWiseConnector(UCMDirectConnector):
             try:
                 shard_indexs = [layer_id] * len(ucm_block_ids)
                 layer_ptrs = total_ptrs[local_row]
+                submit_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
                 task = self._rank_consistency.submit_load(
                     self.store,
                     {request_id: ucm_block_ids},
@@ -2258,7 +2384,23 @@ class UCMLayerWiseConnector(UCMDirectConnector):
                     shard_indexs,
                     layer_ptrs,
                 )
+                submitted_at = time.perf_counter() if self._sdma_trace_enabled else 0.0
                 self.load_tasks[layer_id][request_id] = task
+                if self._sdma_trace_enabled:
+                    self._sdma_trace_layer_submit_tp[(layer_id, request_id)] = (
+                        submitted_at
+                    )
+                    logger.info(
+                        "[UCM_SDMA_TRACE] event=layerwise_load_submit "
+                        f"batch={self._sdma_trace_batch_seq} layer={layer_id} "
+                        f"request_id={request_id} "
+                        f"task={getattr(task, 'task_id', -1)} "
+                        f"blocks={len(ucm_block_ids)} "
+                        f"store={self.unique_id} "
+                        f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                        f"tp_rank={self.tp_rank} device={self.local_rank} "
+                        f"submit_ms={(submitted_at - submit_start) * 1e3:.3f}."
+                    )
             except Exception as e:
                 logger.error(
                     f"request {request_id} submit load task for layer {layer_id} "
@@ -2274,13 +2416,30 @@ class UCMLayerWiseConnector(UCMDirectConnector):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         self._layerwise_batch_start = time.perf_counter()
+        if self._sdma_trace_enabled:
+            self._sdma_trace_batch_seq += 1
         metadata = self._get_connector_metadata()
         self.load_tasks.clear()
+        self._sdma_trace_layer_submit_tp.clear()
         self.request_data.clear()
         self._failure_req_ids.clear()
         self.need_load = False
         self._layerwise_prev_wait_end = None
         self._layerwise_batch_wait_blocking_total_ms = 0.0
+
+        if self._sdma_trace_enabled:
+            request_count = sum(
+                1
+                for request in metadata.request_meta.values()
+                if request.load_block_ids[0]
+            )
+            logger.info(
+                "[UCM_SDMA_TRACE] event=layerwise_load_batch_begin "
+                f"batch={self._sdma_trace_batch_seq} requests={request_count} "
+                f"store={self.unique_id} "
+                f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank}."
+            )
 
         for request_id, request in metadata.request_meta.items():
             if len(request.load_block_ids[0]) == 0:
@@ -2331,9 +2490,12 @@ class UCMLayerWiseConnector(UCMDirectConnector):
         layer_tasks = self.load_tasks.pop(current_layer_id, {})
         n_tasks = len(layer_tasks)
         for request_id, task in layer_tasks.items():
+            task_wait_start = time.perf_counter() if self._sdma_trace_enabled else 0.0
+            status = "OK"
             try:
                 self._rank_consistency.wait_load(task)
             except Exception as e:
+                status = type(e).__name__
                 logger.error(
                     f"request {request_id} wait {layer_name} load failed. "
                     f"{type(e).__name__}: {e}"
@@ -2345,6 +2507,28 @@ class UCMLayerWiseConnector(UCMDirectConnector):
                 )
                 self._connector_worker_meta.mark_failed(request_id)
                 self._failure_req_ids.add(request_id)
+            finally:
+                if self._sdma_trace_enabled:
+                    task_wait_end = time.perf_counter()
+                    submitted_at = self._sdma_trace_layer_submit_tp.pop(
+                        (current_layer_id, request_id), 0.0
+                    )
+                    lifetime_ms = (
+                        (task_wait_end - submitted_at) * 1e3
+                        if submitted_at > 0.0
+                        else 0.0
+                    )
+                    logger.info(
+                        "[UCM_SDMA_TRACE] event=layerwise_load_complete "
+                        f"batch={self._sdma_trace_batch_seq} "
+                        f"layer={current_layer_id} request_id={request_id} "
+                        f"task={getattr(task, 'task_id', -1)} "
+                        f"store={self.unique_id} "
+                        f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                        f"tp_rank={self.tp_rank} device={self.local_rank} "
+                        f"wait_block_ms={(task_wait_end - task_wait_start) * 1e3:.3f} "
+                        f"lifetime_ms={lifetime_ms:.3f} status={status}."
+                    )
 
         wait_end = time.perf_counter()
 
@@ -2370,6 +2554,16 @@ class UCMLayerWiseConnector(UCMDirectConnector):
             submit_end = time.perf_counter()
             stats["layerwise_next_layer_submit_ms"] = (submit_end - wait_end) * 1000
         ucmmetrics.update_stats(stats)
+        if self._sdma_trace_enabled:
+            logger.info(
+                "[UCM_SDMA_TRACE] event=layerwise_layer_complete "
+                f"batch={self._sdma_trace_batch_seq} layer={current_layer_id} "
+                f"tasks={n_tasks} blocking_ms={blocking_ms:.3f} "
+                f"has_next={has_next} "
+                f"store={self.unique_id} "
+                f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank}."
+            )
         self._layerwise_prev_wait_end = wait_end
 
     def save_kv_layer(
@@ -2450,6 +2644,17 @@ class UCMLayerWiseConnector(UCMDirectConnector):
         stats = self._layerwise_batch_stats(total_end, save_tail_ms)
         if stats:
             ucmmetrics.update_stats(stats)
+        if self._sdma_trace_enabled and self._layerwise_batch_start is not None:
+            logger.info(
+                "[UCM_SDMA_TRACE] event=layerwise_load_batch_complete "
+                f"batch={self._sdma_trace_batch_seq} need_load={self.need_load} "
+                f"is_save={self.is_save} "
+                f"load_wait_total_ms={self._layerwise_batch_wait_blocking_total_ms:.3f} "
+                f"total_ms={(total_end - self._layerwise_batch_start) * 1e3:.3f} "
+                f"store={self.unique_id} "
+                f"dp_rank={self._vllm_config.parallel_config.data_parallel_rank} "
+                f"tp_rank={self.tp_rank} device={self.local_rank}."
+            )
         self.is_save = False
         self.dump_total_ptrs = None
 
