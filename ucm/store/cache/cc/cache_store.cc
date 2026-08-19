@@ -165,6 +165,7 @@ private:
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
         config.Get("use_gdr", param.useGdr);
         config.Get("cache_io_aggregation", param.cacheIOAggregation);
+        param.cacheIOAggregation = param.cacheIOAggregation && UCM_RUNTIME_ASCEND_IO_AGGREGATION;
         config.Get("cache_sdma_direct", param.cacheSdmaDirect);
         config.GetNumber("local_rank_size", param.localRankSize);
         return param;
@@ -201,11 +202,6 @@ private:
         if (config.deviceId == -1) { return Status::OK(); }
         s = CheckSizeConfig(config);
         if (s.Failure()) { return s; }
-#if !UCM_RUNTIME_ASCEND_IO_AGGREGATION
-        if (config.cacheIOAggregation) {
-            return Status::InvalidParam("Cache IO aggregation requires RUNTIME_ENVIRONMENT=ascend");
-        }
-#endif
 #if !UCM_RUNTIME_ASCEND_SDMA_DIRECT
         if (config.cacheSdmaDirect) {
             return Status::InvalidParam("Cache SDMA Direct requires RUNTIME_ENVIRONMENT=ascend-a3");
