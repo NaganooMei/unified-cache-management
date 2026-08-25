@@ -5,8 +5,8 @@ set -Eeuo pipefail
 readonly BLOCK_SIZE="32K"
 readonly BLOCK_COUNT=500
 readonly ITERATIONS=128
-readonly DEVICE_COUNT="${DEVICE_COUNT:-8}"
 readonly UCM_TOOLKIT_BIN="${UCM_TOOLKIT_BIN:-ucm-toolkit}"
+readonly DEVICE_COUNTS=(1 8)
 readonly STREAM_COUNTS=(1 4 8 16 32 64 128)
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,28 +36,30 @@ run_one()
 {
     local case_name="$1"
     local method="$2"
-    local stream_count="$3"
+    local device_count="$3"
+    local stream_count="$4"
     local -a command=(
         "${UCM_TOOLKIT_BIN}" run dev-sandbox copy
         -t "${case_name}"
         -s "${BLOCK_SIZE}"
         -n "${BLOCK_COUNT}"
         -i "${ITERATIONS}"
-        -d "${DEVICE_COUNT}"
+        -d "${device_count}"
         -S "${stream_count}"
     )
 
-    # FFTS multi-stream schedules IO/tasks across streams.  With -f 1,
-    # -n 500 means 500 independent 32K tasks, matching CE's total bytes.
+    # FFTS multi-stream schedules IO/tasks across streams. With -f 3,
+    # -n 500 means 500 independent tasks containing three 32K fragments each.
     if [[ "${method}" == "ffts" ]]; then
-        command+=( -f 1 )
+        command+=( -f 3 )
     fi
 
     local start_seconds
     start_seconds="$(date +%s)"
     printf '\n================================================================\n'
-    printf 'case=%s method=%s streams=%s start=%s\n' \
-        "${case_name}" "${method}" "${stream_count}" "$(date --iso-8601=seconds)"
+    printf 'case=%s method=%s devices=%s streams=%s start=%s\n' \
+        "${case_name}" "${method}" "${device_count}" "${stream_count}" \
+        "$(date --iso-8601=seconds)"
     print_command "${command[@]}"
 
     local status=0
@@ -65,9 +67,9 @@ run_one()
 
     local end_seconds
     end_seconds="$(date +%s)"
-    printf 'case=%s method=%s streams=%s status=%s elapsed_s=%s end=%s\n' \
-        "${case_name}" "${method}" "${stream_count}" "${status}" \
-        "$((end_seconds - start_seconds))" "$(date --iso-8601=seconds)"
+    printf 'case=%s method=%s devices=%s streams=%s status=%s elapsed_s=%s end=%s\n' \
+        "${case_name}" "${method}" "${device_count}" "${stream_count}" \
+        "${status}" "$((end_seconds - start_seconds))" "$(date --iso-8601=seconds)"
     return "${status}"
 }
 
@@ -83,8 +85,9 @@ main()
     printf 'run_id=%s\n' "${RUN_ID}"
     printf 'repo_root=%s\n' "${REPO_ROOT}"
     printf 'log_file=%s\n' "${LOG_FILE}"
-    printf 'block_size=%s block_count=%s iterations=%s devices=%s\n' \
-        "${BLOCK_SIZE}" "${BLOCK_COUNT}" "${ITERATIONS}" "${DEVICE_COUNT}"
+    printf 'block_size=%s block_count=%s iterations=%s ffts_frags=3\n' \
+        "${BLOCK_SIZE}" "${BLOCK_COUNT}" "${ITERATIONS}"
+    printf 'devices=%s\n' "${DEVICE_COUNTS[*]}"
     printf 'streams=%s\n' "${STREAM_COUNTS[*]}"
     printf 'git_branch=%s\n' "$(git -C "${REPO_ROOT}" branch --show-current 2>/dev/null || true)"
     printf 'git_commit=%s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
@@ -93,20 +96,25 @@ main()
     local entry
     local case_name
     local method
+    local device_count
     local stream_count
     for entry in "${CASES[@]}"; do
         case_name="${entry%%:*}"
         method="${entry##*:}"
-        for stream_count in "${STREAM_COUNTS[@]}"; do
-            if ! run_one "${case_name}" "${method}" "${stream_count}"; then
-                failures=$((failures + 1))
-            fi
+        for device_count in "${DEVICE_COUNTS[@]}"; do
+            for stream_count in "${STREAM_COUNTS[@]}"; do
+                if ! run_one "${case_name}" "${method}" "${device_count}" "${stream_count}"; then
+                    failures=$((failures + 1))
+                fi
+            done
         done
     done
 
     printf '\n================================================================\n'
     printf 'sweep_complete failures=%s total_runs=%s log_file=%s\n' \
-        "${failures}" "$(( ${#CASES[@]} * ${#STREAM_COUNTS[@]} ))" "${LOG_FILE}"
+        "${failures}" \
+        "$(( ${#CASES[@]} * ${#DEVICE_COUNTS[@]} * ${#STREAM_COUNTS[@]} ))" \
+        "${LOG_FILE}"
     if ((failures > 0)); then
         return 1
     fi
