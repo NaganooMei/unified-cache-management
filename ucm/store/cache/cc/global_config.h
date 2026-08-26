@@ -57,6 +57,7 @@ struct Config {
     size_t runningQueueDepth{524288};
     size_t timeoutMs{30000};
     size_t streamNumber{4};
+    size_t sdmaStreamNumber{1};
     bool cacheLoadBackendOnly{false};
     std::vector<uintptr_t> gpuKvBufferAddrs{};
     std::vector<size_t> gpuKvBufferSizes{};
@@ -65,7 +66,10 @@ struct Config {
     bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
     size_t localRankSize{8};
 
-    size_t EffectiveStreamNumber() const noexcept { return cacheSdmaDirect ? 1 : streamNumber; }
+    size_t EffectiveStreamNumber() const noexcept
+    {
+        return cacheSdmaDirect ? sdmaStreamNumber : streamNumber;
+    }
 };
 
 }  // namespace UC::CacheStore

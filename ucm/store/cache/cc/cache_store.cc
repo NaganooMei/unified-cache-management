@@ -161,6 +161,7 @@ private:
         config.GetNumber("running_queue_depth", param.runningQueueDepth);
         config.GetNumber("timeout_ms", param.timeoutMs);
         config.GetNumber("cache_stream_number", param.streamNumber);
+        config.GetNumber("cache_sdma_stream_number", param.sdmaStreamNumber);
         config.GetNumber("cache_load_exclusive_buffer_number", param.loadExclusiveBufferNumber);
         config.GetNumbers("gpu_kv_buffer_addrs", param.gpuKvBufferAddrs);
         config.GetNumbers("gpu_kv_buffer_sizes", param.gpuKvBufferSizes);
@@ -228,6 +229,10 @@ private:
         if (config.streamNumber < 1 || config.streamNumber > 32) {
             return Status::InvalidParam("invalid stream number({})", config.streamNumber);
         }
+        if (config.sdmaStreamNumber < 1 || config.sdmaStreamNumber > 32) {
+            return Status::InvalidParam("invalid Cache SDMA Direct stream number({})",
+                                        config.sdmaStreamNumber);
+        }
         if (config.localRankSize == 0) {
             return Status::InvalidParam("invalid local rank size({})", config.localRankSize);
         }
@@ -265,9 +270,8 @@ private:
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, config.runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, config.timeoutMs);
         if (config.cacheSdmaDirect) {
-            UC_INFO(
-                "Set {}::StreamNumber to {} (configured={}, Cache SDMA Direct uses one stream).",
-                ns, config.EffectiveStreamNumber(), config.streamNumber);
+            UC_INFO("Set {}::StreamNumber to {} (Cache SDMA Direct).", ns,
+                    config.EffectiveStreamNumber());
         } else {
             UC_INFO("Set {}::StreamNumber to {}.", ns, config.EffectiveStreamNumber());
         }

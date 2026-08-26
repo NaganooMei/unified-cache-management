@@ -27,6 +27,7 @@
 #    GLM defaults to 16/78; MiniMax to 8/62; DSV4 to 8 and ignores layer_number.
 # 2. Tune the workload and optional SDMA/CPU-affinity switches as needed.
 # 3. Run this script with python3.
+import argparse
 import multiprocessing
 import os
 import secrets
@@ -62,7 +63,9 @@ warmup_epoch_number = 5
 # Pause between adjacent epochs, in milliseconds.
 epoch_interval_ms = 15
 # Enable Cache SDMA Direct transfers.
-cache_sdma_direct = False
+cache_sdma_direct = True
+# Cache SDMA Direct stream count used when --sdma-stream-number is omitted.
+sdma_stream_number = 1
 # Bind each worker and its UCM store threads to NUMA-local CPU cores.
 worker_cpu_affinity_enable = False
 
@@ -171,6 +174,23 @@ MODEL_PROFILES = {
         ],
     },
 }
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run the Cache|Fake bandwidth benchmark"
+    )
+    parser.add_argument(
+        "-S",
+        "--sdma-stream-number",
+        type=int,
+        default=sdma_stream_number,
+        help="Cache SDMA Direct stream count (1-32, default: %(default)s)",
+    )
+    args = parser.parse_args()
+    if not 1 <= args.sdma_stream_number <= 32:
+        parser.error("--sdma-stream-number must be between 1 and 32")
+    return args
 
 
 def resolve_tensor_size_list(profile):
@@ -405,7 +425,11 @@ def configure_ucm_logging():
 
 
 def create_cache_worker(
-    pipeline_store_cls, unique_id: str, device_id: int, store_cpu_affinity_cores
+    pipeline_store_cls,
+    unique_id: str,
+    device_id: int,
+    store_cpu_affinity_cores,
+    sdma_streams: int,
 ):
     config = {}
     config["store_pipeline"] = store_pipeline
@@ -418,6 +442,7 @@ def create_cache_worker(
     config["cache_load_backend_only"] = True
     config["cache_buffer_capacity_gb"] = 32
     config["cache_stream_number"] = 4
+    config["cache_sdma_stream_number"] = sdma_streams
     config["cache_sdma_direct"] = cache_sdma_direct
     config["timeout_ms"] = 30000
     config["device_id"] = device_id
@@ -427,7 +452,7 @@ def create_cache_worker(
 
 
 def create_cache_scheduler(
-    pipeline_store_cls, unique_id: str, store_cpu_affinity_cores
+    pipeline_store_cls, unique_id: str, store_cpu_affinity_cores, sdma_streams: int
 ):
     config = {}
     config["store_pipeline"] = store_pipeline
@@ -439,6 +464,7 @@ def create_cache_scheduler(
     config["share_buffer_enable"] = share_buffer_enable
     config["io_direct"] = True
     config["cache_buffer_capacity_gb"] = 32
+    config["cache_sdma_stream_number"] = sdma_streams
     config["cache_sdma_direct"] = cache_sdma_direct
     config["timeout_ms"] = 30000
     config["device_id"] = -1
@@ -575,6 +601,7 @@ def worker_loop(
     device_id: int,
     barrier: multiprocessing.Barrier,
     unique_id: str,
+    sdma_streams: int,
     worker_cpu_affinity_cores,
     store_cpu_affinity_cores,
     block_id_records,
@@ -603,10 +630,16 @@ def worker_loop(
     )
     device = setup_device(device_id)
     worker = create_cache_worker(
-        UcmPipelineStore, unique_id, device_id, store_cpu_affinity_cores
+        UcmPipelineStore,
+        unique_id,
+        device_id,
+        store_cpu_affinity_cores,
+        sdma_streams,
     )
     scheduler = (
-        create_cache_scheduler(UcmPipelineStore, unique_id, store_cpu_affinity_cores)
+        create_cache_scheduler(
+            UcmPipelineStore, unique_id, store_cpu_affinity_cores, sdma_streams
+        )
         if device_id == 0
         else None
     )
@@ -623,6 +656,7 @@ def worker_loop(
         f"warmup_epoch_number={warmup_epoch_number}, "
         f"epoch_interval_ms={epoch_interval_ms}, "
         f"cache_sdma_direct={cache_sdma_direct}, "
+        f"cache_sdma_stream_number={sdma_streams}, "
         f"share_buffer_enable={share_buffer_enable}, "
         f"worker_cpu_affinity_enable={worker_cpu_affinity_enable}, "
         f"worker_cpu_affinity_cores={worker_cpu_affinity_cores}, "
@@ -705,6 +739,7 @@ def stop_on_suspend(_signum, _frame):
 
 
 if __name__ == "__main__":
+    args = parse_args()
     if not tensor_size_list:
         raise ValueError(
             f"{model_name} tensor_size_list is empty; fill it in MODEL_PROFILES "
@@ -750,6 +785,7 @@ if __name__ == "__main__":
                     device_id,
                     barrier,
                     unique_id,
+                    args.sdma_stream_number,
                     worker_cpu_core_groups[device_id],
                     store_cpu_core_groups[device_id],
                     worker_block_id_records[device_id],
