@@ -62,6 +62,8 @@ load_epoch_number = 128
 warmup_epoch_number = 5
 # Pause between adjacent epochs, in milliseconds.
 epoch_interval_ms = 15
+# Ordinary CE stream count used when Cache SDMA Direct is disabled.
+cache_stream_number = 4
 # Enable Cache SDMA Direct transfers.
 cache_sdma_direct = True
 # Cache SDMA Direct stream count used when --sdma-stream-number is omitted.
@@ -441,7 +443,7 @@ def create_cache_worker(
     config["io_direct"] = True
     config["cache_load_backend_only"] = True
     config["cache_buffer_capacity_gb"] = 32
-    config["cache_stream_number"] = 4
+    config["cache_stream_number"] = cache_stream_number
     config["cache_sdma_stream_number"] = sdma_streams
     config["cache_sdma_direct"] = cache_sdma_direct
     config["timeout_ms"] = 30000
@@ -655,6 +657,7 @@ def worker_loop(
         f"shard_size={shard_size}, dtype={torch.bfloat16}, "
         f"warmup_epoch_number={warmup_epoch_number}, "
         f"epoch_interval_ms={epoch_interval_ms}, "
+        f"cache_stream_number={cache_stream_number}, "
         f"cache_sdma_direct={cache_sdma_direct}, "
         f"cache_sdma_stream_number={sdma_streams}, "
         f"share_buffer_enable={share_buffer_enable}, "
