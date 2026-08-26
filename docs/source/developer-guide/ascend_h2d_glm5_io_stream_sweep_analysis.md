@@ -28,9 +28,9 @@
 
 ## 2. 可视化
 
-2.1～2.4 展示 Event 同步原始结果，2.5 直接比较 Stream 与 Event。
+本节只展示归一化趋势和同步方式对比；带宽、Copy 时延和 Submit 下发时间的实际值统一保留在第 3、4 节完整数据表中。
 
-### 2.1 Stream 相对 S1 的总体趋势
+### 2.1 Event 同步相对 S1 的总体趋势
 
 各组合先相对自身 S1 归一化，再按 Host 内存形态和设备数拆为 4 张图。每张图同时展示带宽、Copy 时延和 Submit 时间，适合分别观察不同内存形态和卡数下的 stream 拐点。
 
@@ -53,25 +53,27 @@
 
 ![Shared MLA stream scaling on 8 devices](../_static/images/ascend_h2d_glm5_io_stream_sweep_shared_8d.png)
 
-### 2.2 带宽实际值
+### 2.2 Stream 同步相对 S1 的总体趋势
 
-8 个面板分别对应 4 个 case 和单卡/8卡。各面板使用独立纵轴，三条线对应 8K、64K、128K。
+归一化口径与 Event 同步一致，直接展示 Stream 同步下 Requested Stream 增长时的带宽、Copy 时延和 Submit 时间变化。
 
-![Bandwidth vs requested streams](../_static/images/ascend_h2d_glm5_bandwidth.png)
+#### O_DIRECT（GQA）· 1 卡
 
-### 2.3 Copy 完成时延实际值
+![O_DIRECT GQA Stream sync scaling on 1 device](../_static/images/ascend_h2d_glm5_stream_sync_trend_odirect_1d.png)
 
-Copy Avg 越低越好。图中可以直接看到 CE 的长尾对平均时延的影响，以及 FFTS 在高 stream 下的退化点。
+#### O_DIRECT（GQA）· 8 卡
 
-![Copy latency vs requested streams](../_static/images/ascend_h2d_glm5_copy_latency.png)
+![O_DIRECT GQA Stream sync scaling on 8 devices](../_static/images/ascend_h2d_glm5_stream_sync_trend_odirect_8d.png)
 
-### 2.4 Submit 下发时间实际值
+#### Shared（MLA）· 1 卡
 
-Submit Avg 越低越好。该图用于区分 Host 下发成本变化和设备 Copy 时延变化。
+![Shared MLA Stream sync scaling on 1 device](../_static/images/ascend_h2d_glm5_stream_sync_trend_shared_1d.png)
 
-![Submit time vs requested streams](../_static/images/ascend_h2d_glm5_submit_time.png)
+#### Shared（MLA）· 8 卡
 
-### 2.5 Stream 与 Event 同步对比
+![Shared MLA Stream sync scaling on 8 devices](../_static/images/ascend_h2d_glm5_stream_sync_trend_shared_8d.png)
+
+### 2.3 Stream 与 Event 同步对比
 
 以下图表直接绘制 `Stream/Event`。带宽高于 100% 表示 Stream 同步更好；Copy 和 Submit 低于 100% 表示 Stream 同步更好。
 
