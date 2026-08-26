@@ -90,7 +90,7 @@ ucm-toolkit run dev-sandbox --help
 
 ### 快捷模式（model-type / iodirect / sdma）
 
-如果不关心底层 `copy` 的 case 名称，可以直接用 `--model-type`、`--iodirect`、`--sdma` 三个语义参数，通过一张映射表选到对应的 Ascend 拷贝接口；这三个参数之后的其余参数会原样透传给底层 `copy` 二进制（即 `copy` 的全部原生参数 `-s`/`-n`/`-i`/`-d`/`-f`，见下文 [`### copy`](#copy) 一节）。原生的 `copy`/`trans`/`aio` 子命令用法不受影响。
+如果不关心底层 `copy` 的 case 名称，可以直接用 `--model-type`、`--iodirect`、`--sdma` 三个语义参数，通过一张映射表选到对应的 Ascend 拷贝接口；这三个参数之后的其余参数会原样透传给底层 `copy` 二进制（即 `copy` 的全部原生参数 `-s`/`-n`/`-i`/`-d`/`-f`/`-S`，见下文 [`### copy`](#copy) 一节）。原生的 `copy`/`trans`/`aio` 子命令用法不受影响。
 
 ```bash
 ucm-toolkit run dev-sandbox \
@@ -102,11 +102,11 @@ ucm-toolkit run dev-sandbox \
 
 | model-type | iodirect | sdma | 拷贝接口（Ascend） | 场景 |
 | --- | --- | --- | --- | --- |
-| `gqa` | `false` | `false` | `all_host_to_all_device_ce_multi_stream` | 多卡各自 host buffer，4-stream CE H2D。 |
-| `gqa` | `true` | `false` | `all_odirect_host_to_all_device_ce_multi_stream` | 多卡各自 O_DIRECT mmap host buffer，4-stream CE H2D。 |
+| `gqa` | `false` | `false` | `all_host_to_all_device_ce_multi_stream` | 多卡各自 host buffer，stream 数可调、默认 4 的 CE H2D。 |
+| `gqa` | `true` | `false` | `all_odirect_host_to_all_device_ce_multi_stream` | 多卡各自 O_DIRECT mmap host buffer，stream 数可调、默认 4 的 CE H2D。 |
 | `gqa` | `false` | `true` | `all_host_to_all_device_ffts_direct_h2d` | 多卡各自 mapped host buffer，FFTS direct H2D SDMA。 |
 | `gqa` | `true` | `true` | `all_odirect_host_to_all_device_ffts_direct_h2d` | 多卡各自 O_DIRECT mmap host buffer，FFTS direct H2D SDMA。 |
-| `mla` | `false` | `false` | `one_share_host_to_all_device_ce_multi_stream` | 一块 shared memory host buffer fan-out 到所有卡，4-stream CE。 |
+| `mla` | `false` | `false` | `one_share_host_to_all_device_ce_multi_stream` | 一块 shared memory host buffer fan-out 到所有卡，stream 数可调、默认 4 的 CE。 |
 | `mla` | `true` | `false` | `one_share_host_to_all_device_ce_multi_stream` | MLA 不区分 iodirect，与 iodirect=false 走同一 CE 路径。 |
 | `mla` | `false` | `true` | `one_share_host_to_all_device_ffts_direct_h2d` | 一块 shared memory host buffer，FFTS direct H2D SDMA 分发。 |
 | `mla` | `true` | `true` | `one_share_host_to_all_device_ffts_direct_h2d` | MLA 不区分 iodirect，与 iodirect=false 走同一 SDMA 路径。 |
@@ -127,6 +127,8 @@ ucm-toolkit run dev-sandbox copy -t all_host_to_all_device_ce_multi_stream -s 16
 ```bash
 ucm-toolkit run dev-sandbox copy -t host_to_device_ce -s 16K -n 512 -i 128 -d 8
 ucm-toolkit run dev-sandbox copy -t host_to_device_ce -t device_to_host_ce -s 1M
+ucm-toolkit run dev-sandbox copy -t all_odirect_host_to_all_device_ce_multi_stream -S 4
+ucm-toolkit run dev-sandbox copy -t all_odirect_host_to_all_device_ffts_direct_h2d -n 100 -f 3 -S 1
 ```
 
 参数：
@@ -137,8 +139,11 @@ ucm-toolkit run dev-sandbox copy -t host_to_device_ce -t device_to_host_ce -s 1M
 | `-s <size>` | `512M` | 单个数据块大小，只接受 `K/k` 或 `M/m` 后缀，例如 `16K`、`1M`。 |
 | `-n <count>` | `8` | 每个 buffer 中的数据块数量。 |
 | `-f`, `--frags`, `-frags <count>` | `0` | FFTS direct H2D 的每个 IO/task fragment 数。设置后 `-n` 表示 IO/task 数。 |
+| `-S`, `--streams`, `--stream-count <count>` | CE `4`；FFTS `1` | 每张卡的 Ascend multi-stream CE 或 FFTS direct H2D stream 数。仅影响对应的 Ascend case。 |
 | `-i <count>` | `128` | 迭代次数。 |
 | `-d <count>` | `8` | 设备数量。 |
+
+FFTS direct H2D 使用多 stream 时必须同时设置 `--frags`。此时 `-n` 是可独立调度的 IO/task 数，task 按 stream 轮转，`--frags` 是每个 task 的 fragment 数；实际创建的 stream 数不会超过 task 数。省略 `--streams` 时保留各 case 原有默认值。
 
 当前 `copy` 原生程序没有把 `-h/--help` 做成成功返回的帮助参数。无参数运行会打印 usage 并非 0 退出；指定不存在的 case 会列出当前后端编译进来的全部 case：
 
@@ -165,13 +170,13 @@ ucm-toolkit run dev-sandbox copy -t unknown
 | | `device_to_anonymous_ce` | CE DMA 从设备拷到匿名锁页内存。**场景**：评估 D2H 到匿名锁页内存的带宽，适合回读到 mmap buffer 的场景。 |
 | | `anonymous_to_device_sm` | SM kernel 将匿名锁页内存数据拷到设备。**场景**：评估匿名锁页 + SM 组合的 H2D 带宽，适合与 CE 版本对比。 |
 | | `device_to_anonymous_sm` | SM kernel 将设备数据拷到匿名锁页内存。**场景**：评估匿名锁页 + SM 组合的 D2H 带宽。 |
-| **Ascend** | `host_to_device_ce_multi_stream` | 4 流并发 CE DMA 从主机到设备。**场景**：评估 Ascend 多流并行传输是否能提升 H2D 吞吐，适合多流调度优化。 |
-| | `one_share_host_to_all_device_ce_multi_stream` | 一块 POSIX shared memory host buffer 通过 fork fan-out 到所有 device，单卡内使用 4-stream CE。**场景**：模拟 MLA 模型中多卡同时读取同一份 shared host KV 数据并写入各自 device。 |
-| | `all_host_to_all_device_ce_multi_stream` | 多卡各自 host buffer，通过 fork fan-out 并在每张卡内使用 4-stream CE。**场景**：评估多进程、多卡、multi-stream H2D 聚合吞吐。 |
-| | `all_odirect_host_to_all_device_ce_multi_stream` | 多卡各自 UCM O_DIRECT 风格 mmap host buffer，通过 fork fan-out 和 4-stream CE 拷到设备。**场景**：更贴近开启 O_DIRECT 后 GQA 模型中每张卡从本地 host buffer 同时读入 KV 数据的路径。 |
-| | `all_host_to_all_device_ffts_direct_h2d` | 多卡各自 mapped `aclrtMallocHost` buffer，通过 FFTS Plus direct H2D SDMA 拷到设备。**场景**：评估 direct H2D SDMA 的常规 pinned host 源。 |
-| | `one_share_host_to_all_device_ffts_direct_h2d` | 一块 POSIX shared memory host buffer 在子进程中 mapped/pinned register 后通过 FFTS Plus direct H2D SDMA 分发到所有 device。**场景**：模拟 MLA 模型中多卡同时读取同一份 shared host KV 数据，验证 FFTS direct H2D 的共享源读入路径。 |
-| | `all_odirect_host_to_all_device_ffts_direct_h2d` | 多卡各自 UCM O_DIRECT 风格 mmap host buffer，mapped + pinned register 后通过 FFTS Plus direct H2D SDMA 拷到设备。**场景**：更贴近开启 O_DIRECT 后 GQA 模型中每张卡从本地 host buffer 同时读入 KV 数据的 direct H2D 路径。 |
+| **Ascend** | `host_to_device_ce_multi_stream` | stream 数可调、默认 4 的 CE DMA H2D。**场景**：评估 Ascend 多流并行传输是否能提升 H2D 吞吐，适合多流调度优化。 |
+| | `one_share_host_to_all_device_ce_multi_stream` | 一块 POSIX shared memory host buffer 通过 fork fan-out 到所有 device，单卡内 CE stream 数可调、默认 4。**场景**：模拟 MLA 模型中多卡同时读取同一份 shared host KV 数据并写入各自 device。 |
+| | `all_host_to_all_device_ce_multi_stream` | 多卡各自 host buffer，通过 fork fan-out 并在每张卡内使用可调数量的 CE stream，默认 4。**场景**：评估多进程、多卡、multi-stream H2D 聚合吞吐。 |
+| | `all_odirect_host_to_all_device_ce_multi_stream` | 多卡各自 UCM O_DIRECT 风格 mmap host buffer，通过 fork fan-out 和可调数量的 CE stream 拷到设备，默认 4。**场景**：更贴近开启 O_DIRECT 后 GQA 模型中每张卡从本地 host buffer 同时读入 KV 数据的路径。 |
+| | `all_host_to_all_device_ffts_direct_h2d` | 多卡各自 mapped `aclrtMallocHost` buffer，通过 stream 数可调、默认 1 的 FFTS Plus direct H2D SDMA 拷到设备。**场景**：评估 direct H2D SDMA 的常规 pinned host 源。 |
+| | `one_share_host_to_all_device_ffts_direct_h2d` | 一块 POSIX shared memory host buffer 在子进程中 mapped/pinned register 后，通过 stream 数可调、默认 1 的 FFTS Plus direct H2D SDMA 分发到所有 device。**场景**：模拟 MLA 模型中多卡同时读取同一份 shared host KV 数据，验证 FFTS direct H2D 的共享源读入路径。 |
+| | `all_odirect_host_to_all_device_ffts_direct_h2d` | 多卡各自 UCM O_DIRECT 风格 mmap host buffer，mapped + pinned register 后通过 stream 数可调、默认 1 的 FFTS Plus direct H2D SDMA 拷到设备。**场景**：更贴近开启 O_DIRECT 后 GQA 模型中每张卡从本地 host buffer 同时读入 KV 数据的 direct H2D 路径。 |
 | **CUDA + libibverbs** | `host_to_device_gdr` | GPUDirect RDMA 直传主机数据到单卡设备内存。**场景**：评估 RDMA 直传到 GPU 是否比传统 CE 更快，适合 RDMA 通信基线。 |
 | | `one_host_to_all_device_gdr` | 同一份主机数据通过 GDR 广播到所有设备。**场景**：评估多卡 RDMA 直传的分发性能，适合对比 GDR 广播与 CE 广播。 |
 | | `all_host_to_all_device_gdr` | 多卡各自 host buffer 同时通过 GDR 拷到各自设备。**场景**：评估多 worker 并发 GDR 的总吞吐，适合大规模 RDMA 并行传输基线。 |

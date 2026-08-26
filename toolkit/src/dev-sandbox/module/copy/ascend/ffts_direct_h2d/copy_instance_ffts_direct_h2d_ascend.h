@@ -24,6 +24,7 @@
 #ifndef COPY_INSTANCE_FFTS_DIRECT_H2D_ASCEND_H
 #define COPY_INSTANCE_FFTS_DIRECT_H2D_ASCEND_H
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <utility>
@@ -47,12 +48,14 @@ protected:
     aclrtEvent totalStart_ = nullptr;
     aclrtEvent totalEnd_ = nullptr;
     size_t fragsPerTask_ = 0;
+    size_t streamCount_ = 1;
 
     void Prepare(const std::vector<const CopyBuffer*>& srcBuffers,
                  const std::vector<const CopyBuffer*>& dstBuffers) override
     {
         ASSERT(!srcBuffers.empty());
         ASSERT(srcBuffers.size() == dstBuffers.size());
+        ASSERT(streamCount_ > 0);
 
         contexts_.clear();
         contexts_.reserve(srcBuffers.size());
@@ -67,29 +70,40 @@ protected:
             const auto* mappedSrc = dynamic_cast<const FftsDirectMappedHostBuffer*>(src);
             ASSERT(mappedSrc != nullptr);
 
-            DirectContext ctx;
-            ctx.deviceId = AffinityDeviceId(*src, *dst);
+            const auto deviceId = AffinityDeviceId(*src, *dst);
             const auto size = src->Size();
             const auto number = src->Number();
             ASSERT(number > 0);
 
-            ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
-            ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
-            ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
-
             const auto taskFrags = fragsPerTask_ == 0 ? number : fragsPerTask_;
             ASSERT(taskFrags > 0);
             ASSERT(number % taskFrags == 0);
-            ctx.tasks.reserve(number / taskFrags);
+            const auto taskCount = number / taskFrags;
+            const auto activeStreamCount = std::min(streamCount_, taskCount);
+            const auto firstContext = contexts_.size();
+
+            ASCEND_ASSERT(aclrtSetDevice(deviceId));
+            for (size_t stream = 0; stream < activeStreamCount; ++stream) {
+                DirectContext ctx;
+                ctx.deviceId = deviceId;
+                ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
+                ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                ctx.tasks.reserve((taskCount + activeStreamCount - 1 - stream) /
+                                  activeStreamCount);
+                contexts_.push_back(std::move(ctx));
+            }
+
+            size_t taskIndex = 0;
             for (size_t first = 0; first < number; first += taskFrags) {
                 std::vector<AscendFftsCopySpec> copies;
                 copies.reserve(taskFrags);
                 for (size_t fragment = first; fragment < first + taskFrags; ++fragment) {
                     copies.push_back({(*dst)[fragment], mappedSrc->MappedAt(fragment), size});
                 }
-                ctx.tasks.push_back(std::move(copies));
+                const auto stream = taskIndex % activeStreamCount;
+                contexts_[firstContext + stream].tasks.push_back(std::move(copies));
+                ++taskIndex;
             }
-            contexts_.push_back(std::move(ctx));
         }
 
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
@@ -163,12 +177,18 @@ protected:
     }
 
 public:
-    FftsDirectH2DCopyInstance(size_t iterations, bool affinitySrc, size_t fragsPerTask = 0)
-        : CopyInstance(iterations, affinitySrc), fragsPerTask_(fragsPerTask)
+    FftsDirectH2DCopyInstance(size_t iterations, bool affinitySrc, size_t fragsPerTask = 0,
+                              size_t streamCount = 1)
+        : CopyInstance(iterations, affinitySrc),
+          fragsPerTask_(fragsPerTask),
+          streamCount_(streamCount)
     {
     }
 
-    std::string Name() const override { return "ffts-direct-h2d"; }
+    std::string Name() const override
+    {
+        return "ffts-direct-h2d-" + std::to_string(streamCount_) + "s";
+    }
 };
 
 #endif  // COPY_INSTANCE_FFTS_DIRECT_H2D_ASCEND_H

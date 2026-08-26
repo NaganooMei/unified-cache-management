@@ -137,7 +137,8 @@ DEFINE_COPY_CASE(Anonymous2DeviceCECase, "anonymous_to_device_ce",
 DEFINE_COPY_CASE(Host2DeviceCEMultiStreamCase, "host_to_device_ce_multi_stream",
                  "memcpy from host to device with ce using multi stream one by one", ctx)
 {
-    constexpr auto streamCount = 4;
+    constexpr size_t defaultStreamCount = 4;
+    const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
     CopyResult result;
     for (size_t device = 0; device < ctx.nDevice; device++) {
         HostCopyBuffer srcBuffer{device, ctx.size, ctx.num};
@@ -152,12 +153,14 @@ DEFINE_COPY_CASE_NO_RUNTIME(
     OneShareHost2AllDeviceCEMultiStreamCase, "one_share_host_to_all_device_ce_multi_stream",
     "memcpy from one shared host to all device with ce using multi stream and fork submit", ctx)
 {
-    constexpr auto streamCount = 4;
+    constexpr size_t defaultStreamCount = 4;
+    const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
     CopyResult result;
     SharedHostRegion srcRegion{"one_share_host_to_all_device_ce_multi_stream", 0, ctx.size,
                                ctx.num};
     result.Push(ascend_copy::RunForkedCopyBatch(
-        ctx, srcRegion.Name(), "acl::device::all", "CE-MS-FORK", [&](size_t device) {
+        ctx, srcRegion.Name(), "acl::device::all",
+        "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
             SharedHostCopyBuffer srcBuffer{srcRegion.ShmName(), device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
             H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount};
@@ -170,10 +173,12 @@ DEFINE_COPY_CASE_NO_RUNTIME(
     AllHost2AllDeviceCEMultiStreamCase, "all_host_to_all_device_ce_multi_stream",
     "memcpy from all host to all device with ce using multi stream and fork submit", ctx)
 {
-    constexpr auto streamCount = 4;
+    constexpr size_t defaultStreamCount = 4;
+    const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
     CopyResult result;
     result.Push(ascend_copy::RunForkedCopyBatch(
-        ctx, "acl::host::all", "acl::device::all", "CE-MS-FORK", [&](size_t device) {
+        ctx, "acl::host::all", "acl::device::all",
+        "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
             HostCopyBuffer srcBuffer{device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
             H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount};
@@ -188,10 +193,12 @@ DEFINE_COPY_CASE_NO_RUNTIME(
     "submit",
     ctx)
 {
-    constexpr auto streamCount = 4;
+    constexpr size_t defaultStreamCount = 4;
+    const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
     CopyResult result;
     result.Push(ascend_copy::RunForkedCopyBatch(
-        ctx, "acl::odirect_mmap::all", "acl::device::all", "CE-MS-FORK", [&](size_t device) {
+        ctx, "acl::odirect_mmap::all", "acl::device::all",
+        "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
             ODirectHostCopyBuffer srcBuffer{device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
             H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount};

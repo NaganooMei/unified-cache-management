@@ -30,7 +30,12 @@
 struct ArgsParser {
     std::unordered_set<std::string> names;
     CopyCase::Context ctx{
-        .size = 512ull * 1024ull * 1024ull, .num = 8, .frags = 0, .iter = 128, .nDevice = 8};
+        .size = 512ull * 1024ull * 1024ull,
+        .num = 8,
+        .frags = 0,
+        .streams = 0,
+        .iter = 128,
+        .nDevice = 8};
 
     static void Help(std::string_view proc)
     {
@@ -43,6 +48,9 @@ struct ArgsParser {
         fmt::println("  -f/--frags/-frags <n>");
         fmt::println("                   Fragments per IO/task for ffts direct H2D");
         fmt::println("                   (default: 0, legacy single task)");
+        fmt::println("  -S/--streams/--stream-count <n>");
+        fmt::println("                   Streams per device for Ascend multi-stream CE and FFTS");
+        fmt::println("                   direct H2D (default: CE=4, FFTS direct H2D=1)");
         fmt::println("  -i <count>       Iteration count (default: 128)");
         fmt::println("  -d <count>       Number of devices (default: 8)");
     }
@@ -87,6 +95,13 @@ struct ArgsParser {
                 ctx.num = ParseUnsigned(argv[++i], "Invalid data count.");
             } else if ((arg == "-f" || arg == "--frags" || arg == "-frags") && i + 1 < argc) {
                 ctx.frags = ParseUnsigned(argv[++i], "Invalid fragment count.");
+            } else if ((arg == "-S" || arg == "--streams" || arg == "--stream-count") &&
+                       i + 1 < argc) {
+                ctx.streams = ParseUnsigned(argv[++i], "Invalid stream count.");
+                if (ctx.streams == 0) {
+                    fmt::println("Invalid stream count. Use a positive integer.");
+                    std::exit(EXIT_FAILURE);
+                }
             } else if (arg == "-i" && i + 1 < argc) {
                 ctx.iter = ParseUnsigned(argv[++i], "Invalid iteration count.");
             } else if (arg == "-d" && i + 1 < argc) {

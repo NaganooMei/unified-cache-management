@@ -334,7 +334,7 @@ public:
     {
     }
 
-    std::string Name() const override { return "CE"; }
+    std::string Name() const override { return "CE-MS" + std::to_string(streamCount_); }
 };
 
 #endif  // COPY_INSTANCE_ASCEND_H

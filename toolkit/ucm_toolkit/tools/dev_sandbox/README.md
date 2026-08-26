@@ -26,7 +26,7 @@ UCM 采用分层 KV cache：设备显存（HBM，最快）→ 主机内存（lay
 
 | 传输引擎 | 含义 | 对应 UCM 环节 |
 | --- | --- | --- |
-| 多流 CE（`--sdma false`） | Copy Engine 硬件 DMA，4 流并发提交以提升吞吐。 | 常规 H2D 加载路径：从主机 layer cache 把 KV 块拷回显存。 |
+| 多流 CE（`--sdma false`） | Copy Engine 硬件 DMA，stream 数可调、默认 4。 | 常规 H2D 加载路径：从主机 layer cache 把 KV 块拷回显存。 |
 | FFTS direct H2D SDMA（`--sdma true`） | 走 SDMA 的 direct H2D 直通路径，配合 FFTS 快速任务调度，延迟更低。 | 对 direct H2D 直通路径的 KV 加载带宽评估。 |
 
 主机内存分配方式对应不同的 KV 来源/拓扑：
@@ -93,6 +93,7 @@ ucm-toolkit run dev-sandbox --model-type <gqa|mla> --iodirect <true|false> --sdm
 | `-i` | 迭代轮数 | `128` | `-i 128` |
 | `-d` | 设备（卡）数量 | `8` | `-d 8` |
 | `-f` | 分片数（仅 SDMA 场景相关） | `0` | `-f 4` |
+| `-S` | 每卡 CE 或 FFTS direct H2D stream 数 | CE `4`；FFTS `1` | `-S 8` |
 
 ## 示例
 
