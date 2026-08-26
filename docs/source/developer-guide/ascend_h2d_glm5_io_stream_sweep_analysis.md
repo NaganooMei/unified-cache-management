@@ -11,6 +11,7 @@
 - Iterations：128，另有 3 次 warmup
 - 设备数：1、8
 - Requested stream：1、4、8、16、32、64、128
+- 完成同步模式：`event`（其他 Stream 的结束 Event 汇聚到主 Stream）
 - Host：O_DIRECT、Shared
 - 方法：CE Multi-stream、FFTS Direct H2D
 - 完整组合：168，失败数：0
@@ -27,9 +28,26 @@
 
 ### 2.1 Stream 相对 S1 的总体趋势
 
-各组合先相对自身 S1 归一化，再对 O_DIRECT、Shared、单卡、8 卡等权平均。该图适合快速观察 stream 拐点。
+各组合先相对自身 S1 归一化，再按 Host 内存形态和设备数拆为 4 张图。每张图同时展示带宽、Copy 时延和 Submit 时间，适合分别观察不同内存形态和卡数下的 stream 拐点。
 
-![Stream scaling relative to S1](../_static/images/ascend_h2d_glm5_io_stream_sweep.png)
+- O_DIRECT 对应本次模拟的 GQA 内存形态：每张卡读取各自独立的本地 Host KV Buffer。
+- Shared 对应本次模拟的 MLA 内存形态：多张卡读取同一块共享 Host KV Buffer 的相同 offset。
+
+#### O_DIRECT（GQA）· 1 卡
+
+![O_DIRECT GQA stream scaling on 1 device](../_static/images/ascend_h2d_glm5_io_stream_sweep_odirect_1d.png)
+
+#### O_DIRECT（GQA）· 8 卡
+
+![O_DIRECT GQA stream scaling on 8 devices](../_static/images/ascend_h2d_glm5_io_stream_sweep_odirect_8d.png)
+
+#### Shared（MLA）· 1 卡
+
+![Shared MLA stream scaling on 1 device](../_static/images/ascend_h2d_glm5_io_stream_sweep_shared_1d.png)
+
+#### Shared（MLA）· 8 卡
+
+![Shared MLA stream scaling on 8 devices](../_static/images/ascend_h2d_glm5_io_stream_sweep_shared_8d.png)
 
 ### 2.2 带宽实际值
 

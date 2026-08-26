@@ -94,6 +94,9 @@ ucm-toolkit run dev-sandbox --model-type <gqa|mla> --iodirect <true|false> --sdm
 | `-d` | 设备（卡）数量 | `8` | `-d 8` |
 | `-f` | 分片数（仅 SDMA 场景相关） | `0` | `-f 4` |
 | `-S` | 每卡 CE 或 FFTS direct H2D stream 数 | CE `4`；FFTS `1` | `-S 8` |
+| `--sync-mode` | 多 stream 完成同步方式：`event` 或 `stream` | `event` | `--sync-mode stream` |
+
+`event` 将其他 stream 的结束 Event 汇聚到主 stream；`stream` 由 Host 依次同步各 stream。该参数会原样传给底层 `copy`。
 
 ## 示例
 

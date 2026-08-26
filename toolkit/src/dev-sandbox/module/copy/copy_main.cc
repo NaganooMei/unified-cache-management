@@ -34,6 +34,7 @@ struct ArgsParser {
         .num = 8,
         .frags = 0,
         .streams = 0,
+        .syncMode = CopySyncMode::EVENT,
         .iter = 128,
         .nDevice = 8};
 
@@ -51,6 +52,9 @@ struct ArgsParser {
         fmt::println("  -S/--streams/--stream-count <n>");
         fmt::println("                   Streams per device for Ascend multi-stream CE and FFTS");
         fmt::println("                   direct H2D (default: CE=4, FFTS direct H2D=1)");
+        fmt::println("  --sync-mode <mode>");
+        fmt::println("                   Multi-stream completion mode: event or stream");
+        fmt::println("                   (default: event)");
         fmt::println("  -i <count>       Iteration count (default: 128)");
         fmt::println("  -d <count>       Number of devices (default: 8)");
     }
@@ -83,6 +87,13 @@ struct ArgsParser {
                 std::exit(EXIT_FAILURE);
         }
     }
+    static CopySyncMode ParseSyncMode(std::string_view mode)
+    {
+        if (mode == "event") { return CopySyncMode::EVENT; }
+        if (mode == "stream") { return CopySyncMode::STREAM; }
+        fmt::println("Invalid sync mode. Use event or stream.");
+        std::exit(EXIT_FAILURE);
+    }
     ArgsParser(int argc, char const* argv[])
     {
         for (int i = 1; i < argc; ++i) {
@@ -102,6 +113,8 @@ struct ArgsParser {
                     fmt::println("Invalid stream count. Use a positive integer.");
                     std::exit(EXIT_FAILURE);
                 }
+            } else if (arg == "--sync-mode" && i + 1 < argc) {
+                ctx.syncMode = ParseSyncMode(argv[++i]);
             } else if (arg == "-i" && i + 1 < argc) {
                 ctx.iter = ParseUnsigned(argv[++i], "Invalid iteration count.");
             } else if (arg == "-d" && i + 1 < argc) {

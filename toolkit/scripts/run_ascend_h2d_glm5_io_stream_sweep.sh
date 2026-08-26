@@ -2,6 +2,8 @@
 
 set -Eeuo pipefail
 
+SYNC_MODE="${SYNC_MODE:-event}"
+
 readonly BLOCK_SIZE="32K"
 readonly BLOCK_BYTES=$((32 * 1024))
 readonly ITERATIONS=128
@@ -29,8 +31,48 @@ readonly CASES=(
     "one_share_host_to_all_device_ffts_direct_h2d:ffts"
 )
 
-mkdir -p -- "$(dirname -- "${LOG_FILE}")"
-exec > >(tee -a "${LOG_FILE}") 2>&1
+usage()
+{
+    printf 'Usage: %s [--sync-mode event|stream]\n' "${0##*/}"
+    printf '\n'
+    printf 'Options:\n'
+    printf '  --sync-mode <mode>  Multi-stream completion mode (default: event)\n'
+    printf '  -h, --help          Show this help\n'
+}
+
+parse_args()
+{
+    while (($# > 0)); do
+        case "$1" in
+            --sync-mode)
+                if (($# < 2)); then
+                    printf 'error: --sync-mode requires event or stream\n' >&2
+                    return 2
+                fi
+                SYNC_MODE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                printf 'error: unknown argument: %s\n' "$1" >&2
+                usage >&2
+                return 2
+                ;;
+        esac
+    done
+
+    case "${SYNC_MODE}" in
+        event|stream) ;;
+        *)
+            printf 'error: invalid sync mode: %s; expected event or stream\n' \
+                "${SYNC_MODE}" >&2
+            return 2
+            ;;
+    esac
+}
 
 print_command()
 {
@@ -98,6 +140,7 @@ run_one()
         -i "${ITERATIONS}"
         -d "${device_count}"
         -S "${stream_count}"
+        --sync-mode "${SYNC_MODE}"
     )
     if [[ "${method}" == "ffts" ]]; then
         command+=( -f "${IO_PER_SHARD}" )
@@ -109,8 +152,8 @@ run_one()
     printf 'case=%s method=%s sequence=%s tokens=%s shards=%s io_count_per_device=%s '\
         "${case_name}" "${method}" "${sequence_label}" "${sequence_tokens}" \
         "${shard_count}" "${io_count}"
-    printf 'devices=%s requested_streams=%s effective_streams=%s start=%s\n' \
-        "${device_count}" "${stream_count}" "${effective_stream_count}" \
+    printf 'devices=%s requested_streams=%s effective_streams=%s sync_mode=%s start=%s\n' \
+        "${device_count}" "${stream_count}" "${effective_stream_count}" "${SYNC_MODE}" \
         "$(date --iso-8601=seconds)"
     printf 'io_bytes_per_device=%s aggregate_io_bytes=%s toolkit_n=%s ffts_frags=%s\n' \
         "${io_bytes_per_device}" "${aggregate_io_bytes}" "${number}" \
@@ -125,13 +168,20 @@ run_one()
     printf 'case=%s method=%s sequence=%s devices=%s requested_streams=%s effective_streams=%s '\
         "${case_name}" "${method}" "${sequence_label}" "${device_count}" \
         "${stream_count}" "${effective_stream_count}"
-    printf 'status=%s elapsed_s=%s end=%s\n' \
-        "${status}" "$((end_seconds - start_seconds))" "$(date --iso-8601=seconds)"
+    printf 'sync_mode=%s status=%s elapsed_s=%s end=%s\n' \
+        "${SYNC_MODE}" "${status}" "$((end_seconds - start_seconds))" \
+        "$(date --iso-8601=seconds)"
     return "${status}"
 }
 
 main()
 {
+    parse_args "$@" || return $?
+    readonly SYNC_MODE
+
+    mkdir -p -- "$(dirname -- "${LOG_FILE}")"
+    exec > >(tee -a "${LOG_FILE}") 2>&1
+
     if ! command -v "${UCM_TOOLKIT_BIN}" >/dev/null 2>&1; then
         printf 'error: command not found: %s\n' "${UCM_TOOLKIT_BIN}" >&2
         printf 'install the toolkit first: python -m pip install -e toolkit\n' >&2
@@ -146,6 +196,7 @@ main()
         "${BLOCK_SIZE}" "${ITERATIONS}" "${TOKENS_PER_SHARD}" "${IO_PER_SHARD}"
     printf 'devices=%s\n' "${DEVICE_COUNTS[*]}"
     printf 'streams=%s\n' "${STREAM_COUNTS[*]}"
+    printf 'sync_mode=%s\n' "${SYNC_MODE}"
     print_sequence_map
     printf 'git_branch=%s\n' "$(git -C "${REPO_ROOT}" branch --show-current 2>/dev/null || true)"
     printf 'git_commit=%s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"

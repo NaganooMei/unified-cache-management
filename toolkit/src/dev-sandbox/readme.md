@@ -25,6 +25,7 @@ cmake --build build -j
 -n <count>  每个 buffer 内的数据块数量，默认 8
 -f/--frags/-frags <n>  FFTS direct H2D 每个 IO/task 的 fragment 数，默认 0
 -S/--streams/--stream-count <n>  每张卡的 Ascend CE/FFTS direct H2D stream 数
+--sync-mode <event|stream>  多 stream 完成同步方式，默认 event
 -i <count>  迭代次数，默认 128
 -d <count>  设备数量，默认 8
 ```
@@ -34,10 +35,14 @@ cmake --build build -j
 设置 `--frags`：`-n` 表示 IO/task 数，task 按 stream 轮转，`--frags` 表示每个 task
 中的 fragment 数；实际创建的 stream 数不会超过 task 数。
 
+`--sync-mode event` 将其他 stream 的结束 Event 汇聚到主 stream，最后只同步主 stream；
+`--sync-mode stream` 依次调用每个 stream 的 `aclrtSynchronizeStream`。该参数只影响
+Ascend multi-stream CE 和 FFTS direct H2D case 的完成同步阶段。
+
 ```bash
 # 每张卡 1/4-stream PCIe CE
 ./build/module/copy/copy -t all_odirect_host_to_all_device_ce_multi_stream -S 1
-./build/module/copy/copy -t all_odirect_host_to_all_device_ce_multi_stream -S 4
+./build/module/copy/copy -t all_odirect_host_to_all_device_ce_multi_stream -S 4 --sync-mode stream
 
 # 每张卡 1/4-stream SDMA；100 个 task，每个 task 3 个 fragment
 ./build/module/copy/copy -t all_odirect_host_to_all_device_ffts_direct_h2d -n 100 -f 3 -S 1

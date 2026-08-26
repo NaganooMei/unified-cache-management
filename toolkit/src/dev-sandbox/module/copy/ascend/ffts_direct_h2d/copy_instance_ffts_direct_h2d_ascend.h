@@ -31,6 +31,7 @@
 #include <vector>
 #include "ascend/error_handle_ascend.h"
 #include "copy_instance.h"
+#include "copy_sync_mode.h"
 #include "ffts_d2d_dispatcher_ascend.h"
 #include "mapped_host_buffer_ffts_direct_h2d_ascend.h"
 
@@ -49,6 +50,7 @@ protected:
     aclrtEvent totalEnd_ = nullptr;
     size_t fragsPerTask_ = 0;
     size_t streamCount_ = 1;
+    CopySyncMode syncMode_ = CopySyncMode::EVENT;
 
     void Prepare(const std::vector<const CopyBuffer*>& srcBuffers,
                  const std::vector<const CopyBuffer*>& dstBuffers) override
@@ -87,7 +89,9 @@ protected:
                 DirectContext ctx;
                 ctx.deviceId = deviceId;
                 ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
-                ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                if (syncMode_ == CopySyncMode::EVENT) {
+                    ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                }
                 ctx.tasks.reserve((taskCount + activeStreamCount - 1 - stream) /
                                   activeStreamCount);
                 contexts_.push_back(std::move(ctx));
@@ -152,10 +156,18 @@ protected:
         const auto submitCost = static_cast<size_t>(
             duration_cast<microseconds>(steady_clock::now() - submitStart).count());
 
-        ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
-        for (size_t i = 1; i < contexts_.size(); ++i) {
-            ASCEND_ASSERT(aclrtStreamWaitEvent(contexts_[0].stream, contexts_[i].endEvent));
+        if (syncMode_ == CopySyncMode::EVENT) {
+            ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
+            for (size_t i = 1; i < contexts_.size(); ++i) {
+                ASCEND_ASSERT(aclrtStreamWaitEvent(contexts_[0].stream, contexts_[i].endEvent));
+            }
+        } else {
+            for (auto& ctx : contexts_) {
+                ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
+                ASCEND_ASSERT(aclrtSynchronizeStream(ctx.stream));
+            }
         }
+        ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         ASCEND_ASSERT(aclrtRecordEvent(totalEnd_, contexts_[0].stream));
         ASCEND_ASSERT(aclrtSynchronizeStream(contexts_[0].stream));
 
@@ -165,7 +177,7 @@ protected:
         return {copyCost, submitCost};
     }
 
-    static void SubmitContext(DirectContext& ctx)
+    void SubmitContext(DirectContext& ctx) const
     {
         ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
         for (const auto& copies : ctx.tasks) {
@@ -173,15 +185,19 @@ protected:
             ASSERT(readyCount > 0);
             ctx.dispatcher.Launch(ctx.stream, readyCount);
         }
-        ASCEND_ASSERT(aclrtRecordEvent(ctx.endEvent, ctx.stream));
+        if (syncMode_ == CopySyncMode::EVENT) {
+            ASCEND_ASSERT(aclrtRecordEvent(ctx.endEvent, ctx.stream));
+        }
     }
 
 public:
     FftsDirectH2DCopyInstance(size_t iterations, bool affinitySrc, size_t fragsPerTask = 0,
-                              size_t streamCount = 1)
+                              size_t streamCount = 1,
+                              CopySyncMode syncMode = CopySyncMode::EVENT)
         : CopyInstance(iterations, affinitySrc),
           fragsPerTask_(fragsPerTask),
-          streamCount_(streamCount)
+          streamCount_(streamCount),
+          syncMode_(syncMode)
     {
     }
 

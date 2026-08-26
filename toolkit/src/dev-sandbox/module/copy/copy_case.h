@@ -28,6 +28,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include "copy_sync_mode.h"
 
 class CopyCase {
     std::string key_;
@@ -39,6 +40,7 @@ public:
         size_t num;
         size_t frags;
         size_t streams;
+        CopySyncMode syncMode;
         size_t iter;
         size_t nDevice;
     };

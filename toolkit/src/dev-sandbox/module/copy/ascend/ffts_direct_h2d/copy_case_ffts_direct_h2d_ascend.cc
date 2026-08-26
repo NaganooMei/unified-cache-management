@@ -140,7 +140,8 @@ DEFINE_COPY_CASE_NO_RUNTIME(
             InitializeFftsDirectHostPatternedBuffer(srcBuffer);
             ResetFftsDirectDeviceBuffer(dstBuffer);
 
-            FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount};
+            FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount,
+                                               ctx.syncMode};
             auto childResult = instance.DoCopy(&srcBuffer, &dstBuffer);
             ValidateFftsDirectDeviceBufferIfEnabled(dstBuffer, validationEnabled);
             return childResult;
@@ -167,7 +168,8 @@ DEFINE_COPY_CASE_NO_RUNTIME(
             InitializeFftsDirectHostPatternedBuffer(srcBuffer);
             ResetFftsDirectDeviceBuffer(dstBuffer);
 
-            FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount};
+            FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount,
+                                               ctx.syncMode};
             auto childResult = instance.DoCopy(&srcBuffer, &dstBuffer);
             ValidateFftsDirectDeviceBufferIfEnabled(dstBuffer, validationEnabled);
             return childResult;
@@ -197,7 +199,8 @@ DEFINE_COPY_CASE_NO_RUNTIME(OneShareHost2AllDeviceFftsDirectH2DCase,
             DeviceCopyBuffer dstBuffer{device, ctx.size, fragments};
             ResetFftsDirectDeviceBuffer(dstBuffer);
 
-            FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount};
+            FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount,
+                                               ctx.syncMode};
             auto childResult = instance.DoCopy(&srcBuffer, &dstBuffer);
             ValidateFftsDirectDeviceBufferIfEnabled(dstBuffer, validationEnabled);
             return childResult;

@@ -143,7 +143,7 @@ DEFINE_COPY_CASE(Host2DeviceCEMultiStreamCase, "host_to_device_ce_multi_stream",
     for (size_t device = 0; device < ctx.nDevice; device++) {
         HostCopyBuffer srcBuffer{device, ctx.size, ctx.num};
         DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
-        H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount};
+        H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};
         result.Push(instance.DoCopy(&srcBuffer, &dstBuffer));
     }
     result.Show("[[ " + Key() + " ]] " + Brief());
@@ -163,7 +163,7 @@ DEFINE_COPY_CASE_NO_RUNTIME(
         "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
             SharedHostCopyBuffer srcBuffer{srcRegion.ShmName(), device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
-            H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount};
+            H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};
             return instance.DoCopy(&srcBuffer, &dstBuffer);
         }));
     result.Show("[[ " + Key() + " ]] " + Brief());
@@ -181,7 +181,7 @@ DEFINE_COPY_CASE_NO_RUNTIME(
         "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
             HostCopyBuffer srcBuffer{device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
-            H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount};
+            H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};
             return instance.DoCopy(&srcBuffer, &dstBuffer);
         }));
     result.Show("[[ " + Key() + " ]] " + Brief());
@@ -201,7 +201,7 @@ DEFINE_COPY_CASE_NO_RUNTIME(
         "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
             ODirectHostCopyBuffer srcBuffer{device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
-            H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount};
+            H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};
             return instance.DoCopy(&srcBuffer, &dstBuffer);
         }));
     result.Show("[[ " + Key() + " ]] " + Brief());

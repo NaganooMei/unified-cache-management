@@ -30,13 +30,14 @@
 #include <vector>
 #include "copy_buffer.h"
 #include "copy_instance.h"
+#include "copy_sync_mode.h"
 #include "error_handle_ascend.h"
 
 struct AscendStreamContext {
-    size_t deviceId;
-    aclrtStream stream;
-    aclrtEvent endEvent;
-    size_t size;
+    size_t deviceId = 0;
+    aclrtStream stream = nullptr;
+    aclrtEvent endEvent = nullptr;
+    size_t size = 0;
     std::vector<void*> src;
     std::vector<void*> dst;
 };
@@ -229,6 +230,7 @@ protected:
     aclrtEvent totalStart_;
     aclrtEvent totalEnd_;
     size_t streamCount_;
+    CopySyncMode syncMode_;
 
     void Prepare(const std::vector<const CopyBuffer*>& srcBuffers,
                  const std::vector<const CopyBuffer*>& dstBuffers) override
@@ -258,7 +260,9 @@ protected:
                 ctx.deviceId = deviceId;
                 ctx.size = src.Size();
                 ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
-                ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                if (syncMode_ == CopySyncMode::EVENT) {
+                    ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                }
                 ctx.src.reserve(count);
                 ctx.dst.reserve(count);
                 for (size_t j = 0; j < count; j++) {
@@ -279,7 +283,7 @@ protected:
     {
         for (auto& ctx : contexts_) {
             ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
-            ASCEND_ASSERT(aclrtDestroyEvent(ctx.endEvent));
+            if (ctx.endEvent != nullptr) { ASCEND_ASSERT(aclrtDestroyEvent(ctx.endEvent)); }
             ASCEND_ASSERT(aclrtDestroyStream(ctx.stream));
         }
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
@@ -310,11 +314,18 @@ protected:
         }
         auto submitCost = duration_cast<microseconds>(steady_clock::now() - submitStart).count();
 
-        for (size_t i = 1; i < contexts_.size(); i++) {
-            ASCEND_ASSERT(aclrtSetDevice(contexts_[i].deviceId));
-            ASCEND_ASSERT(aclrtRecordEvent(contexts_[i].endEvent, contexts_[i].stream));
-            ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
-            ASCEND_ASSERT(aclrtStreamWaitEvent(contexts_[0].stream, contexts_[i].endEvent));
+        if (syncMode_ == CopySyncMode::EVENT) {
+            for (size_t i = 1; i < contexts_.size(); i++) {
+                ASCEND_ASSERT(aclrtSetDevice(contexts_[i].deviceId));
+                ASCEND_ASSERT(aclrtRecordEvent(contexts_[i].endEvent, contexts_[i].stream));
+                ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
+                ASCEND_ASSERT(aclrtStreamWaitEvent(contexts_[0].stream, contexts_[i].endEvent));
+            }
+        } else {
+            for (auto& ctx : contexts_) {
+                ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
+                ASCEND_ASSERT(aclrtSynchronizeStream(ctx.stream));
+            }
         }
 
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
@@ -329,8 +340,9 @@ protected:
     }
 
 public:
-    H2DCEMultiStreamCopyInstance(size_t iterations, bool affinitySrc, size_t streamCount)
-        : CopyInstance(iterations, affinitySrc), streamCount_(streamCount)
+    H2DCEMultiStreamCopyInstance(size_t iterations, bool affinitySrc, size_t streamCount,
+                                 CopySyncMode syncMode = CopySyncMode::EVENT)
+        : CopyInstance(iterations, affinitySrc), streamCount_(streamCount), syncMode_(syncMode)
     {
     }
 

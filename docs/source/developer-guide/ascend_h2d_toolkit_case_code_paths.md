@@ -25,6 +25,7 @@
 - 每个配置执行 128 次正式迭代。
 - 设备数扫描 1、8。
 - Stream 数扫描 1、4、8、16、32、64、128。
+- 完成同步模式默认为 `event`，脚本可通过 `--sync-mode event|stream` 切换。
 
 序列长度到 IO 数量的换算如下：
 
@@ -40,7 +41,8 @@ CE 中，一个 `-n` 直接表示一个 32K copy。FFTS 中，一个 `-n` 表示
 
 ```text
 ucm-toolkit run dev-sandbox copy \
-  -t <case> -s 32K -n <count> -i 128 -d <devices> -S <streams> [-f 3]
+  -t <case> -s 32K -n <count> -i 128 -d <devices> -S <streams> \
+  --sync-mode <event|stream> [-f 3]
 ```
 
 ## 3. 从脚本到 native case 的公共入口
@@ -68,8 +70,9 @@ flowchart TD
 | Toolkit CLI | `toolkit/ucm_toolkit/cli.py` | 识别 `run` 命令并初始化工具注册表 |
 | Run 分发 | `toolkit/ucm_toolkit/commands/run.py` | 找到 `dev-sandbox` adapter，透传后续参数 |
 | Dev Sandbox adapter | `toolkit/ucm_toolkit/tools/dev_sandbox/adapter.py` | 将 `copy` 映射到已编译的 native 可执行文件 |
-| Native 参数解析 | `toolkit/src/dev-sandbox/module/copy/copy_main.cc` | 解析 `-t/-s/-n/-f/-S/-i/-d`，按名称选择 case |
+| Native 参数解析 | `toolkit/src/dev-sandbox/module/copy/copy_main.cc` | 解析 `-t/-s/-n/-f/-S/--sync-mode/-i/-d`，按名称选择 case |
 | Case 注册 | `toolkit/src/dev-sandbox/module/copy/copy_case.h` | 通过静态 Registrar 将各 case 注册到 `CopyCaseFactory` |
+| 同步模式定义 | `toolkit/src/dev-sandbox/module/copy/copy_sync_mode.h` | 定义 `event` 和 `stream` 两种完成同步模式 |
 
 四个 case 都使用 `DEFINE_COPY_CASE_NO_RUNTIME`。因此父进程不先初始化 ACL Runtime，而是在 fork 之后由每个设备子进程分别创建 `CopyRuntime`，执行 `aclInit`；子进程结束前再执行 `aclFinalize`。这样避免了在已经初始化 Runtime 的进程上直接 fork。
 
@@ -201,8 +204,9 @@ CE 的实际 copy 实现位于：
 2. 其他 Stream 等待总开始 Event。
 3. CPU 按 Stream 顺序遍历全部 IO，每个 IO 调用一次 `aclrtMemcpyAsync`。
 4. Host Submit 计时在最后一次异步 API 返回时结束。
-5. 第一个 Stream 等待其他 Stream 的结束 Event。
-6. 同步第一个 Stream，并用 ACL Event 计算全部 Stream 完成的 Copy 时延。
+5. `event` 模式让第一个 Stream 等待其他 Stream 的结束 Event，最后只同步第一个 Stream。
+6. `stream` 模式依次调用每个 Stream 的 `aclrtSynchronizeStream`，确认全部 Stream 完成。
+7. 两种模式最后都记录 `totalEnd`，并用 ACL Event 计算包含对应完成同步方式的 Copy 时延。
 
 因此 CE 的 Stream 数改变的是“同一批 IO 被分到多少条异步队列”，并不会改变 `aclrtMemcpyAsync` 调用总数。
 
@@ -273,7 +277,7 @@ active_streams = min(requested_streams, task_count)
 
 随后按 task 轮转分配 Stream，即第 `taskIndex` 个 task 分配到 `taskIndex % active_streams`。这一点与 CE 的连续区间分配不同。
 
-每个 task 下发时，`FftsD2DDispatcher` 为 3 个 fragment 分别构造 SDMA context，将可并发 ready lane 数限制在 task copy 数和 `FFTS_MAX_READY_LANES` 之间，默认最大为 8。最后调用 `rtFftsPlusTaskLaunchWithFlag`，把整个 FFTS task 提交到对应 ACL Stream。
+每个 task 下发时，`FftsD2DDispatcher` 为 3 个 fragment 分别构造 SDMA context，将可并发 ready lane 数限制在 task copy 数和 `FFTS_MAX_READY_LANES` 之间，默认最大为 8。最后调用 `rtFftsPlusTaskLaunchWithFlag`，把整个 FFTS task 提交到对应 ACL Stream。task 全部下发后，FFTS 与 CE 使用相同的 `event` 或逐 Stream `stream` 完成同步策略。
 
 FFTS Dispatcher 位于：
 
@@ -306,7 +310,7 @@ FFTS Dispatcher 位于：
 | 指标 | 代码中的计时范围 |
 |---|---|
 | Submit | CPU 从进入本轮下发循环，到各 Stream 的提交函数返回；CE 主要覆盖逐 IO 的异步 memcpy 调用，FFTS 还包含 SDMA context 构建、task launch 和结束 Event 记录 |
-| Copy | 第一个总开始 Event 到所有 Stream 工作完成后的总结束 Event |
+| Copy | 第一个总开始 Event 到完成同步后的总结束 Event；`event` 模式包含 Event 汇聚，`stream` 模式包含逐 Stream synchronize |
 | BW | 所有卡总数据量除以逐轮最慢卡 Copy 时间，再对结果统计 |
 
 日志中的带宽列虽然标为 `GB/s`，计算公式使用 `1024^3`，数值口径实际更接近 `GiB/s`。
