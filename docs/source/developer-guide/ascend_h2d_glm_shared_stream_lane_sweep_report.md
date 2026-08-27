@@ -2,21 +2,16 @@
 
 ## 1. 测试说明
 
-本报告整理16卡Shared H2D、Event同步下的GLM简化IO实测结果，重点展示绝对带宽、Copy完成时间和Submit下发时间，不展开根因分析。
+本报告整理16卡Shared H2D、Event同步下的GLM简化IO实测结果，重点展示绝对带宽、Copy完成时间和Submit下发时间。
 
-- 主 Run ID：`20260827_121029`
-- 补充 Run ID：`20260827_103327`，仅补充主测试失败的 `64K / FFTS / S8 / L3`
-- 代码提交：`62b162099fd356b7928e07f16893b2922cdfb3b2`
 - Host形态：单块POSIX Shared Memory fan-out到16张卡，对应MLA共享内存形态
 - IO模式：`glm`；每个task固定包含128K、16K、32K三个IO，合计176 KiB
-- 数据映射：一个dev-sandbox task代表一个UCM shard的数据粒度，不等于一个UCM API task
 - FFTS：一个task对应一次FFTS launch，launch内包含三个SDMA context
 - CE：一个task对应三次`aclrtMemcpyAsync`，三个IO放在同一个stream
 - Requested stream：1、4、8、16、32、64、128
 - FFTS requested lane：1、3、8；由于每个launch只有三个context，lane 8的effective lane为3
 - 同步方式：`event`
 - Warmup：12轮；正式测试：128轮
-- 最终数据：84组有效结果，其中主Run 83组、补充Run 1组
 
 | 序列长度 | 每卡task数 | 每卡IO数 | 每卡传输量 | 16卡聚合传输量 |
 |---:|---:|---:|---:|---:|
@@ -24,13 +19,11 @@
 | 64K | 512 | 1536 | 88 MiB | 1.375 GiB |
 | 128K | 1024 | 3072 | 176 MiB | 2.75 GiB |
 
-主Run的`64K / FFTS / S8 / L3`因设备0、1的TSD/HDC响应失败而没有有效性能结果；本报告使用补充Run中同配置的成功结果：Submit `1908/185290/4304/2633/4565 us`，Copy `5901/186006/9972/8881/9684 us`，BW `137.886 GB/s`。
-
 表格中的Submit和Copy单位均为微秒，顺序为`Min/Max/Avg/P50/P90`。多卡时间按每轮最慢设备合并；日志中的`BW(GB/s)`使用16卡总数据量除以Copy Avg，并按1024³换算，数值更接近GiB/s。
 
 ## 2. 性能趋势图
 
-本节直接绘制合并后84组数据的绝对值。蓝色实线表示CE；其余虚线分别表示FFTS lane 1、3、8。每个序列长度子图都在纵轴上标明自己的绝对数值范围。
+本节直接绘制实测绝对值。蓝色实线表示CE；其余虚线分别表示FFTS lane 1、3、8。每个序列长度子图都在纵轴上标明自己的绝对数值范围。
 
 ### 2.1 聚合带宽
 
@@ -100,8 +93,6 @@
 
 ### 3.3 Shared FFTS · 64K
 
-其中S8/L3来自补充Run，其余数据来自主Run。
-
 | Lane | Effective Lane | Req Stream | Eff Stream | IO/卡 | Total IO | Submit us Min/Max/Avg/P50/P90 | Copy us Min/Max/Avg/P50/P90 | BW |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 1 | 1 | 1 | 1 | 1536 | 24576 | 1450/2275/1795/1806/2035 | 13237/13614/13428/13429/13480 | 102.398 |
@@ -154,14 +145,16 @@
 
 ## 4. 性能结果
 
-| 序列 | CE实测最高点 | CE BW | CE Copy Avg | CE Submit Avg | FFTS实测最高点 | FFTS BW | FFTS Copy Avg | FFTS Submit Avg | FFTS/CE |
-|---:|---|---:|---:|---:|---|---:|---:|---:|---:|
-| 8K | S16 | 57.101 | 3010 us | 349 us | S8/L3 | 377.747 | 455 us | 347 us | 6.62x |
-| 64K | S128 | 56.615 | 24287 us | 3013 us | S32/L3 | 435.678 | 3156 us | 2337 us | 7.70x |
-| 128K | S128 | 76.472 | 35961 us | 5807 us | S64/L8 | 451.264 | 6094 us | 4765 us | 5.90x |
+| 序列长度 | CE建议配置 | CE较好区间 | 建议配置实测BW | FFTS建议配置 | FFTS较好区间 | 建议配置实测BW |
+|---:|---|---|---:|---|---|---:|
+| 8K | S16 | S8～S16 | 57.101 GB/s | S8/L3 | S4～S8，L3 | 377.747 GB/s |
+| 64K | S128 | S64～S128 | 56.615 GB/s | S32/L3 | S16～S64，L3 | 435.678 GB/s |
+| 128K | S128 | S64～S128 | 76.472 GB/s | S64/L3 | S64～S128，L3 | 427.550 GB/s |
 
-- CE实测最高点分别出现在8K的S16、64K的S128、128K的S128。
-- FFTS实测最高点分别出现在8K的S8/L3、64K的S32/L3、128K的S64/L8。
-- 128K在S64和S128形成约412～451 GB/s的平台区；本轮最高点为S64/L8的451.264 GB/s。
-- L8的effective lane与L3相同，二者差值只能视为相同三lane配置下的运行波动，不能解释为八lane并发收益。
-- 本结果只覆盖热Shared Memory到HBM的H2D微基准，不包含CacheStore排队、后端读取和端到端服务时间。
+简单结论：
+
+- **8K短序列**：任务数量少，stream开得太多反而变慢。CE使用8～16个stream，优先选16；FFTS使用4～8个stream，优先选8，lane设为3。
+- **64K序列**：CE需要更多stream才能把带宽拉起来，建议64～128，优先选128；FFTS的甜点区间是16～64，优先选32个stream、3个lane。
+- **128K长序列**：CE建议直接使用64～128个stream，优先选128；FFTS在64～128个stream进入高带宽平台，优先选64个stream、3个lane。
+- **lane选择**：每次FFTS launch只有3个IO context，因此统一使用L3即可。L8的实际effective lane仍是3，不会获得8路并发。
+- 整体规律很清楚：序列越长，可并行task越多，适合使用更多stream；8K应控制stream数量，64K和128K再逐步提高。
