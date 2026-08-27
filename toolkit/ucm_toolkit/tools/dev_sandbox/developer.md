@@ -129,7 +129,7 @@ ucm-toolkit run dev-sandbox copy -t host_to_device_ce -s 16K -n 512 -i 128 -d 8
 ucm-toolkit run dev-sandbox copy -t host_to_device_ce -t device_to_host_ce -s 1M
 ucm-toolkit run dev-sandbox copy -t all_odirect_host_to_all_device_ce_multi_stream -S 4 --sync-mode stream
 ucm-toolkit run dev-sandbox copy -t all_odirect_host_to_all_device_ffts_direct_h2d -n 100 -f 3 -S 1
-ucm-toolkit run dev-sandbox copy -t one_share_host_to_all_device_ffts_direct_h2d --io-mode glm -n 500 -d 16 -S 4 -L 3
+ucm-toolkit run dev-sandbox copy -t one_share_host_to_all_device_ffts_direct_h2d --io-mode glm -n 512 -d 16 -S 4 -L 3
 ```
 
 参数：

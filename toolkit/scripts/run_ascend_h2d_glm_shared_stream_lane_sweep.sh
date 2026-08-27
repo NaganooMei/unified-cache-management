@@ -5,9 +5,9 @@ set -Eeuo pipefail
 SYNC_MODE="${SYNC_MODE:-event}"
 
 readonly DEVICE_COUNT=16
-readonly TASK_COUNT="${TASK_COUNT:-500}"
 readonly ITERATIONS="${ITERATIONS:-128}"
 readonly WARMUP_ITERATIONS="${WARMUP_ITERATIONS:-12}"
+readonly TOKENS_PER_TASK=128
 readonly IO_MODE="glm"
 readonly IO_SIZES="128K,16K,32K"
 readonly TASK_BYTES=$(((128 + 16 + 32) * 1024))
@@ -15,6 +15,7 @@ readonly UCM_TOOLKIT_BIN="${UCM_TOOLKIT_BIN:-ucm-toolkit}"
 
 read -r -a STREAM_COUNT_VALUES <<< "${STREAM_COUNTS:-1 4 8 16 32 64 128}"
 read -r -a LANE_COUNT_VALUES <<< "${LANE_COUNTS:-1 3 8}"
+read -r -a TASK_COUNT_VALUES <<< "${TASK_COUNTS:-64 512 1024}"
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
@@ -32,7 +33,7 @@ usage()
     printf 'Environment overrides:\n'
     printf '  STREAM_COUNTS="1 4 8 ..."  Stream values (default: 1 4 8 16 32 64 128)\n'
     printf '  LANE_COUNTS="1 3 8"        FFTS ready-lane values (default: 1 3 8)\n'
-    printf '  TASK_COUNT=<n>              GLM task count per device (default: 500)\n'
+    printf '  TASK_COUNTS="64 512 1024"  GLM tasks for 8K/64K/128K sequences\n'
     printf '  ITERATIONS=<n>              Measured iterations (default: 128)\n'
     printf '  WARMUP_ITERATIONS=<n>       Warmup iterations (default: 12)\n'
     printf '  LOG_FILE=<path>             Output log path\n'
@@ -92,15 +93,28 @@ print_command()
     printf '\n'
 }
 
+sequence_label()
+{
+    local task_count="$1"
+    local token_count=$((task_count * TOKENS_PER_TASK))
+    if ((token_count % 1024 == 0)); then
+        printf '%sK' "$((token_count / 1024))"
+    else
+        printf '%s_tokens' "${token_count}"
+    fi
+}
+
 run_one()
 {
     local case_name="$1"
     local method="$2"
-    local stream_count="$3"
-    local lane_count="$4"
+    local task_count="$3"
+    local sequence_length="$4"
+    local stream_count="$5"
+    local lane_count="$6"
     local effective_streams="${stream_count}"
-    if ((effective_streams > TASK_COUNT)); then
-        effective_streams="${TASK_COUNT}"
+    if ((effective_streams > task_count)); then
+        effective_streams="${task_count}"
     fi
 
     local effective_lanes="none"
@@ -115,7 +129,7 @@ run_one()
         "${UCM_TOOLKIT_BIN}" run dev-sandbox copy
         -t "${case_name}"
         --io-mode "${IO_MODE}"
-        -n "${TASK_COUNT}"
+        -n "${task_count}"
         -i "${ITERATIONS}"
         --warmup "${WARMUP_ITERATIONS}"
         -d "${DEVICE_COUNT}"
@@ -129,16 +143,16 @@ run_one()
     local start_seconds
     start_seconds="$(date +%s)"
     printf '\n================================================================\n'
-    printf 'case=%s method=%s devices=%s io_mode=%s io_sizes=%s tasks_per_device=%s ' \
-        "${case_name}" "${method}" "${DEVICE_COUNT}" "${IO_MODE}" "${IO_SIZES}" \
-        "${TASK_COUNT}"
+    printf 'case=%s method=%s sequence=%s devices=%s io_mode=%s io_sizes=%s tasks_per_device=%s ' \
+        "${case_name}" "${method}" "${sequence_length}" "${DEVICE_COUNT}" "${IO_MODE}" \
+        "${IO_SIZES}" "${task_count}"
     printf 'requested_streams=%s effective_streams=%s requested_lanes=%s effective_lanes=%s ' \
         "${stream_count}" "${effective_streams}" "${lane_count}" "${effective_lanes}"
     printf 'sync_mode=%s warmup_iterations=%s start=%s\n' \
         "${SYNC_MODE}" "${WARMUP_ITERATIONS}" "$(date --iso-8601=seconds)"
     printf 'task_bytes=%s bytes_per_device=%s aggregate_bytes=%s\n' \
-        "${TASK_BYTES}" "$((TASK_BYTES * TASK_COUNT))" \
-        "$((TASK_BYTES * TASK_COUNT * DEVICE_COUNT))"
+        "${TASK_BYTES}" "$((TASK_BYTES * task_count))" \
+        "$((TASK_BYTES * task_count * DEVICE_COUNT))"
     print_command "${command[@]}"
 
     local status=0
@@ -146,9 +160,10 @@ run_one()
 
     local end_seconds
     end_seconds="$(date +%s)"
-    printf 'case=%s method=%s streams=%s lanes=%s status=%s elapsed_s=%s end=%s\n' \
-        "${case_name}" "${method}" "${stream_count}" "${lane_count}" "${status}" \
-        "$((end_seconds - start_seconds))" "$(date --iso-8601=seconds)"
+    printf 'case=%s method=%s sequence=%s tasks_per_device=%s streams=%s lanes=%s status=%s elapsed_s=%s end=%s\n' \
+        "${case_name}" "${method}" "${sequence_length}" "${task_count}" "${stream_count}" \
+        "${lane_count}" "${status}" "$((end_seconds - start_seconds))" \
+        "$(date --iso-8601=seconds)"
     return "${status}"
 }
 
@@ -158,7 +173,7 @@ main()
     readonly SYNC_MODE
     validate_positive_values STREAM_COUNTS "${STREAM_COUNT_VALUES[@]}" || return $?
     validate_positive_values LANE_COUNTS "${LANE_COUNT_VALUES[@]}" || return $?
-    validate_positive_values TASK_COUNT "${TASK_COUNT}" || return $?
+    validate_positive_values TASK_COUNTS "${TASK_COUNT_VALUES[@]}" || return $?
     validate_positive_values ITERATIONS "${ITERATIONS}" || return $?
     validate_positive_values WARMUP_ITERATIONS "${WARMUP_ITERATIONS}" || return $?
 
@@ -175,9 +190,18 @@ main()
     printf 'run_id=%s\n' "${RUN_ID}"
     printf 'repo_root=%s\n' "${REPO_ROOT}"
     printf 'log_file=%s\n' "${LOG_FILE}"
-    printf 'devices=%s io_mode=%s io_sizes=%s task_bytes=%s tasks_per_device=%s iterations=%s warmup_iterations=%s\n' \
-        "${DEVICE_COUNT}" "${IO_MODE}" "${IO_SIZES}" "${TASK_BYTES}" "${TASK_COUNT}" \
+    printf 'devices=%s io_mode=%s io_sizes=%s task_bytes=%s tokens_per_task=%s iterations=%s warmup_iterations=%s\n' \
+        "${DEVICE_COUNT}" "${IO_MODE}" "${IO_SIZES}" "${TASK_BYTES}" "${TOKENS_PER_TASK}" \
         "${ITERATIONS}" "${WARMUP_ITERATIONS}"
+    printf 'task_counts=%s\n' "${TASK_COUNT_VALUES[*]}"
+    printf 'sequence_lengths='
+    local task_count
+    local separator=""
+    for task_count in "${TASK_COUNT_VALUES[@]}"; do
+        printf '%s%s' "${separator}" "$(sequence_label "${task_count}")"
+        separator=" "
+    done
+    printf '\n'
     printf 'streams=%s\n' "${STREAM_COUNT_VALUES[*]}"
     printf 'ffts_lanes=%s\n' "${LANE_COUNT_VALUES[*]}"
     printf 'sync_mode=%s\n' "${SYNC_MODE}"
@@ -187,22 +211,29 @@ main()
     local failures=0
     local stream_count
     local lane_count
-    for stream_count in "${STREAM_COUNT_VALUES[@]}"; do
-        if ! run_one "${CE_CASE}" ce "${stream_count}" none; then
-            failures=$((failures + 1))
-        fi
-    done
-    for stream_count in "${STREAM_COUNT_VALUES[@]}"; do
-        for lane_count in "${LANE_COUNT_VALUES[@]}"; do
-            if ! run_one "${FFTS_CASE}" ffts "${stream_count}" "${lane_count}"; then
+    local sequence_length
+    for task_count in "${TASK_COUNT_VALUES[@]}"; do
+        sequence_length="$(sequence_label "${task_count}")"
+        for stream_count in "${STREAM_COUNT_VALUES[@]}"; do
+            if ! run_one "${CE_CASE}" ce "${task_count}" "${sequence_length}" \
+                "${stream_count}" none; then
                 failures=$((failures + 1))
             fi
+        done
+        for stream_count in "${STREAM_COUNT_VALUES[@]}"; do
+            for lane_count in "${LANE_COUNT_VALUES[@]}"; do
+                if ! run_one "${FFTS_CASE}" ffts "${task_count}" "${sequence_length}" \
+                    "${stream_count}" "${lane_count}"; then
+                    failures=$((failures + 1))
+                fi
+            done
         done
     done
 
     local total_runs=$((
-        ${#STREAM_COUNT_VALUES[@]} +
-        ${#STREAM_COUNT_VALUES[@]} * ${#LANE_COUNT_VALUES[@]}
+        ${#TASK_COUNT_VALUES[@]} *
+        (${#STREAM_COUNT_VALUES[@]} +
+         ${#STREAM_COUNT_VALUES[@]} * ${#LANE_COUNT_VALUES[@]})
     ))
     printf '\n================================================================\n'
     printf 'sweep_complete failures=%s total_runs=%s log_file=%s\n' \

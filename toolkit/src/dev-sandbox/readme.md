@@ -57,9 +57,9 @@ Ascend multi-stream CE 和 FFTS direct H2D case 的完成同步阶段。
 ./build/module/copy/copy -t all_odirect_host_to_all_device_ffts_direct_h2d -n 100 -f 3 -S 1
 ./build/module/copy/copy -t all_odirect_host_to_all_device_ffts_direct_h2d -n 100 -f 3 -S 4
 
-# 16 卡 GLM shared-memory：每个 FFTS launch 含 128K/16K/32K，3 个 ready lane
+# 16 卡、64K token GLM shared-memory：512 个 task，每次 launch 含 128K/16K/32K
 ./build/module/copy/copy -t one_share_host_to_all_device_ffts_direct_h2d \
-  --io-mode glm -n 500 -w 12 -i 128 -d 16 -S 4 -L 3
+  --io-mode glm -n 512 -w 12 -i 128 -d 16 -S 4 -L 3
 ```
 
 查看当前后端可用 case：

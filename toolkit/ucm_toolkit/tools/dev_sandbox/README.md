@@ -105,7 +105,9 @@ ucm-toolkit run dev-sandbox --model-type <gqa|mla> --iodirect <true|false> --sdm
 固定包含 128K、16K、32K 三个 IO。FFTS 一次 launch 携带这三个 IO，因此有效 lane
 数最多为 3。16 卡 shared CE/FFTS stream/lane 扫描可运行
 `toolkit/scripts/run_ascend_h2d_glm_shared_stream_lane_sweep.sh`；该脚本默认扫描 lane
-`1/3/8` 并预热 12 轮，其中 lane 8 在每次只有三个 context 的 GLM launch 中有效值为 3。
+`1/3/8` 并预热 12 轮。脚本按每个 task 对应 128 token，将 8K、64K、128K
+序列长度分别映射为 64、512、1024 个 task；其中 lane 8 在每次只有三个 context
+的 GLM launch 中有效值为 3。
 
 ## 示例
 
