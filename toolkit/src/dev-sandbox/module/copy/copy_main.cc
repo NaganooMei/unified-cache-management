@@ -34,6 +34,8 @@ struct ArgsParser {
         .num = 8,
         .frags = 0,
         .streams = 0,
+        .lanes = 0,
+        .ioMode = CopyIoMode::UNIFORM,
         .syncMode = CopySyncMode::EVENT,
         .iter = 128,
         .nDevice = 8};
@@ -52,6 +54,12 @@ struct ArgsParser {
         fmt::println("  -S/--streams/--stream-count <n>");
         fmt::println("                   Streams per device for Ascend multi-stream CE and FFTS");
         fmt::println("                   direct H2D (default: CE=4, FFTS direct H2D=1)");
+        fmt::println("  -L/--lanes/--lane-count <n>");
+        fmt::println("                   Ready lanes in each FFTS direct H2D launch");
+        fmt::println("                   (default: FFTS_MAX_READY_LANES or 8, max: 128)");
+        fmt::println("  --io-mode <mode> IO layout: uniform or glm (default: uniform)");
+        fmt::println("                   glm uses one task with 128K/16K/32K IOs and is");
+        fmt::println("                   supported by shared-memory CE/FFTS H2D cases");
         fmt::println("  --sync-mode <mode>");
         fmt::println("                   Multi-stream completion mode: event or stream");
         fmt::println("                   (default: event)");
@@ -94,6 +102,13 @@ struct ArgsParser {
         fmt::println("Invalid sync mode. Use event or stream.");
         std::exit(EXIT_FAILURE);
     }
+    static CopyIoMode ParseIoMode(std::string_view mode)
+    {
+        if (mode == "uniform") { return CopyIoMode::UNIFORM; }
+        if (mode == "glm") { return CopyIoMode::GLM; }
+        fmt::println("Invalid IO mode. Use uniform or glm.");
+        std::exit(EXIT_FAILURE);
+    }
     ArgsParser(int argc, char const* argv[])
     {
         for (int i = 1; i < argc; ++i) {
@@ -113,6 +128,15 @@ struct ArgsParser {
                     fmt::println("Invalid stream count. Use a positive integer.");
                     std::exit(EXIT_FAILURE);
                 }
+            } else if ((arg == "-L" || arg == "--lanes" || arg == "--lane-count") &&
+                       i + 1 < argc) {
+                ctx.lanes = ParseUnsigned(argv[++i], "Invalid lane count.");
+                if (ctx.lanes == 0 || ctx.lanes > 128) {
+                    fmt::println("Invalid lane count. Use an integer from 1 to 128.");
+                    std::exit(EXIT_FAILURE);
+                }
+            } else if (arg == "--io-mode" && i + 1 < argc) {
+                ctx.ioMode = ParseIoMode(argv[++i]);
             } else if (arg == "--sync-mode" && i + 1 < argc) {
                 ctx.syncMode = ParseSyncMode(argv[++i]);
             } else if (arg == "-i" && i + 1 < argc) {
@@ -142,6 +166,11 @@ int main(int argc, char const* argv[])
         return -1;
     }
     for (auto& c : cases) {
+        if (!c->SupportsIoMode(args.ctx.ioMode)) {
+            fmt::println("IO mode {} is not supported by case {}.",
+                         CopyIoModeName(args.ctx.ioMode), c->Key());
+            return -1;
+        }
         if (c->RequiresRuntimeInitialization()) {
             CopyRuntime runtime;
             c->Run(args.ctx);

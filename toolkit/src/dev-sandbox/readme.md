@@ -25,15 +25,23 @@ cmake --build build -j
 -n <count>  每个 buffer 内的数据块数量，默认 8
 -f/--frags/-frags <n>  FFTS direct H2D 每个 IO/task 的 fragment 数，默认 0
 -S/--streams/--stream-count <n>  每张卡的 Ascend CE/FFTS direct H2D stream 数
+-L/--lanes/--lane-count <n>  FFTS 单次 launch 的 ready lane 上限，默认 8
+--io-mode <uniform|glm>  IO 布局；glm 为每个 task 固定 128K/16K/32K
 --sync-mode <event|stream>  多 stream 完成同步方式，默认 event
 -i <count>  迭代次数，默认 128
 -d <count>  设备数量，默认 8
 ```
 
 `--streams` 仅影响 Ascend multi-stream CE 和 FFTS direct H2D case。省略时保留原有
-默认值：CE 为 4，FFTS direct H2D 为 1。FFTS direct H2D 使用多 stream 时必须同时
-设置 `--frags`：`-n` 表示 IO/task 数，task 按 stream 轮转，`--frags` 表示每个 task
-中的 fragment 数；实际创建的 stream 数不会超过 task 数。
+默认值：CE 为 4，FFTS direct H2D 为 1。`uniform` IO 模式下，FFTS direct H2D 使用
+多 stream 时必须同时设置 `--frags`：`-n` 表示 IO/task 数，task 按 stream 轮转，
+`--frags` 表示每个 task 中的 fragment 数；实际创建的 stream 数不会超过 task 数。
+
+`--lanes` 控制 FFTS 单次 launch 的 `readyContextNum` 上限。省略时沿用
+`FFTS_MAX_READY_LANES` 环境变量或默认值 8。`--io-mode glm` 目前用于 shared-memory
+CE/FFTS H2D case：`-n` 表示 task 数，每个 task 包含连续的 128K、16K、32K 三个 IO。
+CE 将同一 task 的三个 IO 放在同一个 stream；FFTS 将三个 SDMA context 放在同一次
+launch。由于每次 launch 只有三个 context，有效 lane 数最大为 3。
 
 `--sync-mode event` 将其他 stream 的结束 Event 汇聚到主 stream，最后只同步主 stream；
 `--sync-mode stream` 依次调用每个 stream 的 `aclrtSynchronizeStream`。该参数只影响
@@ -47,6 +55,10 @@ Ascend multi-stream CE 和 FFTS direct H2D case 的完成同步阶段。
 # 每张卡 1/4-stream SDMA；100 个 task，每个 task 3 个 fragment
 ./build/module/copy/copy -t all_odirect_host_to_all_device_ffts_direct_h2d -n 100 -f 3 -S 1
 ./build/module/copy/copy -t all_odirect_host_to_all_device_ffts_direct_h2d -n 100 -f 3 -S 4
+
+# 16 卡 GLM shared-memory：每个 FFTS launch 含 128K/16K/32K，3 个 ready lane
+./build/module/copy/copy -t one_share_host_to_all_device_ffts_direct_h2d \
+  --io-mode glm -n 500 -i 128 -d 16 -S 4 -L 3
 ```
 
 查看当前后端可用 case：

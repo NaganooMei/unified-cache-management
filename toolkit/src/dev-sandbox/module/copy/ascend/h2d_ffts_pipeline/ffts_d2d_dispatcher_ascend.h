@@ -70,6 +70,20 @@ struct AscendFftsCopySpec {
 
 class FftsD2DDispatcher {
 public:
+    FftsD2DDispatcher() : maxReadyLanes_{ResolveMaxReadyLanes()} {}
+
+    explicit FftsD2DDispatcher(size_t maxReadyLanes) : FftsD2DDispatcher()
+    {
+        SetMaxReadyLanes(maxReadyLanes);
+    }
+
+    void SetMaxReadyLanes(size_t maxReadyLanes)
+    {
+        if (maxReadyLanes == 0) { return; }
+        ASSERT(maxReadyLanes <= std::numeric_limits<uint16_t>::max());
+        maxReadyLanes_ = static_cast<uint16_t>(maxReadyLanes);
+    }
+
     void Reserve(size_t count) { contexts_.reserve(count); }
 
     void Reset()
@@ -115,9 +129,8 @@ public:
         if (copies.empty()) { return 0; }
 
         Reserve(copies.size());
-        const uint16_t maxReadyLanes = MaxReadyLanes();
         const uint16_t laneCount =
-            static_cast<uint16_t>(std::min<size_t>(copies.size(), maxReadyLanes));
+            static_cast<uint16_t>(std::min<size_t>(copies.size(), maxReadyLanes_));
         std::vector<int32_t> lastTaskId(laneCount, -1);
 
         for (size_t i = 0; i < copies.size(); ++i) {
@@ -162,7 +175,7 @@ public:
     }
 
 private:
-    static uint16_t MaxReadyLanes()
+    static uint16_t ResolveMaxReadyLanes()
     {
         const char* value = std::getenv(kFftsMaxReadyLanesEnv);
         if (value == nullptr || value[0] == '\0') { return kDefaultFftsMaxReadyLanes; }
@@ -206,6 +219,7 @@ private:
     }
 
     std::vector<rtFftsPlusComCtx_t> contexts_;
+    uint16_t maxReadyLanes_ = kDefaultFftsMaxReadyLanes;
     bool completed_ = false;
 };
 

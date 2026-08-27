@@ -33,6 +33,7 @@
 #include "copy_instance.h"
 #include "copy_sync_mode.h"
 #include "ffts_d2d_dispatcher_ascend.h"
+#include "glm_io_buffer_ascend.h"
 #include "mapped_host_buffer_ffts_direct_h2d_ascend.h"
 
 class FftsDirectH2DCopyInstance : public CopyInstance {
@@ -50,6 +51,7 @@ protected:
     aclrtEvent totalEnd_ = nullptr;
     size_t fragsPerTask_ = 0;
     size_t streamCount_ = 1;
+    size_t laneCount_ = 0;
     CopySyncMode syncMode_ = CopySyncMode::EVENT;
 
     void Prepare(const std::vector<const CopyBuffer*>& srcBuffers,
@@ -68,6 +70,45 @@ protected:
             ASSERT(dst != nullptr);
             ASSERT(src->Number() == dst->Number());
             ASSERT(src->Size() == dst->Size());
+
+            const auto* glmSrc = dynamic_cast<const GlmSharedHostCopyBuffer*>(src);
+            const auto* glmDst = dynamic_cast<const GlmIoCopyBuffer*>(dst);
+            if (glmSrc != nullptr || glmDst != nullptr) {
+                ASSERT(glmSrc != nullptr);
+                ASSERT(glmDst != nullptr);
+                const auto taskCount = glmSrc->Number();
+                ASSERT(taskCount > 0);
+                const auto activeStreamCount = std::min(streamCount_, taskCount);
+                const auto firstContext = contexts_.size();
+                const auto deviceId = AffinityDeviceId(*src, *dst);
+
+                ASCEND_ASSERT(aclrtSetDevice(deviceId));
+                for (size_t stream = 0; stream < activeStreamCount; ++stream) {
+                    DirectContext ctx;
+                    ctx.deviceId = deviceId;
+                    ctx.dispatcher.SetMaxReadyLanes(laneCount_);
+                    ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
+                    if (syncMode_ == CopySyncMode::EVENT) {
+                        ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                    }
+                    ctx.tasks.reserve((taskCount + activeStreamCount - 1 - stream) /
+                                      activeStreamCount);
+                    contexts_.push_back(std::move(ctx));
+                }
+
+                for (size_t task = 0; task < taskCount; ++task) {
+                    std::vector<AscendFftsCopySpec> copies;
+                    copies.reserve(GlmIoCopyBuffer::IoCount());
+                    for (size_t io = 0; io < GlmIoCopyBuffer::IoCount(); ++io) {
+                        ASSERT(glmSrc->IoSize(io) == glmDst->IoSize(io));
+                        copies.push_back({glmDst->IoAt(task, io), glmSrc->MappedIoAt(task, io),
+                                          glmSrc->IoSize(io)});
+                    }
+                    contexts_[firstContext + task % activeStreamCount].tasks.push_back(
+                        std::move(copies));
+                }
+                continue;
+            }
 
             const auto* mappedSrc = dynamic_cast<const FftsDirectMappedHostBuffer*>(src);
             ASSERT(mappedSrc != nullptr);
@@ -88,6 +129,7 @@ protected:
             for (size_t stream = 0; stream < activeStreamCount; ++stream) {
                 DirectContext ctx;
                 ctx.deviceId = deviceId;
+                ctx.dispatcher.SetMaxReadyLanes(laneCount_);
                 ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
                 if (syncMode_ == CopySyncMode::EVENT) {
                     ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
@@ -193,17 +235,21 @@ protected:
 public:
     FftsDirectH2DCopyInstance(size_t iterations, bool affinitySrc, size_t fragsPerTask = 0,
                               size_t streamCount = 1,
-                              CopySyncMode syncMode = CopySyncMode::EVENT)
+                              CopySyncMode syncMode = CopySyncMode::EVENT,
+                              size_t laneCount = 0)
         : CopyInstance(iterations, affinitySrc),
           fragsPerTask_(fragsPerTask),
           streamCount_(streamCount),
+          laneCount_(laneCount),
           syncMode_(syncMode)
     {
     }
 
     std::string Name() const override
     {
-        return "ffts-direct-h2d-" + std::to_string(streamCount_) + "s";
+        auto name = "ffts-direct-h2d-" + std::to_string(streamCount_) + "s";
+        if (laneCount_ > 0) { name += "-L" + std::to_string(laneCount_); }
+        return name;
     }
 };
 

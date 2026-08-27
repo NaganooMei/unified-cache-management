@@ -28,6 +28,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include "copy_io_mode.h"
 #include "copy_sync_mode.h"
 
 class CopyCase {
@@ -40,6 +41,8 @@ public:
         size_t num;
         size_t frags;
         size_t streams;
+        size_t lanes;
+        CopyIoMode ioMode;
         CopySyncMode syncMode;
         size_t iter;
         size_t nDevice;
@@ -48,6 +51,7 @@ public:
     virtual ~CopyCase() = default;
     virtual void Run(const Context& ctx) const = 0;
     virtual bool RequiresRuntimeInitialization() const { return true; }
+    virtual bool SupportsIoMode(CopyIoMode mode) const { return mode == CopyIoMode::UNIFORM; }
     const std::string& Key() const { return key_; }
     const std::string& Brief() const { return brief_; }
 };
@@ -98,6 +102,20 @@ public:
     public:                                                                   \
         ClassName() : CopyCase(Key, Brief) {}                                 \
         bool RequiresRuntimeInitialization() const override { return false; } \
+        void Run(const Context&) const override;                              \
+    };                                                                        \
+    static Registrar<ClassName> global_##ClassName##_registrar;               \
+    void ClassName::Run(const Context& Ctx) const
+
+#define DEFINE_COPY_CASE_NO_RUNTIME_IO_MODE(ClassName, Key, Brief, Ctx)       \
+    class ClassName : public CopyCase {                                       \
+    public:                                                                   \
+        ClassName() : CopyCase(Key, Brief) {}                                 \
+        bool RequiresRuntimeInitialization() const override { return false; } \
+        bool SupportsIoMode(CopyIoMode mode) const override                   \
+        {                                                                     \
+            return mode == CopyIoMode::UNIFORM || mode == CopyIoMode::GLM;   \
+        }                                                                     \
         void Run(const Context&) const override;                              \
     };                                                                        \
     static Registrar<ClassName> global_##ClassName##_registrar;               \

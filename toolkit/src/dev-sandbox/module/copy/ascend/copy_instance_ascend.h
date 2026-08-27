@@ -24,6 +24,7 @@
 #ifndef COPY_INSTANCE_ASCEND_H
 #define COPY_INSTANCE_ASCEND_H
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <utility>
@@ -32,6 +33,7 @@
 #include "copy_instance.h"
 #include "copy_sync_mode.h"
 #include "error_handle_ascend.h"
+#include "glm_io_buffer_ascend.h"
 
 struct AscendStreamContext {
     size_t deviceId = 0;
@@ -40,6 +42,7 @@ struct AscendStreamContext {
     size_t size = 0;
     std::vector<void*> src;
     std::vector<void*> dst;
+    std::vector<size_t> sizes;
 };
 
 class AscendCopyInstanceBase : public CopyInstance {
@@ -243,6 +246,41 @@ protected:
             auto& src = *srcBuffers[i];
             auto& dst = *dstBuffers[i];
             ASSERT(src.Number() == dst.Number());
+
+            const auto* glmSrc = dynamic_cast<const GlmIoCopyBuffer*>(&src);
+            const auto* glmDst = dynamic_cast<const GlmIoCopyBuffer*>(&dst);
+            if (glmSrc != nullptr || glmDst != nullptr) {
+                ASSERT(glmSrc != nullptr);
+                ASSERT(glmDst != nullptr);
+                const auto taskCount = glmSrc->Number();
+                ASSERT(taskCount > 0);
+                const auto activeStreamCount = std::min(streamCount_, taskCount);
+                const auto firstContext = contexts_.size();
+                const auto deviceId = AffinityDeviceId(src, dst);
+                ASCEND_ASSERT(aclrtSetDevice(deviceId));
+
+                for (size_t stream = 0; stream < activeStreamCount; ++stream) {
+                    AscendStreamContext ctx;
+                    ctx.deviceId = deviceId;
+                    ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
+                    if (syncMode_ == CopySyncMode::EVENT) {
+                        ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                    }
+                    contexts_.push_back(std::move(ctx));
+                }
+
+                for (size_t task = 0; task < taskCount; ++task) {
+                    auto& streamContext = contexts_[firstContext + task % activeStreamCount];
+                    for (size_t io = 0; io < GlmIoCopyBuffer::IoCount(); ++io) {
+                        ASSERT(glmSrc->IoSize(io) == glmDst->IoSize(io));
+                        streamContext.src.push_back(glmSrc->IoAt(task, io));
+                        streamContext.dst.push_back(glmDst->IoAt(task, io));
+                        streamContext.sizes.push_back(glmSrc->IoSize(io));
+                    }
+                }
+                continue;
+            }
+
             ASSERT(src.Size() == dst.Size());
 
             size_t bufferCount = src.Number();
@@ -308,7 +346,8 @@ protected:
         for (auto& ctx : contexts_) {
             ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
             for (size_t i = 0; i < ctx.src.size(); i++) {
-                ASCEND_ASSERT(aclrtMemcpyAsync(ctx.dst[i], ctx.size, ctx.src[i], ctx.size,
+                const auto size = ctx.sizes.empty() ? ctx.size : ctx.sizes[i];
+                ASCEND_ASSERT(aclrtMemcpyAsync(ctx.dst[i], size, ctx.src[i], size,
                                                ACL_MEMCPY_HOST_TO_DEVICE, ctx.stream));
             }
         }

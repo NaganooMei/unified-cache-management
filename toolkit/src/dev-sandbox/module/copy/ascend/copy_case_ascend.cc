@@ -149,13 +149,27 @@ DEFINE_COPY_CASE(Host2DeviceCEMultiStreamCase, "host_to_device_ce_multi_stream",
     result.Show("[[ " + Key() + " ]] " + Brief());
 }
 
-DEFINE_COPY_CASE_NO_RUNTIME(
+DEFINE_COPY_CASE_NO_RUNTIME_IO_MODE(
     OneShareHost2AllDeviceCEMultiStreamCase, "one_share_host_to_all_device_ce_multi_stream",
     "memcpy from one shared host to all device with ce using multi stream and fork submit", ctx)
 {
     constexpr size_t defaultStreamCount = 4;
     const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
     CopyResult result;
+    if (ctx.ioMode == CopyIoMode::GLM) {
+        GlmSharedHostRegion srcRegion{"one_share_host_to_all_device_ce_multi_stream", ctx.num};
+        result.Push(ascend_copy::RunForkedCopyBatch(
+            ctx, srcRegion.Name(), "acl::device::all",
+            "CE-MS" + std::to_string(streamCount) + "-FORK-GLM", [&](size_t device) {
+                GlmSharedHostCopyBuffer srcBuffer{srcRegion.ShmName(), device, ctx.num};
+                GlmDeviceCopyBuffer dstBuffer{device, ctx.num};
+                H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};
+                return instance.DoCopy(&srcBuffer, &dstBuffer);
+            }));
+        result.Show("[[ " + Key() + " ]] " + Brief());
+        return;
+    }
+
     SharedHostRegion srcRegion{"one_share_host_to_all_device_ce_multi_stream", 0, ctx.size,
                                ctx.num};
     result.Push(ascend_copy::RunForkedCopyBatch(

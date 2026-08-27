@@ -92,6 +92,37 @@ bool ValidateFftsDirectPatternedBuffer(const CopyBuffer& buffer)
     return true;
 }
 
+void InitializeFftsDirectGlmPatternedBuffer(const GlmIoCopyBuffer& buffer)
+{
+    for (size_t task = 0; task < buffer.Number(); ++task) {
+        for (size_t io = 0; io < GlmIoCopyBuffer::IoCount(); ++io) {
+            const auto pattern =
+                MakeFftsDirectPattern(task * GlmIoCopyBuffer::IoCount() + io, buffer.IoSize(io));
+            std::memcpy(buffer.IoAt(task, io), pattern.data(), pattern.size());
+        }
+    }
+}
+
+bool ValidateFftsDirectGlmPatternedBuffer(const GlmIoCopyBuffer& buffer)
+{
+    ASCEND_ASSERT(aclrtSetDevice(buffer.Device()));
+    for (size_t task = 0; task < buffer.Number(); ++task) {
+        for (size_t io = 0; io < GlmIoCopyBuffer::IoCount(); ++io) {
+            const auto size = buffer.IoSize(io);
+            std::vector<uint8_t> actual(size);
+            ASCEND_ASSERT(aclrtMemcpy(actual.data(), actual.size(), buffer.IoAt(task, io), size,
+                                      ACL_MEMCPY_DEVICE_TO_HOST));
+            const auto expected =
+                MakeFftsDirectPattern(task * GlmIoCopyBuffer::IoCount() + io, size);
+            if (actual.size() != expected.size() ||
+                std::memcmp(actual.data(), expected.data(), expected.size()) != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void ValidateFftsDirectDeviceBufferIfEnabled(const CopyBuffer& buffer, bool enabled)
 {
     if (enabled) { ASSERT(ValidateFftsDirectPatternedBuffer(buffer)); }
@@ -114,12 +145,20 @@ size_t FftsDirectStreamCount(const CopyCase::Context& ctx)
 {
     constexpr size_t defaultStreamCount = 1;
     const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
-    if (streamCount > 1 && ctx.frags == 0) {
+    if (streamCount > 1 && ctx.frags == 0 && ctx.ioMode == CopyIoMode::UNIFORM) {
         std::cerr << "FFTS direct H2D multi-stream requires --frags so -n denotes the number "
                      "of independently scheduled IO/tasks.\n";
         std::exit(EXIT_FAILURE);
     }
     return streamCount;
+}
+
+std::string FftsDirectMethodName(const CopyCase::Context& ctx, size_t streamCount)
+{
+    auto name = "ffts-direct-h2d-" + std::to_string(streamCount) + "s";
+    if (ctx.lanes > 0) { name += "-L" + std::to_string(ctx.lanes); }
+    if (ctx.ioMode == CopyIoMode::GLM) { name += "-GLM"; }
+    return name;
 }
 
 }  // namespace
@@ -133,7 +172,7 @@ DEFINE_COPY_CASE_NO_RUNTIME(
     const auto streamCount = FftsDirectStreamCount(ctx);
     result.Push(ascend_copy::RunForkedCopyBatch(
         ctx, "acl::host_mapped::all", "acl::device::all",
-        "ffts-direct-h2d-" + std::to_string(streamCount) + "s", [&](size_t device) {
+        FftsDirectMethodName(ctx, streamCount), [&](size_t device) {
             const auto fragments = FftsDirectTotalFragments(ctx);
             FftsMappedHostCopyBuffer srcBuffer{device, ctx.size, fragments};
             DeviceCopyBuffer dstBuffer{device, ctx.size, fragments};
@@ -141,7 +180,7 @@ DEFINE_COPY_CASE_NO_RUNTIME(
             ResetFftsDirectDeviceBuffer(dstBuffer);
 
             FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount,
-                                               ctx.syncMode};
+                                               ctx.syncMode, ctx.lanes};
             auto childResult = instance.DoCopy(&srcBuffer, &dstBuffer);
             ValidateFftsDirectDeviceBufferIfEnabled(dstBuffer, validationEnabled);
             return childResult;
@@ -161,7 +200,7 @@ DEFINE_COPY_CASE_NO_RUNTIME(
     const auto streamCount = FftsDirectStreamCount(ctx);
     result.Push(ascend_copy::RunForkedCopyBatch(
         ctx, "acl::odirect_mmap::all", "acl::device::all",
-        "ffts-direct-h2d-" + std::to_string(streamCount) + "s", [&](size_t device) {
+        FftsDirectMethodName(ctx, streamCount), [&](size_t device) {
             const auto fragments = FftsDirectTotalFragments(ctx);
             FftsODirectMappedHostCopyBuffer srcBuffer{device, ctx.size, fragments};
             DeviceCopyBuffer dstBuffer{device, ctx.size, fragments};
@@ -169,7 +208,7 @@ DEFINE_COPY_CASE_NO_RUNTIME(
             ResetFftsDirectDeviceBuffer(dstBuffer);
 
             FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount,
-                                               ctx.syncMode};
+                                               ctx.syncMode, ctx.lanes};
             auto childResult = instance.DoCopy(&srcBuffer, &dstBuffer);
             ValidateFftsDirectDeviceBufferIfEnabled(dstBuffer, validationEnabled);
             return childResult;
@@ -178,29 +217,54 @@ DEFINE_COPY_CASE_NO_RUNTIME(
     result.Show("[[ " + Key() + " ]] " + Brief());
 }
 
-DEFINE_COPY_CASE_NO_RUNTIME(OneShareHost2AllDeviceFftsDirectH2DCase,
-                            "one_share_host_to_all_device_ffts_direct_h2d",
-                            "copy one shared mapped host buffer to all device buffers with ffts "
-                            "direct h2d using fork submit",
-                            ctx)
+DEFINE_COPY_CASE_NO_RUNTIME_IO_MODE(OneShareHost2AllDeviceFftsDirectH2DCase,
+                                    "one_share_host_to_all_device_ffts_direct_h2d",
+                                    "copy one shared mapped host buffer to all device buffers "
+                                    "with ffts direct h2d using fork submit",
+                                    ctx)
 {
     CopyResult result;
     const bool validationEnabled = FftsDirectValidationEnabled();
     const auto streamCount = FftsDirectStreamCount(ctx);
+    if (ctx.ioMode == CopyIoMode::GLM) {
+        if (ctx.frags != 0) {
+            std::cerr << "--io-mode glm fixes each task to 128K/16K/32K; do not use --frags.\n";
+            std::exit(EXIT_FAILURE);
+        }
+        GlmSharedHostRegion srcRegion{"one_share_host_to_all_device_ffts_direct_h2d", ctx.num};
+        InitializeFftsDirectGlmPatternedBuffer(srcRegion);
+        result.Push(ascend_copy::RunForkedCopyBatch(
+            ctx, srcRegion.Name(), "acl::device::all", FftsDirectMethodName(ctx, streamCount),
+            [&](size_t device) {
+                GlmSharedHostCopyBuffer srcBuffer{srcRegion.ShmName(), device, ctx.num};
+                GlmDeviceCopyBuffer dstBuffer{device, ctx.num};
+                FftsDirectH2DCopyInstance instance{ctx.iter, false, 0, streamCount, ctx.syncMode,
+                                                   ctx.lanes};
+                auto childResult = instance.DoCopy(&srcBuffer, &dstBuffer);
+                if (validationEnabled) {
+                    ASSERT(ValidateFftsDirectGlmPatternedBuffer(dstBuffer));
+                }
+                return childResult;
+            }));
+        PrintFftsDirectValidationPassIfEnabled(*this, validationEnabled);
+        result.Show("[[ " + Key() + " ]] " + Brief());
+        return;
+    }
+
     const auto fragments = FftsDirectTotalFragments(ctx);
     FftsMappedSharedHostRegion srcRegion{"one_share_host_to_all_device_ffts_direct_h2d", 0,
                                          ctx.size, fragments};
     InitializeFftsDirectHostPatternedBuffer(srcRegion);
     result.Push(ascend_copy::RunForkedCopyBatch(
         ctx, srcRegion.Name(), "acl::device::all",
-        "ffts-direct-h2d-" + std::to_string(streamCount) + "s", [&](size_t device) {
+        FftsDirectMethodName(ctx, streamCount), [&](size_t device) {
             FftsMappedSharedHostCopyBuffer srcBuffer{srcRegion.ShmName(), srcRegion.MappedBytes(),
                                                      device, ctx.size, fragments};
             DeviceCopyBuffer dstBuffer{device, ctx.size, fragments};
             ResetFftsDirectDeviceBuffer(dstBuffer);
 
             FftsDirectH2DCopyInstance instance{ctx.iter, false, ctx.frags, streamCount,
-                                               ctx.syncMode};
+                                               ctx.syncMode, ctx.lanes};
             auto childResult = instance.DoCopy(&srcBuffer, &dstBuffer);
             ValidateFftsDirectDeviceBufferIfEnabled(dstBuffer, validationEnabled);
             return childResult;

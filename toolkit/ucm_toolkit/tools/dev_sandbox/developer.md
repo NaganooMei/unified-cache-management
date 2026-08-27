@@ -90,7 +90,7 @@ ucm-toolkit run dev-sandbox --help
 
 ### 快捷模式（model-type / iodirect / sdma）
 
-如果不关心底层 `copy` 的 case 名称，可以直接用 `--model-type`、`--iodirect`、`--sdma` 三个语义参数，通过一张映射表选到对应的 Ascend 拷贝接口；这三个参数之后的其余参数会原样透传给底层 `copy` 二进制（即 `copy` 的全部原生参数 `-s`/`-n`/`-i`/`-d`/`-f`/`-S`/`--sync-mode`，见下文 [`### copy`](#copy) 一节）。原生的 `copy`/`trans`/`aio` 子命令用法不受影响。
+如果不关心底层 `copy` 的 case 名称，可以直接用 `--model-type`、`--iodirect`、`--sdma` 三个语义参数，通过一张映射表选到对应的 Ascend 拷贝接口；这三个参数之后的其余参数会原样透传给底层 `copy` 二进制（即 `copy` 的全部原生参数 `-s`/`-n`/`-i`/`-d`/`-f`/`-S`/`-L`/`--io-mode`/`--sync-mode`，见下文 [`### copy`](#copy) 一节）。原生的 `copy`/`trans`/`aio` 子命令用法不受影响。
 
 ```bash
 ucm-toolkit run dev-sandbox \
@@ -129,6 +129,7 @@ ucm-toolkit run dev-sandbox copy -t host_to_device_ce -s 16K -n 512 -i 128 -d 8
 ucm-toolkit run dev-sandbox copy -t host_to_device_ce -t device_to_host_ce -s 1M
 ucm-toolkit run dev-sandbox copy -t all_odirect_host_to_all_device_ce_multi_stream -S 4 --sync-mode stream
 ucm-toolkit run dev-sandbox copy -t all_odirect_host_to_all_device_ffts_direct_h2d -n 100 -f 3 -S 1
+ucm-toolkit run dev-sandbox copy -t one_share_host_to_all_device_ffts_direct_h2d --io-mode glm -n 500 -d 16 -S 4 -L 3
 ```
 
 参数：
@@ -140,11 +141,15 @@ ucm-toolkit run dev-sandbox copy -t all_odirect_host_to_all_device_ffts_direct_h
 | `-n <count>` | `8` | 每个 buffer 中的数据块数量。 |
 | `-f`, `--frags`, `-frags <count>` | `0` | FFTS direct H2D 的每个 IO/task fragment 数。设置后 `-n` 表示 IO/task 数。 |
 | `-S`, `--streams`, `--stream-count <count>` | CE `4`；FFTS `1` | 每张卡的 Ascend multi-stream CE 或 FFTS direct H2D stream 数。仅影响对应的 Ascend case。 |
+| `-L`, `--lanes`, `--lane-count <count>` | `8` | FFTS direct H2D 单次 launch 的 ready lane 上限，范围 1～128。省略时可由 `FFTS_MAX_READY_LANES` 设置。 |
+| `--io-mode <mode>` | `uniform` | IO 布局。`glm` 在 shared-memory CE/FFTS H2D 中令每个 task 固定包含 128K、16K、32K 三个 IO。 |
 | `--sync-mode <mode>` | `event` | Ascend multi-stream CE 和 FFTS direct H2D 的完成同步方式；`mode` 可取 `event` 或 `stream`。 |
 | `-i <count>` | `128` | 迭代次数。 |
 | `-d <count>` | `8` | 设备数量。 |
 
-FFTS direct H2D 使用多 stream 时必须同时设置 `--frags`。此时 `-n` 是可独立调度的 IO/task 数，task 按 stream 轮转，`--frags` 是每个 task 的 fragment 数；实际创建的 stream 数不会超过 task 数。省略 `--streams` 时保留各 case 原有默认值。
+`uniform` IO 模式下，FFTS direct H2D 使用多 stream 时必须同时设置 `--frags`。此时 `-n` 是可独立调度的 IO/task 数，task 按 stream 轮转，`--frags` 是每个 task 的 fragment 数；实际创建的 stream 数不会超过 task 数。省略 `--streams` 时保留各 case 原有默认值。
+
+`--io-mode glm` 不使用 `-s` 和 `--frags`：`-n` 直接表示 task 数。CE 将一个 task 的三个 IO 放在同一个 stream；FFTS 为一个 task 构造三个 SDMA context，并只执行一次 launch。`--lanes 1/2/3` 分别形成 1/2/3 条 ready dependency lane；大于 3 时有效 lane 仍为 3。
 
 `--sync-mode event` 保留 Event 汇聚行为；`--sync-mode stream` 依次调用每个 stream 的 `aclrtSynchronizeStream`，可用于对比两种完成同步方式的开销。
 
