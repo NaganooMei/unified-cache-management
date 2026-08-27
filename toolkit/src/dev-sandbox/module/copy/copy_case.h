@@ -44,6 +44,7 @@ public:
         size_t lanes;
         CopyIoMode ioMode;
         CopySyncMode syncMode;
+        size_t warmup;
         size_t iter;
         size_t nDevice;
     };

@@ -28,6 +28,7 @@ cmake --build build -j
 -L/--lanes/--lane-count <n>  FFTS 单次 launch 的 ready lane 上限，默认 8
 --io-mode <uniform|glm>  IO 布局；glm 为每个 task 固定 128K/16K/32K
 --sync-mode <event|stream>  多 stream 完成同步方式，默认 event
+-w/--warmup <count>  预热轮数，默认 3
 -i <count>  迭代次数，默认 128
 -d <count>  设备数量，默认 8
 ```
@@ -58,7 +59,7 @@ Ascend multi-stream CE 和 FFTS direct H2D case 的完成同步阶段。
 
 # 16 卡 GLM shared-memory：每个 FFTS launch 含 128K/16K/32K，3 个 ready lane
 ./build/module/copy/copy -t one_share_host_to_all_device_ffts_direct_h2d \
-  --io-mode glm -n 500 -i 128 -d 16 -S 4 -L 3
+  --io-mode glm -n 500 -w 12 -i 128 -d 16 -S 4 -L 3
 ```
 
 查看当前后端可用 case：

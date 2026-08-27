@@ -7,13 +7,14 @@ SYNC_MODE="${SYNC_MODE:-event}"
 readonly DEVICE_COUNT=16
 readonly TASK_COUNT="${TASK_COUNT:-500}"
 readonly ITERATIONS="${ITERATIONS:-128}"
+readonly WARMUP_ITERATIONS="${WARMUP_ITERATIONS:-12}"
 readonly IO_MODE="glm"
 readonly IO_SIZES="128K,16K,32K"
 readonly TASK_BYTES=$(((128 + 16 + 32) * 1024))
 readonly UCM_TOOLKIT_BIN="${UCM_TOOLKIT_BIN:-ucm-toolkit}"
 
 read -r -a STREAM_COUNT_VALUES <<< "${STREAM_COUNTS:-1 4 8 16 32 64 128}"
-read -r -a LANE_COUNT_VALUES <<< "${LANE_COUNTS:-1 2 3}"
+read -r -a LANE_COUNT_VALUES <<< "${LANE_COUNTS:-1 3 8}"
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
@@ -30,9 +31,10 @@ usage()
     printf '\n'
     printf 'Environment overrides:\n'
     printf '  STREAM_COUNTS="1 4 8 ..."  Stream values (default: 1 4 8 16 32 64 128)\n'
-    printf '  LANE_COUNTS="1 2 3"        FFTS ready-lane values (default: 1 2 3)\n'
+    printf '  LANE_COUNTS="1 3 8"        FFTS ready-lane values (default: 1 3 8)\n'
     printf '  TASK_COUNT=<n>              GLM task count per device (default: 500)\n'
     printf '  ITERATIONS=<n>              Measured iterations (default: 128)\n'
+    printf '  WARMUP_ITERATIONS=<n>       Warmup iterations (default: 12)\n'
     printf '  LOG_FILE=<path>             Output log path\n'
 }
 
@@ -115,6 +117,7 @@ run_one()
         --io-mode "${IO_MODE}"
         -n "${TASK_COUNT}"
         -i "${ITERATIONS}"
+        --warmup "${WARMUP_ITERATIONS}"
         -d "${DEVICE_COUNT}"
         -S "${stream_count}"
         --sync-mode "${SYNC_MODE}"
@@ -131,7 +134,8 @@ run_one()
         "${TASK_COUNT}"
     printf 'requested_streams=%s effective_streams=%s requested_lanes=%s effective_lanes=%s ' \
         "${stream_count}" "${effective_streams}" "${lane_count}" "${effective_lanes}"
-    printf 'sync_mode=%s start=%s\n' "${SYNC_MODE}" "$(date --iso-8601=seconds)"
+    printf 'sync_mode=%s warmup_iterations=%s start=%s\n' \
+        "${SYNC_MODE}" "${WARMUP_ITERATIONS}" "$(date --iso-8601=seconds)"
     printf 'task_bytes=%s bytes_per_device=%s aggregate_bytes=%s\n' \
         "${TASK_BYTES}" "$((TASK_BYTES * TASK_COUNT))" \
         "$((TASK_BYTES * TASK_COUNT * DEVICE_COUNT))"
@@ -156,6 +160,7 @@ main()
     validate_positive_values LANE_COUNTS "${LANE_COUNT_VALUES[@]}" || return $?
     validate_positive_values TASK_COUNT "${TASK_COUNT}" || return $?
     validate_positive_values ITERATIONS "${ITERATIONS}" || return $?
+    validate_positive_values WARMUP_ITERATIONS "${WARMUP_ITERATIONS}" || return $?
 
     mkdir -p -- "$(dirname -- "${LOG_FILE}")"
     exec > >(tee -a "${LOG_FILE}") 2>&1
@@ -170,9 +175,9 @@ main()
     printf 'run_id=%s\n' "${RUN_ID}"
     printf 'repo_root=%s\n' "${REPO_ROOT}"
     printf 'log_file=%s\n' "${LOG_FILE}"
-    printf 'devices=%s io_mode=%s io_sizes=%s task_bytes=%s tasks_per_device=%s iterations=%s\n' \
+    printf 'devices=%s io_mode=%s io_sizes=%s task_bytes=%s tasks_per_device=%s iterations=%s warmup_iterations=%s\n' \
         "${DEVICE_COUNT}" "${IO_MODE}" "${IO_SIZES}" "${TASK_BYTES}" "${TASK_COUNT}" \
-        "${ITERATIONS}"
+        "${ITERATIONS}" "${WARMUP_ITERATIONS}"
     printf 'streams=%s\n' "${STREAM_COUNT_VALUES[*]}"
     printf 'ffts_lanes=%s\n' "${LANE_COUNT_VALUES[*]}"
     printf 'sync_mode=%s\n' "${SYNC_MODE}"

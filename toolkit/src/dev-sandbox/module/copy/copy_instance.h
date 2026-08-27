@@ -33,7 +33,9 @@
 class CopyInstance {
 protected:
     size_t iterations_;
+    size_t warmupIterations_;
     bool affinitySrc_;
+    inline static size_t configuredWarmupIterations_ = 3;
 
     virtual size_t AffinityDeviceId(const CopyBuffer& src, const CopyBuffer& dst) const
     {
@@ -49,11 +51,18 @@ protected:
 
 public:
     CopyInstance(size_t iterations, bool affinitySrc)
-        : iterations_(iterations), affinitySrc_(affinitySrc)
+        : iterations_(iterations),
+          warmupIterations_(configuredWarmupIterations_),
+          affinitySrc_(affinitySrc)
     {
     }
 
     virtual ~CopyInstance() = default;
+
+    static void SetWarmupIterations(size_t warmupIterations)
+    {
+        configuredWarmupIterations_ = warmupIterations;
+    }
 
     virtual std::string Name() const = 0;
 
@@ -62,8 +71,7 @@ public:
     {
         Prepare(srcBuffers, dstBuffers);
 
-        constexpr int warmup = 3;
-        for (int i = 0; i < warmup; i++) { DoCopyOnce(); }
+        for (size_t i = 0; i < warmupIterations_; i++) { DoCopyOnce(); }
 
         std::vector<size_t> submitCostArray;
         std::vector<size_t> copyCostArray;

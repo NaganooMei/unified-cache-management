@@ -25,6 +25,7 @@
 #include <fmt/format.h>
 #include <unordered_set>
 #include "copy_case.h"
+#include "copy_instance.h"
 #include "copy_runtime.h"
 
 struct ArgsParser {
@@ -37,6 +38,7 @@ struct ArgsParser {
         .lanes = 0,
         .ioMode = CopyIoMode::UNIFORM,
         .syncMode = CopySyncMode::EVENT,
+        .warmup = 3,
         .iter = 128,
         .nDevice = 8};
 
@@ -63,6 +65,7 @@ struct ArgsParser {
         fmt::println("  --sync-mode <mode>");
         fmt::println("                   Multi-stream completion mode: event or stream");
         fmt::println("                   (default: event)");
+        fmt::println("  -w/--warmup <n>  Warmup iteration count (default: 3)");
         fmt::println("  -i <count>       Iteration count (default: 128)");
         fmt::println("  -d <count>       Number of devices (default: 8)");
     }
@@ -139,6 +142,8 @@ struct ArgsParser {
                 ctx.ioMode = ParseIoMode(argv[++i]);
             } else if (arg == "--sync-mode" && i + 1 < argc) {
                 ctx.syncMode = ParseSyncMode(argv[++i]);
+            } else if ((arg == "-w" || arg == "--warmup") && i + 1 < argc) {
+                ctx.warmup = ParseUnsigned(argv[++i], "Invalid warmup iteration count.");
             } else if (arg == "-i" && i + 1 < argc) {
                 ctx.iter = ParseUnsigned(argv[++i], "Invalid iteration count.");
             } else if (arg == "-d" && i + 1 < argc) {
@@ -154,6 +159,7 @@ struct ArgsParser {
 int main(int argc, char const* argv[])
 {
     ArgsParser args{argc, argv};
+    CopyInstance::SetWarmupIterations(args.ctx.warmup);
     if (args.names.empty()) {
         ArgsParser::Help(argv[0]);
         return -1;

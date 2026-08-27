@@ -90,7 +90,7 @@ ucm-toolkit run dev-sandbox --help
 
 ### 快捷模式（model-type / iodirect / sdma）
 
-如果不关心底层 `copy` 的 case 名称，可以直接用 `--model-type`、`--iodirect`、`--sdma` 三个语义参数，通过一张映射表选到对应的 Ascend 拷贝接口；这三个参数之后的其余参数会原样透传给底层 `copy` 二进制（即 `copy` 的全部原生参数 `-s`/`-n`/`-i`/`-d`/`-f`/`-S`/`-L`/`--io-mode`/`--sync-mode`，见下文 [`### copy`](#copy) 一节）。原生的 `copy`/`trans`/`aio` 子命令用法不受影响。
+如果不关心底层 `copy` 的 case 名称，可以直接用 `--model-type`、`--iodirect`、`--sdma` 三个语义参数，通过一张映射表选到对应的 Ascend 拷贝接口；这三个参数之后的其余参数会原样透传给底层 `copy` 二进制（即 `copy` 的全部原生参数 `-s`/`-n`/`-i`/`-w`/`-d`/`-f`/`-S`/`-L`/`--io-mode`/`--sync-mode`，见下文 [`### copy`](#copy) 一节）。原生的 `copy`/`trans`/`aio` 子命令用法不受影响。
 
 ```bash
 ucm-toolkit run dev-sandbox \
@@ -144,6 +144,7 @@ ucm-toolkit run dev-sandbox copy -t one_share_host_to_all_device_ffts_direct_h2d
 | `-L`, `--lanes`, `--lane-count <count>` | `8` | FFTS direct H2D 单次 launch 的 ready lane 上限，范围 1～128。省略时可由 `FFTS_MAX_READY_LANES` 设置。 |
 | `--io-mode <mode>` | `uniform` | IO 布局。`glm` 在 shared-memory CE/FFTS H2D 中令每个 task 固定包含 128K、16K、32K 三个 IO。 |
 | `--sync-mode <mode>` | `event` | Ascend multi-stream CE 和 FFTS direct H2D 的完成同步方式；`mode` 可取 `event` 或 `stream`。 |
+| `-w`, `--warmup <count>` | `3` | 正式采样前执行的预热轮数。 |
 | `-i <count>` | `128` | 迭代次数。 |
 | `-d <count>` | `8` | 设备数量。 |
 

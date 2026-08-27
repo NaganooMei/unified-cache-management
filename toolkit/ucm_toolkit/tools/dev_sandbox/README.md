@@ -97,13 +97,15 @@ ucm-toolkit run dev-sandbox --model-type <gqa|mla> --iodirect <true|false> --sdm
 | `-L` | FFTS 单次 launch 的 ready lane 上限 | `8` | `-L 3` |
 | `--io-mode` | `uniform` 或 GLM `128K/16K/32K` 三段 IO | `uniform` | `--io-mode glm` |
 | `--sync-mode` | 多 stream 完成同步方式：`event` 或 `stream` | `event` | `--sync-mode stream` |
+| `-w` / `--warmup` | 正式计时前的预热轮数 | `3` | `--warmup 12` |
 
 `event` 将其他 stream 的结束 Event 汇聚到主 stream；`stream` 由 Host 依次同步各 stream。该参数会原样传给底层 `copy`。
 
 `--io-mode glm` 当前用于 shared-memory CE/FFTS H2D：`-n` 是 task 数，每个 task
 固定包含 128K、16K、32K 三个 IO。FFTS 一次 launch 携带这三个 IO，因此有效 lane
 数最多为 3。16 卡 shared CE/FFTS stream/lane 扫描可运行
-`toolkit/scripts/run_ascend_h2d_glm_shared_stream_lane_sweep.sh`。
+`toolkit/scripts/run_ascend_h2d_glm_shared_stream_lane_sweep.sh`；该脚本默认扫描 lane
+`1/3/8` 并预热 12 轮，其中 lane 8 在每次只有三个 context 的 GLM launch 中有效值为 3。
 
 ## 示例
 
