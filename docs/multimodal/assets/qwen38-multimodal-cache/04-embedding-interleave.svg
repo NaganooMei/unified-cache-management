@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="720" viewBox="0 0 1440 720" role="img" aria-labelledby="title desc">
+  <title id="title">视觉Embedding替换占位符并保持原始顺序</title>
+  <desc id="desc">文本和媒体占位符先组成Prompt，Vision Encoder输出随后按媒体所在位置替换占位区，最终形成宽度5120的统一Embedding序列。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+    <style>
+      text { font-family: Arial, 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 18px; fill: #475569; }
+      .label { font-size: 18px; font-weight: 700; }
+      .small { font-size: 14px; fill: #475569; }
+      .tiny { font-size: 12px; fill: #334155; }
+      .flow { fill: none; stroke: #475569; stroke-width: 3; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1440" height="720" fill="#f8fafc"/>
+  <text x="72" y="58" class="title">不是“拼到末尾”：视觉 Embedding 回填到原占位位置</text>
+  <text x="72" y="92" class="subtitle">横向宽度用于帮助理解顺序，不按真实token数比例绘制</text>
+
+  <text x="72" y="150" class="label">① Processor生成的Prompt结构</text>
+  <g transform="translate(72,174)" filter="url(#shadow)">
+    <rect width="190" height="72" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="95" y="32" text-anchor="middle" class="label">系统词 + 文本A</text><text x="95" y="55" text-anchor="middle" class="small">text token IDs</text>
+    <rect x="190" width="240" height="72" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/>
+    <text x="310" y="32" text-anchor="middle" class="label">图片1占位区</text><text x="310" y="55" text-anchor="middle" class="small">Nvis₁ = 16384</text>
+    <rect x="430" width="130" height="72" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="495" y="42" text-anchor="middle" class="label">文本B</text>
+    <rect x="560" width="180" height="72" fill="#ffedd5" stroke="#ea580c" stroke-width="2"/>
+    <text x="650" y="32" text-anchor="middle" class="label">图片2占位区</text><text x="650" y="55" text-anchor="middle" class="small">Nvis₂ = 4096</text>
+    <rect x="740" width="130" height="72" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="805" y="42" text-anchor="middle" class="label">文本C</text>
+    <rect x="870" width="190" height="72" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+    <text x="965" y="32" text-anchor="middle" class="label">视频占位区</text><text x="965" y="55" text-anchor="middle" class="small">Nvisᵥ = 4096</text>
+    <rect x="1060" width="236" height="72" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="1178" y="32" text-anchor="middle" class="label">最终问题</text><text x="1178" y="55" text-anchor="middle" class="small">text token IDs</text>
+  </g>
+
+  <text x="72" y="326" class="label">② Vision Encoder独立返回每个媒体项的结果</text>
+  <g transform="translate(230,352)">
+    <rect width="280" height="82" rx="14" fill="#ccfbf1" stroke="#0f766e" stroke-width="2" filter="url(#shadow)"/>
+    <text x="140" y="34" text-anchor="middle" class="label">Image 1 Embeddings</text>
+    <text x="140" y="61" text-anchor="middle" class="small">[16384, 5120]</text>
+  </g>
+  <g transform="translate(580,352)">
+    <rect width="280" height="82" rx="14" fill="#ffedd5" stroke="#ea580c" stroke-width="2" filter="url(#shadow)"/>
+    <text x="140" y="34" text-anchor="middle" class="label">Image 2 Embeddings</text>
+    <text x="140" y="61" text-anchor="middle" class="small">[4096, 5120]</text>
+  </g>
+  <g transform="translate(930,352)">
+    <rect width="280" height="82" rx="14" fill="#ede9fe" stroke="#7c3aed" stroke-width="2" filter="url(#shadow)"/>
+    <text x="140" y="34" text-anchor="middle" class="label">Video Embeddings</text>
+    <text x="140" y="61" text-anchor="middle" class="small">[4096, 5120]</text>
+  </g>
+
+  <path class="flow" d="M370 434 C370 474 382 468 382 504"/>
+  <path class="flow" d="M720 434 C720 474 722 468 722 504"/>
+  <path class="flow" d="M1070 434 C1070 474 1037 468 1037 504"/>
+
+  <text x="72" y="510" class="label">③ 按占位位置回填后的统一序列</text>
+  <g transform="translate(72,534)" filter="url(#shadow)">
+    <rect width="190" height="80" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="95" y="34" text-anchor="middle" class="label">文本Embedding</text><text x="95" y="59" text-anchor="middle" class="tiny">[..., 5120]</text>
+    <rect x="190" width="240" height="80" fill="#5eead4" stroke="#0f766e" stroke-width="2"/>
+    <text x="310" y="34" text-anchor="middle" class="label">Image 1</text><text x="310" y="59" text-anchor="middle" class="tiny">[16384,5120]</text>
+    <rect x="430" width="130" height="80" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="495" y="48" text-anchor="middle" class="label">文本</text>
+    <rect x="560" width="180" height="80" fill="#fdba74" stroke="#ea580c" stroke-width="2"/>
+    <text x="650" y="34" text-anchor="middle" class="label">Image 2</text><text x="650" y="59" text-anchor="middle" class="tiny">[4096,5120]</text>
+    <rect x="740" width="130" height="80" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="805" y="48" text-anchor="middle" class="label">文本</text>
+    <rect x="870" width="190" height="80" fill="#c4b5fd" stroke="#7c3aed" stroke-width="2"/>
+    <text x="965" y="34" text-anchor="middle" class="label">Video</text><text x="965" y="59" text-anchor="middle" class="tiny">[4096,5120]</text>
+    <rect x="1060" width="236" height="80" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="1178" y="34" text-anchor="middle" class="label">问题Embedding</text><text x="1178" y="59" text-anchor="middle" class="tiny">[..., 5120]</text>
+  </g>
+
+  <rect x="424" y="646" width="592" height="48" rx="12" fill="#ffffff" stroke="#334155" stroke-width="2"/>
+  <text x="720" y="677" text-anchor="middle" class="label">merged_inputs_embeds = [S, 5120] → Language Transformer</text>
+</svg>

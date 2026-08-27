@@ -1,5 +1,7 @@
 # Qwen3.8 多模态推理与三级缓存可视化文档大纲
 
+> 可视化成稿：[Qwen3.8 多模态推理与缓存复用图解](qwen38_multimodal_inference_cache_visual_guide.md)
+
 ## 一、文档定位
 
 ### 1.1 目标

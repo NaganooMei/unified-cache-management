@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1040" viewBox="0 0 1440 1040" role="img" aria-labelledby="title desc">
+  <title id="title">Qwen3.8多模态推理端到端泳道图</title>
+  <desc id="desc">图从客户端原始内容开始，经过CPU多模态预处理、NPU视觉编码，再与文本嵌入合并进入语言模型，最后Prefill和Decode输出答案。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+    <style>
+      text { font-family: Arial, 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 18px; fill: #475569; }
+      .lane { font-size: 20px; font-weight: 700; }
+      .label { font-size: 18px; font-weight: 700; }
+      .detail { font-size: 14px; fill: #475569; }
+      .tag { font-size: 13px; font-weight: 700; }
+      .node { filter: url(#shadow); stroke-width: 2; }
+      .flow { fill: none; stroke: #475569; stroke-width: 3; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1440" height="1040" fill="#f8fafc"/>
+  <text x="72" y="58" class="title">从原始消息到回答：四条执行泳道</text>
+  <text x="72" y="92" class="subtitle">CPU负责解析与预处理，Vision Encoder和Language Model在NPU上完成主要计算</text>
+
+  <rect x="48" y="124" width="1344" height="174" rx="20" fill="#f1f5f9"/>
+  <rect x="48" y="316" width="1344" height="236" rx="20" fill="#eff6ff"/>
+  <rect x="48" y="570" width="1344" height="182" rx="20" fill="#f0fdfa"/>
+  <rect x="48" y="770" width="1344" height="222" rx="20" fill="#f5f3ff"/>
+
+  <text x="76" y="160" class="lane">① 客户端 / API</text>
+  <text x="76" y="352" class="lane">② MM Processor · CPU</text>
+  <text x="76" y="606" class="lane">③ Vision Encoder · NPU</text>
+  <text x="76" y="806" class="lane">④ Language Model · NPU</text>
+
+  <g transform="translate(255,158)">
+    <rect class="node" width="330" height="100" rx="16" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="165" y="34" text-anchor="middle" class="label">OpenAI Chat 请求</text>
+    <text x="165" y="62" text-anchor="middle" class="detail">Text A → Image 1 → Text B → Image 2</text>
+    <text x="165" y="84" text-anchor="middle" class="detail">→ Text C → Video → Question</text>
+  </g>
+  <g transform="translate(850,158)">
+    <rect class="node" width="300" height="100" rx="16" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="150" y="39" text-anchor="middle" class="label">解析媒体与文本</text>
+    <text x="150" y="69" text-anchor="middle" class="detail">保留每个内容项的原始位置</text>
+  </g>
+  <path class="flow" d="M585 208 H840"/>
+
+  <g transform="translate(184,382)">
+    <rect class="node" width="250" height="126" rx="16" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="125" y="36" text-anchor="middle" class="label">Tokenizer</text>
+    <text x="125" y="66" text-anchor="middle" class="detail">文本 → token IDs</text>
+    <text x="125" y="94" text-anchor="middle" class="detail">长度：Ntext</text>
+  </g>
+  <g transform="translate(590,372)">
+    <rect class="node" width="300" height="146" rx="16" fill="#ffffff" stroke="#2563eb"/>
+    <text x="150" y="32" text-anchor="middle" class="label">图片 / 视频预处理</text>
+    <text x="150" y="61" text-anchor="middle" class="detail">Decode → Resize → Normalize</text>
+    <text x="150" y="85" text-anchor="middle" class="detail">→ Patchify</text>
+    <text x="150" y="113" text-anchor="middle" class="detail">pixel_values [Npatch, 1536]</text>
+    <text x="150" y="135" text-anchor="middle" class="detail">grid_thw [Nitem, 3]</text>
+  </g>
+  <g transform="translate(1044,382)">
+    <rect class="node" width="250" height="126" rx="16" fill="#fff7ed" stroke="#ea580c"/>
+    <text x="125" y="36" text-anchor="middle" class="label">占位区展开</text>
+    <text x="125" y="66" text-anchor="middle" class="detail">每个媒体项对应</text>
+    <text x="125" y="90" text-anchor="middle" class="detail">Nvis个视觉位置</text>
+  </g>
+  <path class="flow" d="M1000 258 C1000 316 309 320 309 372"/>
+  <path class="flow" d="M1000 258 C1000 324 740 318 740 362"/>
+  <path class="flow" d="M890 445 H1034"/>
+
+  <g transform="translate(386,624)">
+    <rect class="node" width="286" height="88" rx="16" fill="#ccfbf1" stroke="#0f766e"/>
+    <text x="143" y="34" text-anchor="middle" class="label">Patch Embed + ViT</text>
+    <text x="143" y="63" text-anchor="middle" class="detail">[Npatch,1536] → [Npatch,1152]</text>
+  </g>
+  <g transform="translate(828,624)">
+    <rect class="node" width="286" height="88" rx="16" fill="#ccfbf1" stroke="#0f766e"/>
+    <text x="143" y="34" text-anchor="middle" class="label">2×2 Patch Merger</text>
+    <text x="143" y="63" text-anchor="middle" class="detail">→ visual embeddings [Nvis,5120]</text>
+  </g>
+  <path class="flow" d="M740 518 V590 C740 606 529 598 529 614"/>
+  <path class="flow" d="M672 668 H818"/>
+
+  <g transform="translate(194,842)">
+    <rect class="node" width="280" height="108" rx="16" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="140" y="35" text-anchor="middle" class="label">Text Embedding</text>
+    <text x="140" y="65" text-anchor="middle" class="detail">token IDs → [Ntext,5120]</text>
+    <text x="140" y="89" text-anchor="middle" class="tag">蓝色：文本</text>
+  </g>
+  <g transform="translate(580,842)">
+    <rect class="node" width="280" height="108" rx="16" fill="#ffffff" stroke="#7c3aed"/>
+    <text x="140" y="35" text-anchor="middle" class="label">Embedding 替换</text>
+    <text x="140" y="65" text-anchor="middle" class="detail">视觉Embedding填入原占位位置</text>
+    <text x="140" y="89" text-anchor="middle" class="detail">merged [S,5120]</text>
+  </g>
+  <g transform="translate(966,826)">
+    <rect class="node" width="290" height="140" rx="16" fill="#ede9fe" stroke="#7c3aed"/>
+    <text x="145" y="34" text-anchor="middle" class="label">Language Transformer</text>
+    <text x="145" y="64" text-anchor="middle" class="detail">Prefill：处理统一前缀</text>
+    <text x="145" y="88" text-anchor="middle" class="detail">Decode：逐token生成</text>
+    <text x="145" y="116" text-anchor="middle" class="tag">输出回答</text>
+  </g>
+  <path class="flow" d="M309 508 V832"/>
+  <path class="flow" d="M971 712 V786 C971 808 790 812 790 832"/>
+  <path class="flow" d="M474 896 H570"/>
+  <path class="flow" d="M860 896 H956"/>
+
+  <g transform="translate(1168,592)">
+    <rect width="164" height="52" rx="12" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+    <text x="82" y="23" text-anchor="middle" class="tag">视觉宽度1152</text>
+    <text x="82" y="42" text-anchor="middle" class="tag">投影到LM宽度5120</text>
+  </g>
+</svg>

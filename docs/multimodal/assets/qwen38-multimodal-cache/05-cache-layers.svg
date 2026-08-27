@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="980" viewBox="0 0 1440 980" role="img" aria-labelledby="title desc">
+  <title id="title">多模态推理三级本地缓存和可选外部Encoder Cache</title>
+  <desc id="desc">图沿推理链路展示MM Processor Cache、本地Encoder Cache、KV Prefix Cache和可选外部EC的位置、默认容量、缓存对象与命中依据。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <marker id="arrowBoth" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/></marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+    <style>
+      text { font-family: Arial, 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 18px; fill: #475569; }
+      .head { font-size: 20px; font-weight: 700; }
+      .label { font-size: 17px; font-weight: 700; }
+      .detail { font-size: 14px; fill: #475569; }
+      .small { font-size: 13px; fill: #64748b; }
+      .inverse { fill: #ffffff; }
+      .stage { filter: url(#shadow); stroke-width: 2; }
+      .flow { fill: none; stroke: #475569; stroke-width: 3; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1440" height="980" fill="#f8fafc"/>
+  <text x="72" y="58" class="title">缓存不是一份数据的三级副本，而是三个阶段的复用点</text>
+  <text x="72" y="92" class="subtitle">同一个mm_hash可以贯穿多模态缓存链路，但每一层保存的数据对象不同</text>
+
+  <text x="78" y="150" class="head">执行链路</text>
+  <g transform="translate(72,184)">
+    <rect class="stage" width="240" height="98" rx="18" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="120" y="38" text-anchor="middle" class="label">原始媒体</text>
+    <text x="120" y="66" text-anchor="middle" class="detail">图片 / 视频字节</text>
+  </g>
+  <g transform="translate(394,184)">
+    <rect class="stage" width="240" height="98" rx="18" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="120" y="38" text-anchor="middle" class="label">MM Processor</text>
+    <text x="120" y="66" text-anchor="middle" class="detail">Decode / Resize / Patchify</text>
+  </g>
+  <g transform="translate(716,184)">
+    <rect class="stage" width="240" height="98" rx="18" fill="#ccfbf1" stroke="#0f766e"/>
+    <text x="120" y="38" text-anchor="middle" class="label">Vision Encoder</text>
+    <text x="120" y="66" text-anchor="middle" class="detail">ViT + Patch Merger</text>
+  </g>
+  <g transform="translate(1038,184)">
+    <rect class="stage" width="240" height="98" rx="18" fill="#ede9fe" stroke="#7c3aed"/>
+    <text x="120" y="38" text-anchor="middle" class="label">Language Model</text>
+    <text x="120" y="66" text-anchor="middle" class="detail">Prefill + Decode</text>
+  </g>
+  <path class="flow" d="M312 233 H384"/>
+  <path class="flow" d="M634 233 H706"/>
+  <path class="flow" d="M956 233 H1028"/>
+
+  <g transform="translate(310,360)">
+    <rect width="360" height="310" rx="22" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5" filter="url(#shadow)"/>
+    <rect width="360" height="56" rx="22" fill="#2563eb"/>
+    <rect y="34" width="360" height="22" fill="#2563eb"/>
+    <text x="180" y="36" text-anchor="middle" class="inverse" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="21" font-weight="700">缓存 1 · MM Processor Cache</text>
+    <text x="28" y="94" class="label">存什么</text>
+    <text x="28" y="120" class="detail">pixel_values、grid_thw、Prompt更新结果</text>
+    <text x="28" y="158" class="label">存哪里 / 默认多大</text>
+    <text x="28" y="184" class="detail">CPU进程内LRU · 每个进程4 GiB</text>
+    <text x="28" y="222" class="label">怎样算命中</text>
+    <text x="28" y="248" class="detail">进程内LRU是否存在mm_hash</text>
+    <rect x="28" y="268" width="304" height="26" rx="8" fill="#dbeafe"/>
+    <text x="180" y="286" text-anchor="middle" class="small">4K图片pixel_values约384 MiB</text>
+  </g>
+  <path d="M514 282 V350" class="flow"/>
+
+  <g transform="translate(716,360)">
+    <rect width="360" height="310" rx="22" fill="#f0fdfa" stroke="#0f766e" stroke-width="2.5" filter="url(#shadow)"/>
+    <rect width="360" height="56" rx="22" fill="#0f766e"/>
+    <rect y="34" width="360" height="22" fill="#0f766e"/>
+    <text x="180" y="36" text-anchor="middle" class="inverse" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="21" font-weight="700">缓存 2 · 本地 Encoder Cache</text>
+    <text x="28" y="94" class="label">存什么</text>
+    <text x="28" y="120" class="detail">Vision Encoder输出visual embeddings</text>
+    <text x="28" y="158" class="label">存哪里 / 默认多大</text>
+    <text x="28" y="184" class="detail">NPU HBM · 容量单位是Embedding token</text>
+    <text x="28" y="201" class="small">MNBT = max_num_batched_tokens</text>
+    <text x="28" y="220" class="small">有效容量 = max(MNBT, 单个媒体最大token数)</text>
+    <text x="28" y="246" class="label">怎样算命中</text>
+    <text x="28" y="270" class="detail">本地管理器是否记录identifier / mm_hash</text>
+    <rect x="28" y="282" width="304" height="18" rx="8" fill="#ccfbf1"/>
+    <text x="180" y="297" text-anchor="middle" class="small">4K图片Embedding约160 MiB/rank</text>
+  </g>
+  <path d="M836 282 V350" class="flow"/>
+
+  <g transform="translate(1082,360)">
+    <rect width="286" height="310" rx="22" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.5" filter="url(#shadow)"/>
+    <rect width="286" height="56" rx="22" fill="#7c3aed"/>
+    <rect y="34" width="286" height="22" fill="#7c3aed"/>
+    <text x="143" y="36" text-anchor="middle" class="inverse" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="20" font-weight="700">缓存 3 · KV/Prefix Cache</text>
+    <text x="24" y="94" class="label">存什么</text>
+    <text x="24" y="120" class="detail">Language各层的KV/GDN状态</text>
+    <text x="24" y="158" class="label">存哪里 / 多大</text>
+    <text x="24" y="184" class="detail">NPU HBM Cache Blocks</text>
+    <text x="24" y="208" class="small">随模型、块数和序列长度变化</text>
+    <text x="24" y="244" class="label">怎样算命中</text>
+    <text x="24" y="270" class="detail">前缀Block Hash匹配</text>
+    <text x="24" y="294" class="small">命中后跳过对应Language Prefill</text>
+  </g>
+  <path d="M1158 282 V350" class="flow"/>
+
+  <g transform="translate(532,744)">
+    <rect width="470" height="178" rx="22" fill="#fff7ed" stroke="#d97706" stroke-width="2.5" stroke-dasharray="10 7" filter="url(#shadow)"/>
+    <text x="235" y="38" text-anchor="middle" class="head">可选外部副本 · ECExampleConnector</text>
+    <text x="24" y="72" class="detail">默认关闭；启用后存储visual embeddings</text>
+    <text x="24" y="100" class="detail">默认路径：/tmp/&lt;mm_hash&gt;/encoder_cache.safetensors</text>
+    <text x="24" y="128" class="detail">命中：目标文件存在；随后加载回本地HBM</text>
+    <text x="24" y="156" class="small">无固定容量上限、无自动淘汰；/tmp可能是磁盘也可能是tmpfs</text>
+  </g>
+  <path d="M836 670 V728" fill="none" stroke="#d97706" stroke-width="3" stroke-dasharray="10 7" marker-end="url(#arrow)"/>
+  <path d="M770 744 C730 714 760 690 800 680" fill="none" stroke="#d97706" stroke-width="2.5" stroke-dasharray="8 6" marker-end="url(#arrow)"/>
+
+  <g transform="translate(72,736)">
+    <rect width="330" height="186" rx="20" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+    <text x="24" y="38" class="head">一张4K图片的量级</text>
+    <text x="24" y="76" class="detail">预处理输出：约384 MiB · CPU</text>
+    <text x="24" y="108" class="detail">Encoder输出：约160 MiB/rank · HBM</text>
+    <text x="24" y="140" class="detail">外部EC文件：约160 MiB · 文件系统</text>
+    <text x="24" y="168" class="small">均为示例估算，不含管理与文件系统开销</text>
+  </g>
+</svg>

@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1520" viewBox="0 0 1440 1520" role="img" aria-labelledby="title desc">
+  <title id="title">第二次相同多模态请求的缓存命中决策</title>
+  <desc id="desc">重复请求依次经过MM Processor Cache、Prefix Cache、视觉区间判断、本地Encoder Cache和可选外部EC Cache，各缓存独立判断。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+    <style>
+      text { font-family: Arial, 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 18px; fill: #475569; }
+      .label { font-size: 17px; font-weight: 700; }
+      .detail { font-size: 14px; fill: #475569; }
+      .edge { font-size: 14px; font-weight: 700; fill: #334155; }
+      .flow { fill: none; stroke: #475569; stroke-width: 2.5; marker-end: url(#arrow); }
+      .hit { fill: none; stroke: #15803d; stroke-width: 2.5; marker-end: url(#arrow); }
+      .miss { fill: none; stroke: #b91c1c; stroke-width: 2.5; marker-end: url(#arrow); }
+      .node { filter: url(#shadow); stroke-width: 2; }
+    </style>
+  </defs>
+  <rect width="1440" height="1520" fill="#f8fafc"/>
+  <text x="72" y="58" class="title">第二次请求：三个本地缓存分别判断，外部EC只补本地Encoder miss</text>
+  <text x="72" y="92" class="subtitle">绿色表示复用，红色表示重新计算，橙色虚线表示可选的外部加载路径</text>
+
+  <g transform="translate(535,126)">
+    <rect class="node" width="370" height="72" rx="36" fill="#ffffff" stroke="#334155"/>
+    <text x="185" y="44" text-anchor="middle" class="label">第二次收到相同媒体与文本请求</text>
+  </g>
+  <path class="flow" d="M720 198 V240"/>
+
+  <g transform="translate(510,250)">
+    <path class="node" d="M210 0 L420 72 L210 144 L0 72 Z" fill="#eff6ff" stroke="#2563eb"/>
+    <text x="210" y="64" text-anchor="middle" class="label">MM Processor Cache</text>
+    <text x="210" y="88" text-anchor="middle" class="detail">进程内LRU存在mm_hash？</text>
+  </g>
+  <path class="hit" d="M510 322 H350 V424"/>
+  <text x="420" y="307" class="edge" fill="#15803d">是</text>
+  <g transform="translate(170,434)">
+    <rect class="node" width="360" height="86" rx="16" fill="#dcfce7" stroke="#15803d"/>
+    <text x="180" y="34" text-anchor="middle" class="label">复用pixel_values / grid_thw</text>
+    <text x="180" y="61" text-anchor="middle" class="detail">跳过Decode、Resize、Normalize、Patchify</text>
+  </g>
+  <path class="miss" d="M930 322 H1090 V424"/>
+  <text x="985" y="307" class="edge" fill="#b91c1c">否</text>
+  <g transform="translate(910,434)">
+    <rect class="node" width="360" height="86" rx="16" fill="#fee2e2" stroke="#b91c1c"/>
+    <text x="180" y="34" text-anchor="middle" class="label">重新执行媒体预处理</text>
+    <text x="180" y="61" text-anchor="middle" class="detail">结果写入当前进程的CPU LRU</text>
+  </g>
+  <path class="flow" d="M350 520 C350 572 650 554 650 604"/>
+  <path class="flow" d="M1090 520 C1090 572 790 554 790 604"/>
+
+  <g transform="translate(510,614)">
+    <path class="node" d="M210 0 L420 72 L210 144 L0 72 Z" fill="#f5f3ff" stroke="#7c3aed"/>
+    <text x="210" y="64" text-anchor="middle" class="label">Prefix Cache匹配</text>
+    <text x="210" y="88" text-anchor="middle" class="detail">命中了多少Language状态Block？</text>
+  </g>
+  <path class="hit" d="M510 686 H334 V788"/>
+  <text x="405" y="671" class="edge" fill="#15803d">命中部分或全部</text>
+  <g transform="translate(154,798)">
+    <rect class="node" width="360" height="86" rx="16" fill="#dcfce7" stroke="#15803d"/>
+    <text x="180" y="34" text-anchor="middle" class="label">复用命中的Language状态</text>
+    <text x="180" y="61" text-anchor="middle" class="detail">只对未命中区间继续Prefill</text>
+  </g>
+  <path class="miss" d="M930 686 H1106 V788"/>
+  <text x="1000" y="671" class="edge" fill="#b91c1c">未命中</text>
+  <g transform="translate(926,798)">
+    <rect class="node" width="360" height="86" rx="16" fill="#fee2e2" stroke="#b91c1c"/>
+    <text x="180" y="34" text-anchor="middle" class="label">Language区间需要Prefill</text>
+    <text x="180" y="61" text-anchor="middle" class="detail">继续判断是否需要视觉结果</text>
+  </g>
+  <path class="flow" d="M334 884 C334 922 650 908 650 944"/>
+  <path class="flow" d="M1106 884 C1106 922 790 908 790 944"/>
+
+  <g transform="translate(510,954)">
+    <path class="node" d="M210 0 L420 66 L210 132 L0 66 Z" fill="#fff7ed" stroke="#ea580c"/>
+    <text x="210" y="58" text-anchor="middle" class="label">未命中计算区间</text>
+    <text x="210" y="82" text-anchor="middle" class="detail">包含图片或视频占位区？</text>
+  </g>
+  <path class="hit" d="M510 1020 H298 V1124"/>
+  <text x="408" y="1005" class="edge" fill="#15803d">否</text>
+  <g transform="translate(118,1134)">
+    <rect class="node" width="360" height="86" rx="16" fill="#dcfce7" stroke="#15803d"/>
+    <text x="180" y="34" text-anchor="middle" class="label">不需要Vision Encoder</text>
+    <text x="180" y="61" text-anchor="middle" class="detail">直接继续Language计算</text>
+  </g>
+  <path class="miss" d="M930 1020 H1056 V1088"/>
+  <text x="980" y="1005" class="edge" fill="#b91c1c">是</text>
+
+  <g transform="translate(880,1098)">
+    <path class="node" d="M176 0 L352 60 L176 120 L0 60 Z" fill="#f0fdfa" stroke="#0f766e"/>
+    <text x="176" y="52" text-anchor="middle" class="label">本地Encoder Cache</text>
+    <text x="176" y="76" text-anchor="middle" class="detail">identifier存在？</text>
+  </g>
+  <path class="hit" d="M880 1158 H630 V1270"/>
+  <text x="800" y="1143" class="edge" fill="#15803d">是</text>
+  <g transform="translate(450,1280)">
+    <rect class="node" width="360" height="78" rx="16" fill="#dcfce7" stroke="#15803d"/>
+    <text x="180" y="30" text-anchor="middle" class="label">复用HBM中的visual embeddings</text>
+    <text x="180" y="53" text-anchor="middle" class="detail">跳过Vision Encoder</text>
+  </g>
+  <path class="miss" d="M1232 1158 H1370 V1310 H1310"/>
+  <text x="1260" y="1143" class="edge" fill="#b91c1c">否</text>
+
+  <g transform="translate(940,1250)">
+    <path class="node" d="M180 0 L360 60 L180 120 L0 60 Z" fill="#fff7ed" stroke="#d97706" stroke-dasharray="9 6"/>
+    <text x="180" y="52" text-anchor="middle" class="label">EC已配置且外部文件存在？</text>
+    <text x="180" y="76" text-anchor="middle" class="detail">has_cache_item(mm_hash)</text>
+  </g>
+  <path d="M940 1310 H830 V1400" fill="none" stroke="#d97706" stroke-width="2.5" stroke-dasharray="9 6" marker-end="url(#arrow)"/>
+  <text x="875" y="1295" class="edge" fill="#d97706">是</text>
+  <g transform="translate(650,1410)">
+    <rect class="node" width="360" height="82" rx="16" fill="#fffbeb" stroke="#d97706"/>
+    <text x="180" y="32" text-anchor="middle" class="label">从Safetensors加载到本地HBM</text>
+    <text x="180" y="57" text-anchor="middle" class="detail">复用visual embeddings，跳过Vision Encoder</text>
+  </g>
+  <path d="M1300 1310 H1350 V1400" fill="none" stroke="#b91c1c" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="1320" y="1295" class="edge" fill="#b91c1c">否</text>
+  <g transform="translate(1060,1410)">
+    <rect class="node" width="330" height="82" rx="16" fill="#fee2e2" stroke="#b91c1c"/>
+    <text x="165" y="32" text-anchor="middle" class="label">运行Vision Encoder</text>
+    <text x="165" y="57" text-anchor="middle" class="detail">若EC角色允许，再写入外部缓存</text>
+  </g>
+
+  <g transform="translate(70,1280)">
+    <rect width="330" height="78" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="2"/>
+    <text x="165" y="30" text-anchor="middle" class="label">关键结论</text>
+    <text x="165" y="55" text-anchor="middle" class="detail">Prefix命中 ≠ MM命中 ≠ Encoder命中</text>
+  </g>
+</svg>
