@@ -35,9 +35,10 @@ class AscendStreamStartGate {
     size_t deviceId_ = 0;
     aclrtStream controlStream_ = nullptr;
     std::vector<aclrtNotify> notifies_;
+    std::vector<aclrtEvent> startEvents_;
 
 public:
-    void Setup(size_t deviceId, size_t streamCount)
+    void Setup(size_t deviceId, size_t streamCount, bool traceStart)
     {
         ASSERT(streamCount > 0);
         deviceId_ = deviceId;
@@ -47,13 +48,21 @@ public:
         for (auto& notify : notifies_) {
             ASCEND_ASSERT(aclrtCreateNotify(&notify, kDefaultNotifyFlag));
         }
+        if (traceStart) {
+            startEvents_.resize(streamCount);
+            for (auto& event : startEvents_) {
+                ASCEND_ASSERT(aclrtCreateEventWithFlag(&event, ACL_EVENT_TIME_LINE));
+            }
+        }
     }
 
-    void Arm(size_t index, aclrtStream stream)
+    void Arm(size_t index, aclrtStream stream, bool recordStart)
     {
         ASSERT(index < notifies_.size());
+        ASSERT(!recordStart || index < startEvents_.size());
         ASCEND_ASSERT(aclrtSetDevice(deviceId_));
         ASCEND_ASSERT(aclrtWaitAndResetNotify(notifies_[index], stream, 0));
+        if (recordStart) { ASCEND_ASSERT(aclrtRecordEvent(startEvents_[index], stream)); }
     }
 
     void Release()
@@ -66,9 +75,24 @@ public:
 
     aclrtStream ControlStream() const { return controlStream_; }
 
+    std::vector<uint64_t> StartTimestamps() const
+    {
+        std::vector<uint64_t> timestamps;
+        timestamps.reserve(startEvents_.size());
+        ASCEND_ASSERT(aclrtSetDevice(deviceId_));
+        for (auto event : startEvents_) {
+            uint64_t timestamp = 0;
+            ASCEND_ASSERT(aclrtEventGetTimestamp(event, &timestamp));
+            timestamps.push_back(timestamp);
+        }
+        return timestamps;
+    }
+
     void Cleanup()
     {
         ASCEND_ASSERT(aclrtSetDevice(deviceId_));
+        for (auto event : startEvents_) { ASCEND_ASSERT(aclrtDestroyEvent(event)); }
+        startEvents_.clear();
         for (auto notify : notifies_) { ASCEND_ASSERT(aclrtDestroyNotify(notify)); }
         notifies_.clear();
         if (controlStream_ != nullptr) {

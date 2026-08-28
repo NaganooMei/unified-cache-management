@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 #include "ascend/ascend_stream_start_gate.h"
+#include "ascend/copy_start_trace_ascend.h"
 #include "ascend/error_handle_ascend.h"
 #include "copy_instance.h"
 #include "copy_sync_mode.h"
@@ -156,7 +157,7 @@ protected:
 
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         for (const auto& ctx : contexts_) { ASSERT(ctx.deviceId == contexts_[0].deviceId); }
-        startGate_.Setup(contexts_[0].deviceId, contexts_.size());
+        startGate_.Setup(contexts_[0].deviceId, contexts_.size(), StartTraceEnabled());
         ASCEND_ASSERT(aclrtCreateEvent(&totalStart_));
         ASCEND_ASSERT(aclrtCreateEvent(&totalEnd_));
     }
@@ -191,9 +192,10 @@ protected:
     {
         using namespace std::chrono;
 
+        const bool traceStart = ShouldTraceStart();
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         for (size_t i = 0; i < contexts_.size(); ++i) {
-            startGate_.Arm(i, contexts_[i].stream);
+            startGate_.Arm(i, contexts_[i].stream, traceStart);
         }
 
         const auto submitStart = steady_clock::now();
@@ -201,10 +203,13 @@ protected:
         const auto submitCost = static_cast<size_t>(
             duration_cast<microseconds>(steady_clock::now() - submitStart).count());
 
+        const uint64_t barrierEnterNs = traceStart ? CopyStartMonotonicNs() : 0;
         WaitForProcessReadyBarrier();
+        const uint64_t barrierExitNs = traceStart ? CopyStartMonotonicNs() : 0;
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         ASCEND_ASSERT(aclrtRecordEvent(totalStart_, startGate_.ControlStream()));
         startGate_.Release();
+        const uint64_t notifySubmitNs = traceStart ? CopyStartMonotonicNs() : 0;
 
         if (syncMode_ == CopySyncMode::EVENT) {
             for (const auto& ctx : contexts_) {
@@ -219,6 +224,11 @@ protected:
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         ASCEND_ASSERT(aclrtRecordEvent(totalEnd_, startGate_.ControlStream()));
         ASCEND_ASSERT(aclrtSynchronizeStream(startGate_.ControlStream()));
+
+        if (traceStart) {
+            EmitCopyStartTrace(Name(), contexts_[0].deviceId, CurrentIteration(), barrierEnterNs,
+                               barrierExitNs, notifySubmitNs, startGate_.StartTimestamps());
+        }
 
         float copyCostMs = 0.0f;
         ASCEND_ASSERT(aclrtEventElapsedTime(&copyCostMs, totalStart_, totalEnd_));

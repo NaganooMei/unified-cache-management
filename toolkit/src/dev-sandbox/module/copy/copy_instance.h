@@ -25,6 +25,7 @@
 #define COPY_INSTANCE_H
 
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -36,8 +37,33 @@ protected:
     size_t iterations_;
     size_t warmupIterations_;
     bool affinitySrc_;
+    bool measuredIteration_ = false;
+    size_t currentIteration_ = 0;
     inline static size_t configuredWarmupIterations_ = 3;
     inline static std::function<void()> processReadyBarrier_{};
+
+    static size_t ConfiguredStartTraceIterations()
+    {
+        static const size_t iterations = []() {
+            const char* value = std::getenv("COPY_START_TRACE_ITERATIONS");
+            if (value == nullptr || value[0] == '\0') { return size_t{0}; }
+
+            char* end = nullptr;
+            const auto parsed = std::strtoull(value, &end, 10);
+            if (end == value || *end != '\0') { return size_t{0}; }
+            return static_cast<size_t>(parsed);
+        }();
+        return iterations;
+    }
+
+    static bool StartTraceEnabled() { return ConfiguredStartTraceIterations() > 0; }
+
+    bool ShouldTraceStart() const
+    {
+        return measuredIteration_ && currentIteration_ < ConfiguredStartTraceIterations();
+    }
+
+    size_t CurrentIteration() const { return currentIteration_; }
 
     static void WaitForProcessReadyBarrier()
     {
@@ -83,11 +109,17 @@ public:
     {
         Prepare(srcBuffers, dstBuffers);
 
-        for (size_t i = 0; i < warmupIterations_; i++) { DoCopyOnce(); }
+        measuredIteration_ = false;
+        for (size_t i = 0; i < warmupIterations_; i++) {
+            currentIteration_ = i;
+            DoCopyOnce();
+        }
 
         std::vector<size_t> submitCostArray;
         std::vector<size_t> copyCostArray;
+        measuredIteration_ = true;
         for (size_t i = 0; i < iterations_; i++) {
+            currentIteration_ = i;
             auto [copyCost, submitCost] = DoCopyOnce();
             copyCostArray.push_back(copyCost);
             submitCostArray.push_back(submitCost);
