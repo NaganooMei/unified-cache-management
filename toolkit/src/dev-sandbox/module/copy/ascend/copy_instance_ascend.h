@@ -32,6 +32,7 @@
 #include "copy_buffer.h"
 #include "copy_instance.h"
 #include "copy_sync_mode.h"
+#include "ascend_stream_start_gate.h"
 #include "error_handle_ascend.h"
 #include "glm_io_buffer_ascend.h"
 
@@ -230,6 +231,7 @@ public:
 class H2DCEMultiStreamCopyInstance : public CopyInstance {
 protected:
     std::vector<AscendStreamContext> contexts_;
+    AscendStreamStartGate startGate_;
     aclrtEvent totalStart_;
     aclrtEvent totalEnd_;
     size_t streamCount_;
@@ -313,12 +315,15 @@ protected:
         }
 
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
+        for (const auto& ctx : contexts_) { ASSERT(ctx.deviceId == contexts_[0].deviceId); }
+        startGate_.Setup(contexts_[0].deviceId, contexts_.size());
         ASCEND_ASSERT(aclrtCreateEvent(&totalStart_));
         ASCEND_ASSERT(aclrtCreateEvent(&totalEnd_));
     }
 
     void Cleanup() override
     {
+        startGate_.Cleanup();
         for (auto& ctx : contexts_) {
             ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
             if (ctx.endEvent != nullptr) { ASCEND_ASSERT(aclrtDestroyEvent(ctx.endEvent)); }
@@ -335,11 +340,8 @@ protected:
         using namespace std::chrono;
 
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
-        ASCEND_ASSERT(aclrtRecordEvent(totalStart_, contexts_[0].stream));
-
-        for (size_t i = 1; i < contexts_.size(); i++) {
-            ASCEND_ASSERT(aclrtSetDevice(contexts_[i].deviceId));
-            ASCEND_ASSERT(aclrtStreamWaitEvent(contexts_[i].stream, totalStart_));
+        for (size_t i = 0; i < contexts_.size(); ++i) {
+            startGate_.Arm(i, contexts_[i].stream);
         }
 
         auto submitStart = steady_clock::now();
@@ -354,11 +356,20 @@ protected:
         auto submitCost = duration_cast<microseconds>(steady_clock::now() - submitStart).count();
 
         if (syncMode_ == CopySyncMode::EVENT) {
-            for (size_t i = 1; i < contexts_.size(); i++) {
+            for (size_t i = 0; i < contexts_.size(); i++) {
                 ASCEND_ASSERT(aclrtSetDevice(contexts_[i].deviceId));
                 ASCEND_ASSERT(aclrtRecordEvent(contexts_[i].endEvent, contexts_[i].stream));
-                ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
-                ASCEND_ASSERT(aclrtStreamWaitEvent(contexts_[0].stream, contexts_[i].endEvent));
+            }
+        }
+
+        WaitForProcessReadyBarrier();
+        ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
+        ASCEND_ASSERT(aclrtRecordEvent(totalStart_, startGate_.ControlStream()));
+        startGate_.Release();
+
+        if (syncMode_ == CopySyncMode::EVENT) {
+            for (const auto& ctx : contexts_) {
+                ASCEND_ASSERT(aclrtStreamWaitEvent(startGate_.ControlStream(), ctx.endEvent));
             }
         } else {
             for (auto& ctx : contexts_) {
@@ -368,8 +379,8 @@ protected:
         }
 
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
-        ASCEND_ASSERT(aclrtRecordEvent(totalEnd_, contexts_[0].stream));
-        ASCEND_ASSERT(aclrtSynchronizeStream(contexts_[0].stream));
+        ASCEND_ASSERT(aclrtRecordEvent(totalEnd_, startGate_.ControlStream()));
+        ASCEND_ASSERT(aclrtSynchronizeStream(startGate_.ControlStream()));
 
         float copyCostMs = 0.f;
         ASCEND_ASSERT(aclrtEventElapsedTime(&copyCostMs, totalStart_, totalEnd_));

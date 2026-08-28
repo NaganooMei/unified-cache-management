@@ -25,6 +25,7 @@
 #define COPY_INSTANCE_H
 
 #include <chrono>
+#include <functional>
 #include <utility>
 #include <vector>
 #include "copy_buffer.h"
@@ -36,6 +37,12 @@ protected:
     size_t warmupIterations_;
     bool affinitySrc_;
     inline static size_t configuredWarmupIterations_ = 3;
+    inline static std::function<void()> processReadyBarrier_{};
+
+    static void WaitForProcessReadyBarrier()
+    {
+        if (processReadyBarrier_) { processReadyBarrier_(); }
+    }
 
     virtual size_t AffinityDeviceId(const CopyBuffer& src, const CopyBuffer& dst) const
     {
@@ -62,6 +69,11 @@ public:
     static void SetWarmupIterations(size_t warmupIterations)
     {
         configuredWarmupIterations_ = warmupIterations;
+    }
+
+    static void SetProcessReadyBarrier(std::function<void()> barrier)
+    {
+        processReadyBarrier_ = std::move(barrier);
     }
 
     virtual std::string Name() const = 0;

@@ -38,9 +38,11 @@
 #include <utility>
 #include <vector>
 #include "copy_case.h"
+#include "copy_instance.h"
 #include "copy_result.h"
 #include "copy_runtime.h"
 #include "error_handle.h"
+#include "forked_process_barrier_ascend.h"
 
 namespace ascend_copy {
 
@@ -169,17 +171,26 @@ inline bool ReadResult(int fd, CopyResult::Result& result)
 }
 
 [[noreturn]] inline void RunChildCopy(size_t device, int writeFd,
+                                      ForkedProcessBarrier* processReadyBarrier,
                                       const ForkedChildCopyFn& childCopy)
 {
     int status = EXIT_FAILURE;
     {
         try {
             CopyRuntime runtime;
+            CopyInstance::SetProcessReadyBarrier([processReadyBarrier]() {
+                if (!processReadyBarrier->Wait()) {
+                    throw std::runtime_error("forked copy process barrier aborted");
+                }
+            });
             auto result = childCopy(device);
+            CopyInstance::SetProcessReadyBarrier({});
             status = WriteResult(writeFd, result) ? EXIT_SUCCESS : EXIT_FAILURE;
         } catch (const std::exception& e) {
+            processReadyBarrier->Abort();
             std::fprintf(stderr, "[fork-copy] device %zu failed: %s\n", device, e.what());
         } catch (...) {
+            processReadyBarrier->Abort();
             std::fprintf(stderr, "[fork-copy] device %zu failed with unknown error\n", device);
         }
     }
@@ -223,6 +234,7 @@ inline std::vector<CopyResult::Result> RunForkedCopyBatchPerDevice(
     ASSERT(ctx.nDevice > 0);
     std::vector<ForkedChildProcess> children;
     children.reserve(ctx.nDevice);
+    ForkedProcessBarrier processReadyBarrier(ctx.nDevice);
 
     for (size_t device = 0; device < ctx.nDevice; ++device) {
         int pipeFds[2];
@@ -231,7 +243,7 @@ inline std::vector<CopyResult::Result> RunForkedCopyBatchPerDevice(
         ASSERT(pid != -1);
         if (pid == 0) {
             close(pipeFds[0]);
-            RunChildCopy(device, pipeFds[1], childCopy);
+            RunChildCopy(device, pipeFds[1], &processReadyBarrier, childCopy);
         }
 
         close(pipeFds[1]);
