@@ -69,10 +69,16 @@ print_performance()
     fi
 
     row="$(sed -E 's/[[:space:]]*\/[[:space:]]*/\//g; s/^[[:space:]]+//' <<<"${row}")"
-    local src dst method size_kb count submit_us copy_us wall_us dev_bw wall_bw extra
-    read -r src dst method size_kb count submit_us copy_us wall_us dev_bw wall_bw extra <<<"${row}"
-    if [[ -n "${extra:-}" || -z "${wall_bw:-}" ]]; then
+    local src dst method_and_size count submit_us copy_us wall_us dev_bw wall_bw extra
+    read -r src dst method_and_size count submit_us copy_us wall_us dev_bw wall_bw extra <<<"${row}"
+    if [[ -n "${extra:-}" || -z "${wall_bw:-}" || "${method_and_size}" != *GLM* ]]; then
         printf 'error: cannot parse benchmark result row: %s\n' "${row}" >&2
+        return 1
+    fi
+    local size_kb="${method_and_size##*GLM}"
+    local method="${method_and_size%"${size_kb}"}"
+    if [[ ! "${size_kb}" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'error: cannot parse GLM size from method column: %s\n' "${method_and_size}" >&2
         return 1
     fi
 

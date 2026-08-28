@@ -234,6 +234,10 @@ protected:
         ASCEND_ASSERT(aclrtRecordEvent(totalEnd_, startGate_.ControlStream()));
         const uint64_t syncEnterNs = CopyStartMonotonicNs();
         ASCEND_ASSERT(aclrtSynchronizeStream(startGate_.ControlStream()));
+        for (const auto& ctx : contexts_) {
+            ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
+            ASCEND_ASSERT(aclrtSynchronizeStream(ctx.stream));
+        }
         const uint64_t wallEndNs = CopyStartMonotonicNs();
         SetWallClockRange(wallStartNs, wallEndNs);
         ClearInFlight();
@@ -243,10 +247,6 @@ protected:
         const auto copyCost = static_cast<size_t>(copyCostMs * 1000);
 
         if (traceStart) {
-            for (const auto& ctx : contexts_) {
-                ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
-                ASCEND_ASSERT(aclrtSynchronizeStream(ctx.stream));
-            }
             ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
             EmitCopyStartTrace(Name(), contexts_[0].deviceId, CurrentIteration(), barrierEnterNs,
                                barrierExitNs, wallStartNs, releaseSubmitNs, syncEnterNs, wallEndNs,
