@@ -16,6 +16,7 @@ def parse_args():
     parser.add_argument("log", type=Path)
     parser.add_argument("--expected-devices", type=int, required=True)
     parser.add_argument("--expected-iterations", type=int, required=True)
+    parser.add_argument("--expected-start-gate")
     parser.add_argument("--max-barrier-exit-skew-us", type=float)
     parser.add_argument("--max-notify-submit-skew-us", type=float)
     parser.add_argument("--max-stream-start-skew-us", type=float)
@@ -47,6 +48,7 @@ def parse_trace_line(line, line_number):
         raise ValueError(f"line {line_number}: missing fields: {', '.join(missing)}")
 
     return {
+        "start_gate": fields.get("start_gate"),
         "method": fields["method"],
         "device": int(fields["device"]),
         "iteration": int(fields["iteration"]),
@@ -79,6 +81,15 @@ def main():
                     f"method={identity[0]} iteration={identity[1]} device={identity[2]}"
                 )
             seen.add(identity)
+            if (
+                args.expected_start_gate is not None
+                and record["start_gate"] != args.expected_start_gate
+            ):
+                actual = record["start_gate"] or "missing"
+                raise ValueError(
+                    f"line {line_number}: expected start_gate="
+                    f"{args.expected_start_gate}, found {actual}; rebuild dev-sandbox"
+                )
             groups[(record["method"], record["iteration"])].append(record)
 
     if not groups:

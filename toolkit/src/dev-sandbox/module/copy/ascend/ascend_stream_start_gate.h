@@ -32,7 +32,10 @@
 class AscendStreamStartGate {
     size_t deviceId_ = 0;
     aclrtStream controlStream_ = nullptr;
-    std::vector<aclrtNotify> notifies_;
+    aclrtStream releaseStream_ = nullptr;
+    aclrtNotify releaseNotify_ = nullptr;
+    aclrtEvent startEvent_ = nullptr;
+    size_t streamCount_ = 0;
     std::vector<aclrtEvent> startEvents_;
 
 public:
@@ -40,12 +43,12 @@ public:
     {
         ASSERT(streamCount > 0);
         deviceId_ = deviceId;
+        streamCount_ = streamCount;
         ASCEND_ASSERT(aclrtSetDevice(deviceId_));
         ASCEND_ASSERT(aclrtCreateStream(&controlStream_));
-        notifies_.resize(streamCount);
-        for (auto& notify : notifies_) {
-            ASCEND_ASSERT(aclrtCreateNotify(&notify, ACL_NOTIFY_DEFAULT));
-        }
+        ASCEND_ASSERT(aclrtCreateStream(&releaseStream_));
+        ASCEND_ASSERT(aclrtCreateNotify(&releaseNotify_, ACL_NOTIFY_DEFAULT));
+        ASCEND_ASSERT(aclrtCreateEventExWithFlag(&startEvent_, ACL_EVENT_SYNC));
         if (traceStart) {
             startEvents_.resize(streamCount);
             for (auto& event : startEvents_) {
@@ -54,21 +57,31 @@ public:
         }
     }
 
+    void Prepare(aclrtEvent totalStart)
+    {
+        ASSERT(totalStart != nullptr);
+        ASCEND_ASSERT(aclrtSetDevice(deviceId_));
+        // Record the reusable Event before any data Stream waits on it. The control Stream
+        // cannot complete the Event until the one-to-one Notify is released after the process
+        // barrier, then the same Event completion broadcasts to every waiting data Stream.
+        ASCEND_ASSERT(aclrtWaitAndResetNotify(releaseNotify_, controlStream_, 0));
+        ASCEND_ASSERT(aclrtRecordEvent(totalStart, controlStream_));
+        ASCEND_ASSERT(aclrtRecordEvent(startEvent_, controlStream_));
+    }
+
     void Arm(size_t index, aclrtStream stream, bool recordStart)
     {
-        ASSERT(index < notifies_.size());
+        ASSERT(index < streamCount_);
         ASSERT(!recordStart || index < startEvents_.size());
         ASCEND_ASSERT(aclrtSetDevice(deviceId_));
-        ASCEND_ASSERT(aclrtWaitAndResetNotify(notifies_[index], stream, 0));
+        ASCEND_ASSERT(aclrtStreamWaitEvent(stream, startEvent_));
         if (recordStart) { ASCEND_ASSERT(aclrtRecordEvent(startEvents_[index], stream)); }
     }
 
     void Release()
     {
         ASCEND_ASSERT(aclrtSetDevice(deviceId_));
-        for (auto notify : notifies_) {
-            ASCEND_ASSERT(aclrtRecordNotify(notify, controlStream_));
-        }
+        ASCEND_ASSERT(aclrtRecordNotify(releaseNotify_, releaseStream_));
     }
 
     aclrtStream ControlStream() const { return controlStream_; }
@@ -91,12 +104,23 @@ public:
         ASCEND_ASSERT(aclrtSetDevice(deviceId_));
         for (auto event : startEvents_) { ASCEND_ASSERT(aclrtDestroyEvent(event)); }
         startEvents_.clear();
-        for (auto notify : notifies_) { ASCEND_ASSERT(aclrtDestroyNotify(notify)); }
-        notifies_.clear();
+        if (startEvent_ != nullptr) {
+            ASCEND_ASSERT(aclrtDestroyEvent(startEvent_));
+            startEvent_ = nullptr;
+        }
+        if (releaseNotify_ != nullptr) {
+            ASCEND_ASSERT(aclrtDestroyNotify(releaseNotify_));
+            releaseNotify_ = nullptr;
+        }
+        if (releaseStream_ != nullptr) {
+            ASCEND_ASSERT(aclrtDestroyStream(releaseStream_));
+            releaseStream_ = nullptr;
+        }
         if (controlStream_ != nullptr) {
             ASCEND_ASSERT(aclrtDestroyStream(controlStream_));
             controlStream_ = nullptr;
         }
+        streamCount_ = 0;
     }
 };
 

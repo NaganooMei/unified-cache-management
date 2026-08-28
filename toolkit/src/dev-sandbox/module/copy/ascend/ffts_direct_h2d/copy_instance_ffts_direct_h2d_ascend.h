@@ -195,6 +195,7 @@ protected:
 
         const bool traceStart = ShouldTraceStart();
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
+        startGate_.Prepare(totalStart_);
         for (size_t i = 0; i < contexts_.size(); ++i) {
             startGate_.Arm(i, contexts_[i].stream, traceStart);
         }
@@ -208,7 +209,6 @@ protected:
         WaitForProcessReadyBarrier();
         const uint64_t barrierExitNs = traceStart ? CopyStartMonotonicNs() : 0;
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
-        ASCEND_ASSERT(aclrtRecordEvent(totalStart_, startGate_.ControlStream()));
         startGate_.Release();
         const uint64_t notifySubmitNs = traceStart ? CopyStartMonotonicNs() : 0;
 

@@ -57,6 +57,7 @@ inline void EmitCopyStartTrace(const std::string& method, size_t deviceId, size_
 
     std::ostringstream output;
     output << "COPY_START_TRACE"
+           << " start_gate=event_broadcast"
            << " pid=" << getpid() << " method=" << method << " device=" << deviceId
            << " iteration=" << iteration << " streams=" << streamTimestampsUs.size()
            << " barrier_enter_ns=" << barrierEnterNs << " barrier_exit_ns=" << barrierExitNs

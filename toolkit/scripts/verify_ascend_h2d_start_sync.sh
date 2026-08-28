@@ -97,6 +97,7 @@ run_case()
         python3 "${ANALYZER}" "${log_file}"
         --expected-devices "${DEVICE_COUNT}"
         --expected-iterations "${TRACE_ITERATIONS}"
+        --expected-start-gate event_broadcast
         --max-barrier-exit-skew-us "${MAX_BARRIER_EXIT_SKEW_US}"
         --max-notify-submit-skew-us "${MAX_NOTIFY_SUBMIT_SKEW_US}"
         --max-stream-start-skew-us "${MAX_STREAM_START_SKEW_US}"
@@ -151,6 +152,7 @@ main()
     mkdir -p -- "${LOG_DIR}"
     printf 'Ascend H2D process/stream start synchronization verification\n'
     printf 'run_id=%s repo_root=%s log_dir=%s\n' "${RUN_ID}" "${REPO_ROOT}" "${LOG_DIR}"
+    printf 'start_gate=event_broadcast\n'
     printf 'limits_us barrier_exit=%s notify_submit=%s stream_start=%s\n' \
         "${MAX_BARRIER_EXIT_SKEW_US}" "${MAX_NOTIFY_SUBMIT_SKEW_US}" \
         "${MAX_STREAM_START_SKEW_US}"
