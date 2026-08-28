@@ -155,12 +155,14 @@ DEFINE_COPY_CASE_NO_RUNTIME_IO_MODE(
 {
     constexpr size_t defaultStreamCount = 4;
     const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
+    const auto startModeSuffix = CopyStartModeMethodSuffix(ResolveCopyStartMode());
     CopyResult result;
     if (ctx.ioMode == CopyIoMode::GLM) {
         GlmSharedHostRegion srcRegion{"one_share_host_to_all_device_ce_multi_stream", ctx.num};
         result.Push(ascend_copy::RunForkedCopyBatch(
             ctx, srcRegion.Name(), "acl::device::all",
-            "CE-MS" + std::to_string(streamCount) + "-FORK-GLM", [&](size_t device) {
+            "CE-MS" + std::to_string(streamCount) + "-FORK" + startModeSuffix + "-GLM",
+            [&](size_t device) {
                 GlmSharedHostCopyBuffer srcBuffer{srcRegion.ShmName(), device, ctx.num};
                 GlmDeviceCopyBuffer dstBuffer{device, ctx.num};
                 H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};
@@ -174,7 +176,8 @@ DEFINE_COPY_CASE_NO_RUNTIME_IO_MODE(
                                ctx.num};
     result.Push(ascend_copy::RunForkedCopyBatch(
         ctx, srcRegion.Name(), "acl::device::all",
-        "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
+        "CE-MS" + std::to_string(streamCount) + "-FORK" + startModeSuffix,
+        [&](size_t device) {
             SharedHostCopyBuffer srcBuffer{srcRegion.ShmName(), device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
             H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};
@@ -189,10 +192,12 @@ DEFINE_COPY_CASE_NO_RUNTIME(
 {
     constexpr size_t defaultStreamCount = 4;
     const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
+    const auto startModeSuffix = CopyStartModeMethodSuffix(ResolveCopyStartMode());
     CopyResult result;
     result.Push(ascend_copy::RunForkedCopyBatch(
         ctx, "acl::host::all", "acl::device::all",
-        "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
+        "CE-MS" + std::to_string(streamCount) + "-FORK" + startModeSuffix,
+        [&](size_t device) {
             HostCopyBuffer srcBuffer{device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
             H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};
@@ -209,10 +214,12 @@ DEFINE_COPY_CASE_NO_RUNTIME(
 {
     constexpr size_t defaultStreamCount = 4;
     const auto streamCount = ctx.streams == 0 ? defaultStreamCount : ctx.streams;
+    const auto startModeSuffix = CopyStartModeMethodSuffix(ResolveCopyStartMode());
     CopyResult result;
     result.Push(ascend_copy::RunForkedCopyBatch(
         ctx, "acl::odirect_mmap::all", "acl::device::all",
-        "CE-MS" + std::to_string(streamCount) + "-FORK", [&](size_t device) {
+        "CE-MS" + std::to_string(streamCount) + "-FORK" + startModeSuffix,
+        [&](size_t device) {
             ODirectHostCopyBuffer srcBuffer{device, ctx.size, ctx.num};
             DeviceCopyBuffer dstBuffer{device, ctx.size, ctx.num};
             H2DCEMultiStreamCopyInstance instance{ctx.iter, false, streamCount, ctx.syncMode};

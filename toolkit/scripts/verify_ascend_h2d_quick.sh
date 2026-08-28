@@ -133,7 +133,8 @@ run_case()
     fi
 
     printf '\n[%s] running...\n' "${label}"
-    if ! COPY_START_TRACE_ITERATIONS="${TRACE_ITERATIONS}" COPY_FFTS_VALIDATE=1 \
+    if ! COPY_START_MODE=device_gate COPY_START_TRACE_ITERATIONS="${TRACE_ITERATIONS}" \
+        COPY_FFTS_VALIDATE=1 \
         "${command[@]}" >"${log_file}" 2>&1; then
         printf '[%s] FAIL: benchmark failed; tail of %s follows\n' "${label}" "${log_file}" >&2
         tail -n 80 "${log_file}" >&2

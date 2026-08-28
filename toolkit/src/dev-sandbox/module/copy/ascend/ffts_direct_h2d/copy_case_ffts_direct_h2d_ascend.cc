@@ -157,6 +157,7 @@ std::string FftsDirectMethodName(const CopyCase::Context& ctx, size_t streamCoun
 {
     auto name = "ffts-direct-h2d-" + std::to_string(streamCount) + "s";
     if (ctx.lanes > 0) { name += "-L" + std::to_string(ctx.lanes); }
+    name += CopyStartModeMethodSuffix(ResolveCopyStartMode());
     if (ctx.ioMode == CopyIoMode::GLM) { name += "-GLM"; }
     return name;
 }

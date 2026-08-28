@@ -87,7 +87,7 @@ run_case()
     printf 'log_file=%s\n' "${log_file}"
     print_command "${command[@]}"
 
-    if ! COPY_START_TRACE_ITERATIONS="${TRACE_ITERATIONS}" \
+    if ! COPY_START_MODE=device_gate COPY_START_TRACE_ITERATIONS="${TRACE_ITERATIONS}" \
         "${command[@]}" 2>&1 | tee "${log_file}"; then
         printf 'FAIL: benchmark failed for %s\n' "${label}" >&2
         return 1
