@@ -205,9 +205,7 @@ run_case()
         "$(summary_value host_control_submit_p95_us "${timing_fields[@]}")" \
         "$(summary_value host_sync_wait_avg_us "${timing_fields[@]}")" \
         "$(summary_value host_sync_wait_p95_us "${timing_fields[@]}")"
-    printf 'device_breakdown gate_avg_p95_us=%s/%s copy_avg_p95_us=%s/%s\n' \
-        "$(summary_value device_gate_avg_us "${timing_fields[@]}")" \
-        "$(summary_value device_gate_p95_us "${timing_fields[@]}")" \
+    printf 'device_breakdown copy_avg_p95_us=%s/%s\n' \
         "$(summary_value device_copy_avg_us "${timing_fields[@]}")" \
         "$(summary_value device_copy_p95_us "${timing_fields[@]}")"
     printf 'trace_wall process_avg_p95_us=%s/%s outside_device_avg_p95_us=%s/%s\n' \

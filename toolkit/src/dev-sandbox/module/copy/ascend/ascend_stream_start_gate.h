@@ -34,7 +34,6 @@ class AscendStreamStartGate {
     aclrtStream controlStream_ = nullptr;
     aclrtStream releaseStream_ = nullptr;
     aclrtNotify releaseNotify_ = nullptr;
-    aclrtEvent releaseEvent_ = nullptr;
     aclrtEvent startEvent_ = nullptr;
     size_t streamCount_ = 0;
     std::vector<aclrtEvent> startEvents_;
@@ -51,7 +50,6 @@ public:
         ASCEND_ASSERT(aclrtCreateNotify(&releaseNotify_, ACL_NOTIFY_DEFAULT));
         ASCEND_ASSERT(aclrtCreateEventExWithFlag(&startEvent_, ACL_EVENT_SYNC));
         if (traceStart) {
-            ASCEND_ASSERT(aclrtCreateEventExWithFlag(&releaseEvent_, ACL_EVENT_TIME_LINE));
             startEvents_.resize(streamCount);
             for (auto& event : startEvents_) {
                 ASCEND_ASSERT(aclrtCreateEventExWithFlag(&event, ACL_EVENT_TIME_LINE));
@@ -80,27 +78,10 @@ public:
         if (recordStart) { ASCEND_ASSERT(aclrtRecordEvent(startEvents_[index], stream)); }
     }
 
-    void Release(bool recordTiming)
+    void Release(bool)
     {
         ASCEND_ASSERT(aclrtSetDevice(deviceId_));
-        ASSERT(!recordTiming || releaseEvent_ != nullptr);
-        if (recordTiming) {
-            ASCEND_ASSERT(aclrtRecordEvent(releaseEvent_, releaseStream_));
-        }
         ASCEND_ASSERT(aclrtRecordNotify(releaseNotify_, releaseStream_));
-    }
-
-    size_t DeviceGateCostUs(aclrtEvent totalStart) const
-    {
-        ASSERT(totalStart != nullptr);
-        ASSERT(releaseEvent_ != nullptr);
-        ASCEND_ASSERT(aclrtSetDevice(deviceId_));
-        uint64_t releaseTimestampUs = 0;
-        uint64_t startTimestampUs = 0;
-        ASCEND_ASSERT(aclrtEventGetTimestamp(releaseEvent_, &releaseTimestampUs));
-        ASCEND_ASSERT(aclrtEventGetTimestamp(totalStart, &startTimestampUs));
-        ASSERT(startTimestampUs >= releaseTimestampUs);
-        return static_cast<size_t>(startTimestampUs - releaseTimestampUs);
     }
 
     aclrtStream ControlStream() const { return controlStream_; }
@@ -130,10 +111,6 @@ public:
         if (releaseNotify_ != nullptr) {
             ASCEND_ASSERT(aclrtDestroyNotify(releaseNotify_));
             releaseNotify_ = nullptr;
-        }
-        if (releaseEvent_ != nullptr) {
-            ASCEND_ASSERT(aclrtDestroyEvent(releaseEvent_));
-            releaseEvent_ = nullptr;
         }
         if (releaseStream_ != nullptr) {
             ASCEND_ASSERT(aclrtDestroyStream(releaseStream_));

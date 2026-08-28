@@ -62,7 +62,6 @@ def parse_trace_line(line, line_number):
         "release_submit_ns",
         "sync_enter_ns",
         "wall_end_ns",
-        "device_gate_us",
         "device_copy_us",
     }
     timing_present = timing_fields & fields.keys()
@@ -211,17 +210,14 @@ def main():
             (record["wall_end_ns"] - record["wall_start_ns"]) / 1000
             for record in timing_records
         ]
-        device_gate = [record["device_gate_us"] for record in timing_records]
         device_copy = [record["device_copy_us"] for record in timing_records]
         wall_minus_device = [
-            wall - gate - copy
-            for wall, gate, copy in zip(process_wall, device_gate, device_copy)
+            wall - copy for wall, copy in zip(process_wall, device_copy)
         ]
         metrics = (
             ("host_release_submit", host_release_submit),
             ("host_control_submit", host_control_submit),
             ("host_sync_wait", host_sync_wait),
-            ("device_gate", device_gate),
             ("device_copy", device_copy),
             ("process_wall", process_wall),
             ("wall_minus_device", wall_minus_device),

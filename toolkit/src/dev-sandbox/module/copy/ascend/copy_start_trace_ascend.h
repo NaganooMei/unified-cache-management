@@ -49,8 +49,7 @@ inline uint64_t CopyStartMonotonicNs()
 inline void EmitCopyStartTrace(const std::string& method, size_t deviceId, size_t iteration,
                                uint64_t barrierEnterNs, uint64_t barrierExitNs,
                                uint64_t wallStartNs, uint64_t releaseSubmitNs,
-                               uint64_t syncEnterNs, uint64_t wallEndNs, size_t deviceGateUs,
-                               size_t deviceCopyUs,
+                               uint64_t syncEnterNs, uint64_t wallEndNs, size_t deviceCopyUs,
                                const std::vector<uint64_t>& streamTimestampsUs)
 {
     ASSERT(!streamTimestampsUs.empty());
@@ -68,7 +67,7 @@ inline void EmitCopyStartTrace(const std::string& method, size_t deviceId, size_
            << " notify_submit_delay_us=" << (releaseSubmitNs - barrierExitNs) / 1000
            << " wall_start_ns=" << wallStartNs << " release_submit_ns=" << releaseSubmitNs
            << " sync_enter_ns=" << syncEnterNs << " wall_end_ns=" << wallEndNs
-           << " device_gate_us=" << deviceGateUs << " device_copy_us=" << deviceCopyUs
+           << " device_copy_us=" << deviceCopyUs
            << " stream_start_min_us=" << *minimum << " stream_start_max_us=" << *maximum
            << " stream_start_skew_us=" << (*maximum - *minimum)
            << " stream_timestamps_us=";

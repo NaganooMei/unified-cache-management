@@ -250,8 +250,7 @@ protected:
             ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
             EmitCopyStartTrace(Name(), contexts_[0].deviceId, CurrentIteration(), barrierEnterNs,
                                barrierExitNs, wallStartNs, releaseSubmitNs, syncEnterNs, wallEndNs,
-                               startGate_.DeviceGateCostUs(totalStart_), copyCost,
-                               startGate_.StartTimestamps());
+                               copyCost, startGate_.StartTimestamps());
         }
         return {copyCost, submitCost};
     }
