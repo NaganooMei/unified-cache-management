@@ -25,6 +25,7 @@
 #define COPY_RESULT_H
 
 #include <algorithm>
+#include <cstdint>
 #include <fmt/format.h>
 #include <numeric>
 #include <string>
@@ -65,21 +66,31 @@ public:
             {
                 return fmt::format("{} / {} / {} / {} / {}", min, max, avg, p50, p90);
             }
-        } submit, copy;
+        } submit, copy, wall;
         std::vector<size_t> submitCosts;
         std::vector<size_t> copyCosts;
+        std::vector<size_t> wallCosts;
+        std::vector<std::uint64_t> wallStartNs;
+        std::vector<std::uint64_t> wallEndNs;
         Result(std::string src, std::string dst, std::string method, size_t size, size_t count,
-               std::vector<size_t>&& submitCosts, std::vector<size_t>&& copyCosts)
+               std::vector<size_t>&& submitCosts, std::vector<size_t>&& copyCosts,
+               std::vector<size_t>&& wallCosts = {},
+               std::vector<std::uint64_t>&& wallStartNs = {},
+               std::vector<std::uint64_t>&& wallEndNs = {})
             : src(std::move(src)),
               dst(std::move(dst)),
               method(std::move(method)),
               size(size),
               count(count),
               submitCosts(std::move(submitCosts)),
-              copyCosts(std::move(copyCosts))
+              copyCosts(std::move(copyCosts)),
+              wallCosts(std::move(wallCosts)),
+              wallStartNs(std::move(wallStartNs)),
+              wallEndNs(std::move(wallEndNs))
         {
             submit.Parse(this->submitCosts);
             copy.Parse(this->copyCosts);
+            wall.Parse(this->wallCosts);
         }
     };
     void Push(Result&& result) { results_.push_back(std::move(result)); }
@@ -87,15 +98,37 @@ public:
     {
         const std::string indentation = "  ";
         fmt::println(title);
-        fmt::println("{}{:<18}{:<18}{:<10}{:<10}{:<8}{:<40}{:<44}{}", indentation, "From", "To",
-                     "Method", "Size(KB)", "Count", "Submit(us)-(Min/Max/Avg/P50/P90)",
-                     "Copy(us)-(Min/Max/Avg/P50/P90)", "BW(GB/s)");
+        const bool showWall = std::any_of(results_.begin(), results_.end(), [](const auto& result) {
+            return !result.wallCosts.empty();
+        });
+        if (showWall) {
+            fmt::println("{}{:<18}{:<18}{:<10}{:<10}{:<8}{:<40}{:<44}{:<44}{:<12}{}",
+                         indentation, "From", "To", "Method", "Size(KB)", "Count",
+                         "Submit(us)-(Min/Max/Avg/P50/P90)",
+                         "Copy(us)-(Min/Max/Avg/P50/P90)",
+                         "Wall(us)-(Min/Max/Avg/P50/P90)", "DevBW(GB/s)", "WallBW(GB/s)");
+        } else {
+            fmt::println("{}{:<18}{:<18}{:<10}{:<10}{:<8}{:<40}{:<44}{}", indentation,
+                         "From", "To", "Method", "Size(KB)", "Count",
+                         "Submit(us)-(Min/Max/Avg/P50/P90)",
+                         "Copy(us)-(Min/Max/Avg/P50/P90)", "BW(GB/s)");
+        }
         for (const auto& result : results_) {
             auto bw =
                 result.size * result.count * 1e6f / result.copy.avg / 1024.f / 1024.f / 1024.f;
-            fmt::println("{}{:<18}{:<18}{:<10}{:<10.0f}{:<8}{:<40}{:<44}{:.3f}", indentation,
-                         result.src, result.dst, result.method, result.size / 1024.f, result.count,
-                         result.submit.ToString(), result.copy.ToString(), bw);
+            if (showWall && !result.wallCosts.empty()) {
+                auto wallBw = result.size * result.count * 1e6f / result.wall.avg / 1024.f /
+                              1024.f / 1024.f;
+                fmt::println("{}{:<18}{:<18}{:<10}{:<10.0f}{:<8}{:<40}{:<44}{:<44}{:<12.3f}{:.3f}",
+                             indentation, result.src, result.dst, result.method,
+                             result.size / 1024.f, result.count, result.submit.ToString(),
+                             result.copy.ToString(), result.wall.ToString(), bw, wallBw);
+            } else {
+                fmt::println("{}{:<18}{:<18}{:<10}{:<10.0f}{:<8}{:<40}{:<44}{:.3f}",
+                             indentation, result.src, result.dst, result.method,
+                             result.size / 1024.f, result.count, result.submit.ToString(),
+                             result.copy.ToString(), bw);
+            }
         }
     }
 

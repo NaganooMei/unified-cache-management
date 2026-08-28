@@ -62,6 +62,9 @@ struct ResultWireHeader {
     std::uint64_t count = 0;
     std::uint64_t submitCount = 0;
     std::uint64_t copyCount = 0;
+    std::uint64_t wallCount = 0;
+    std::uint64_t wallStartCount = 0;
+    std::uint64_t wallEndCount = 0;
 };
 
 inline bool WriteExact(int fd, const void* data, size_t size)
@@ -127,6 +130,20 @@ inline bool ReadCosts(int fd, std::uint64_t count, std::vector<size_t>& costs)
     return true;
 }
 
+inline bool WriteTimestamps(int fd, const std::vector<std::uint64_t>& timestamps)
+{
+    return timestamps.empty() ||
+           WriteExact(fd, timestamps.data(), timestamps.size() * sizeof(timestamps.front()));
+}
+
+inline bool ReadTimestamps(int fd, std::uint64_t count,
+                           std::vector<std::uint64_t>& timestamps)
+{
+    timestamps.resize(static_cast<size_t>(count));
+    return timestamps.empty() ||
+           ReadExact(fd, timestamps.data(), timestamps.size() * sizeof(timestamps.front()));
+}
+
 inline bool WriteResult(int fd, const CopyResult::Result& result)
 {
     ResultWireHeader header;
@@ -137,10 +154,15 @@ inline bool WriteResult(int fd, const CopyResult::Result& result)
     header.count = static_cast<std::uint64_t>(result.count);
     header.submitCount = static_cast<std::uint64_t>(result.submitCosts.size());
     header.copyCount = static_cast<std::uint64_t>(result.copyCosts.size());
+    header.wallCount = static_cast<std::uint64_t>(result.wallCosts.size());
+    header.wallStartCount = static_cast<std::uint64_t>(result.wallStartNs.size());
+    header.wallEndCount = static_cast<std::uint64_t>(result.wallEndNs.size());
 
     return WriteExact(fd, &header, sizeof(header)) && WriteString(fd, result.src) &&
            WriteString(fd, result.dst) && WriteString(fd, result.method) &&
-           WriteCosts(fd, result.submitCosts) && WriteCosts(fd, result.copyCosts);
+           WriteCosts(fd, result.submitCosts) && WriteCosts(fd, result.copyCosts) &&
+           WriteCosts(fd, result.wallCosts) && WriteTimestamps(fd, result.wallStartNs) &&
+           WriteTimestamps(fd, result.wallEndNs);
 }
 
 inline bool ReadResult(int fd, CopyResult::Result& result)
@@ -153,10 +175,16 @@ inline bool ReadResult(int fd, CopyResult::Result& result)
     std::string method;
     std::vector<size_t> submitCosts;
     std::vector<size_t> copyCosts;
+    std::vector<size_t> wallCosts;
+    std::vector<std::uint64_t> wallStartNs;
+    std::vector<std::uint64_t> wallEndNs;
     if (!ReadString(fd, header.srcLen, src) || !ReadString(fd, header.dstLen, dst) ||
         !ReadString(fd, header.methodLen, method) ||
         !ReadCosts(fd, header.submitCount, submitCosts) ||
-        !ReadCosts(fd, header.copyCount, copyCosts)) {
+        !ReadCosts(fd, header.copyCount, copyCosts) ||
+        !ReadCosts(fd, header.wallCount, wallCosts) ||
+        !ReadTimestamps(fd, header.wallStartCount, wallStartNs) ||
+        !ReadTimestamps(fd, header.wallEndCount, wallEndNs)) {
         return false;
     }
 
@@ -166,7 +194,10 @@ inline bool ReadResult(int fd, CopyResult::Result& result)
                                 static_cast<size_t>(header.size),
                                 static_cast<size_t>(header.count),
                                 std::move(submitCosts),
-                                std::move(copyCosts)};
+                                std::move(copyCosts),
+                                std::move(wallCosts),
+                                std::move(wallStartNs),
+                                std::move(wallEndNs)};
     return true;
 }
 
@@ -212,6 +243,34 @@ inline std::vector<size_t> MergeMaxCosts(const std::vector<CopyResult::Result>& 
     return merged;
 }
 
+inline std::vector<size_t> MergeWallCosts(const std::vector<CopyResult::Result>& results)
+{
+    ASSERT(!results.empty());
+    const auto iterationCount = results.front().wallStartNs.size();
+    ASSERT(results.front().wallEndNs.size() == iterationCount);
+    if (iterationCount == 0) { return {}; }
+
+    std::vector<size_t> merged;
+    merged.reserve(iterationCount);
+    for (size_t iteration = 0; iteration < iterationCount; ++iteration) {
+        auto earliestStartNs = results.front().wallStartNs[iteration];
+        auto latestEndNs = results.front().wallEndNs[iteration];
+        for (const auto& result : results) {
+            ASSERT(result.wallStartNs.size() == iterationCount);
+            ASSERT(result.wallEndNs.size() == iterationCount);
+            ASSERT(result.wallEndNs[iteration] >= result.wallStartNs[iteration]);
+            earliestStartNs = std::min(earliestStartNs, result.wallStartNs[iteration]);
+            latestEndNs = std::max(latestEndNs, result.wallEndNs[iteration]);
+        }
+        ASSERT(latestEndNs >= earliestStartNs);
+        constexpr std::uint64_t nanosecondsPerMicrosecond = 1000;
+        const auto elapsedNs = latestEndNs - earliestStartNs;
+        merged.push_back(static_cast<size_t>(
+            (elapsedNs + nanosecondsPerMicrosecond - 1) / nanosecondsPerMicrosecond));
+    }
+    return merged;
+}
+
 inline CopyResult::Result MergeForkedResults(std::vector<CopyResult::Result>&& results,
                                              std::string srcName, std::string dstName,
                                              std::string methodName)
@@ -223,9 +282,14 @@ inline CopyResult::Result MergeForkedResults(std::vector<CopyResult::Result>&& r
         totalCount += result.count;
     }
 
-    return {std::move(srcName),           std::move(dstName), std::move(methodName),
-            results.front().size,         totalCount,         MergeMaxCosts(results, true),
-            MergeMaxCosts(results, false)};
+    return {std::move(srcName),
+            std::move(dstName),
+            std::move(methodName),
+            results.front().size,
+            totalCount,
+            MergeMaxCosts(results, true),
+            MergeMaxCosts(results, false),
+            MergeWallCosts(results)};
 }
 
 inline std::vector<CopyResult::Result> RunForkedCopyBatchPerDevice(

@@ -372,6 +372,7 @@ protected:
         WaitForProcessReadyBarrier();
         const uint64_t barrierExitNs = traceStart ? CopyStartMonotonicNs() : 0;
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
+        const uint64_t wallStartNs = CopyStartMonotonicNs();
         startGate_.Release();
         const uint64_t notifySubmitNs = traceStart ? CopyStartMonotonicNs() : 0;
 
@@ -389,6 +390,8 @@ protected:
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         ASCEND_ASSERT(aclrtRecordEvent(totalEnd_, startGate_.ControlStream()));
         ASCEND_ASSERT(aclrtSynchronizeStream(startGate_.ControlStream()));
+        const uint64_t wallEndNs = CopyStartMonotonicNs();
+        SetWallClockRange(wallStartNs, wallEndNs);
 
         if (traceStart) {
             for (const auto& ctx : contexts_) {

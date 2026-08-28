@@ -25,12 +25,15 @@
 #define COPY_INSTANCE_H
 
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <utility>
 #include <vector>
 #include "copy_buffer.h"
 #include "copy_result.h"
+#include "error_handle.h"
 
 class CopyInstance {
 protected:
@@ -39,6 +42,8 @@ protected:
     bool affinitySrc_;
     bool measuredIteration_ = false;
     size_t currentIteration_ = 0;
+    std::uint64_t wallStartNs_ = 0;
+    std::uint64_t wallEndNs_ = 0;
     inline static size_t configuredWarmupIterations_ = 3;
     inline static std::function<void()> processReadyBarrier_{};
 
@@ -64,6 +69,20 @@ protected:
     }
 
     size_t CurrentIteration() const { return currentIteration_; }
+
+    void SetWallClockRange(std::uint64_t startNs, std::uint64_t endNs)
+    {
+        ASSERT(startNs > 0);
+        ASSERT(endNs >= startNs);
+        wallStartNs_ = startNs;
+        wallEndNs_ = endNs;
+    }
+
+    void ResetWallClockRange()
+    {
+        wallStartNs_ = 0;
+        wallEndNs_ = 0;
+    }
 
     static void WaitForProcessReadyBarrier()
     {
@@ -112,18 +131,29 @@ public:
         measuredIteration_ = false;
         for (size_t i = 0; i < warmupIterations_; i++) {
             currentIteration_ = i;
+            ResetWallClockRange();
             DoCopyOnce();
         }
 
         std::vector<size_t> submitCostArray;
         std::vector<size_t> copyCostArray;
+        std::vector<std::uint64_t> wallStartNsArray;
+        std::vector<std::uint64_t> wallEndNsArray;
         measuredIteration_ = true;
         for (size_t i = 0; i < iterations_; i++) {
             currentIteration_ = i;
+            ResetWallClockRange();
             auto [copyCost, submitCost] = DoCopyOnce();
             copyCostArray.push_back(copyCost);
             submitCostArray.push_back(submitCost);
+            ASSERT((wallStartNs_ == 0) == (wallEndNs_ == 0));
+            if (wallStartNs_ != 0) {
+                wallStartNsArray.push_back(wallStartNs_);
+                wallEndNsArray.push_back(wallEndNs_);
+            }
         }
+        ASSERT(wallStartNsArray.empty() || wallStartNsArray.size() == iterations_);
+        ASSERT(wallEndNsArray.size() == wallStartNsArray.size());
 
         Cleanup();
 
@@ -133,7 +163,10 @@ public:
                 srcBuffers.front()->Size(),
                 srcBuffers.front()->Number() * srcBuffers.size(),
                 std::move(submitCostArray),
-                std::move(copyCostArray)};
+                std::move(copyCostArray),
+                {},
+                std::move(wallStartNsArray),
+                std::move(wallEndNsArray)};
     }
 
     CopyResult::Result DoCopy(const CopyBuffer* srcBuffer, const CopyBuffer* dstBuffer)
