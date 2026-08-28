@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--max-barrier-exit-skew-us", type=float)
     parser.add_argument("--max-notify-submit-skew-us", type=float)
     parser.add_argument("--max-stream-start-skew-us", type=float)
+    parser.add_argument("--require-timing-breakdown", action="store_true")
     return parser.parse_args()
 
 
@@ -47,7 +48,7 @@ def parse_trace_line(line, line_number):
     if missing:
         raise ValueError(f"line {line_number}: missing fields: {', '.join(missing)}")
 
-    return {
+    record = {
         "start_gate": fields.get("start_gate"),
         "method": fields["method"],
         "device": int(fields["device"]),
@@ -56,12 +57,42 @@ def parse_trace_line(line, line_number):
         "notify_submit_ns": int(fields["notify_submit_ns"]),
         "stream_start_skew_us": int(fields["stream_start_skew_us"]),
     }
+    timing_fields = {
+        "wall_start_ns",
+        "release_submit_ns",
+        "sync_enter_ns",
+        "wall_end_ns",
+        "device_gate_us",
+        "device_copy_us",
+    }
+    timing_present = timing_fields & fields.keys()
+    if timing_present and timing_present != timing_fields:
+        missing_timing = sorted(timing_fields - fields.keys())
+        raise ValueError(
+            f"line {line_number}: incomplete timing breakdown: "
+            f"{', '.join(missing_timing)}"
+        )
+    if timing_present:
+        for key in timing_fields:
+            record[key] = int(fields[key])
+        if not (
+            record["wall_start_ns"]
+            <= record["release_submit_ns"]
+            <= record["sync_enter_ns"]
+            <= record["wall_end_ns"]
+        ):
+            raise ValueError(f"line {line_number}: invalid host timing order")
+    return record
 
 
 def percentile(values, percent):
     ordered = sorted(values)
     index = max(0, math.ceil(len(ordered) * percent / 100) - 1)
     return ordered[index]
+
+
+def average(values):
+    return sum(values) / len(values)
 
 
 def main():
@@ -98,6 +129,19 @@ def main():
             file=sys.stderr,
         )
         return 1
+
+
+    timing_records = [
+        record
+        for records in groups.values()
+        for record in records
+        if "wall_start_ns" in record
+    ]
+    total_records = sum(len(records) for records in groups.values())
+    if timing_records and len(timing_records) != total_records:
+        raise ValueError("timing breakdown is present for only part of the trace records")
+    if args.require_timing_breakdown and not timing_records:
+        raise ValueError("timing breakdown is required but missing; rebuild dev-sandbox")
 
     failures = []
     methods = sorted({method for method, _ in groups})
@@ -150,6 +194,43 @@ def main():
         f"p95_stream_start_skew_us={percentile(all_stream_skews, 95)} "
         f"max_stream_start_skew_us={max_stream_skew}"
     )
+    if timing_records:
+        host_release_submit = [
+            (record["release_submit_ns"] - record["wall_start_ns"]) / 1000
+            for record in timing_records
+        ]
+        host_control_submit = [
+            (record["sync_enter_ns"] - record["release_submit_ns"]) / 1000
+            for record in timing_records
+        ]
+        host_sync_wait = [
+            (record["wall_end_ns"] - record["sync_enter_ns"]) / 1000
+            for record in timing_records
+        ]
+        process_wall = [
+            (record["wall_end_ns"] - record["wall_start_ns"]) / 1000
+            for record in timing_records
+        ]
+        device_gate = [record["device_gate_us"] for record in timing_records]
+        device_copy = [record["device_copy_us"] for record in timing_records]
+        wall_minus_device = [
+            wall - gate - copy
+            for wall, gate, copy in zip(process_wall, device_gate, device_copy)
+        ]
+        metrics = (
+            ("host_release_submit", host_release_submit),
+            ("host_control_submit", host_control_submit),
+            ("host_sync_wait", host_sync_wait),
+            ("device_gate", device_gate),
+            ("device_copy", device_copy),
+            ("process_wall", process_wall),
+            ("wall_minus_device", wall_minus_device),
+        )
+        output = ["timing_summary", f"samples={len(timing_records)}"]
+        for name, values in metrics:
+            output.append(f"{name}_avg_us={average(values):.3f}")
+            output.append(f"{name}_p95_us={percentile(values, 95):.3f}")
+        print(" ".join(output))
 
     thresholds = (
         (

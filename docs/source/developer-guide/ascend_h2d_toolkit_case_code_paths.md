@@ -231,8 +231,8 @@ AllODirectHost2AllDeviceFftsDirectH2DCase::Run
           -> FftsDirectH2DCopyInstance::Prepare
           -> 3 次 warmup
           -> 128 次 DoCopyOnce
-            -> FftsD2DDispatcher::BuildCopies
-            -> FftsD2DDispatcher::Launch
+            -> FftsSdmaDispatcher::BuildCopies
+            -> FftsSdmaDispatcher::Launch
               -> rtFftsPlusTaskLaunchWithFlag
           -> Cleanup
     -> MergeForkedResults
@@ -277,11 +277,11 @@ active_streams = min(requested_streams, task_count)
 
 随后按 task 轮转分配 Stream，即第 `taskIndex` 个 task 分配到 `taskIndex % active_streams`。这一点与 CE 的连续区间分配不同。
 
-每个 task 下发时，`FftsD2DDispatcher` 为 3 个 fragment 分别构造 SDMA context，将可并发 ready lane 数限制在 task copy 数和 `FFTS_MAX_READY_LANES` 之间，默认最大为 8。最后调用 `rtFftsPlusTaskLaunchWithFlag`，把整个 FFTS task 提交到对应 ACL Stream。task 全部下发后，FFTS 与 CE 使用相同的 `event` 或逐 Stream `stream` 完成同步策略。
+每个 task 下发时，`FftsSdmaDispatcher` 为 3 个 fragment 分别构造 SDMA context，将可并发 ready lane 数限制在 task copy 数和 `FFTS_MAX_READY_LANES` 之间，默认最大为 8。每次 launch 都由独立的 `InFlightObject` 保存 copy specs 和 dispatcher，直到对应 Stream 完成同步后才释放。最后调用 `rtFftsPlusTaskLaunchWithFlag`，把整个 FFTS task 提交到对应 ACL Stream。task 全部下发后，FFTS 与 CE 使用相同的 `event` 或逐 Stream `stream` 完成同步策略。
 
 FFTS Dispatcher 位于：
 
-`toolkit/src/dev-sandbox/module/copy/ascend/h2d_ffts_pipeline/ffts_d2d_dispatcher_ascend.h`
+`toolkit/src/dev-sandbox/module/copy/ascend/ffts_direct_h2d/ffts_sdma_dispatcher_ascend.h`
 
 因此在相同物理 IO 数下：
 

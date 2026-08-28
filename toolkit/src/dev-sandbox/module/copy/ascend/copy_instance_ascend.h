@@ -373,8 +373,8 @@ protected:
         const uint64_t barrierExitNs = traceStart ? CopyStartMonotonicNs() : 0;
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         const uint64_t wallStartNs = CopyStartMonotonicNs();
-        startGate_.Release();
-        const uint64_t notifySubmitNs = traceStart ? CopyStartMonotonicNs() : 0;
+        startGate_.Release(traceStart);
+        const uint64_t releaseSubmitNs = CopyStartMonotonicNs();
 
         if (syncMode_ == CopySyncMode::EVENT) {
             for (const auto& ctx : contexts_) {
@@ -389,9 +389,14 @@ protected:
 
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         ASCEND_ASSERT(aclrtRecordEvent(totalEnd_, startGate_.ControlStream()));
+        const uint64_t syncEnterNs = CopyStartMonotonicNs();
         ASCEND_ASSERT(aclrtSynchronizeStream(startGate_.ControlStream()));
         const uint64_t wallEndNs = CopyStartMonotonicNs();
         SetWallClockRange(wallStartNs, wallEndNs);
+
+        float copyCostMs = 0.f;
+        ASCEND_ASSERT(aclrtEventElapsedTime(&copyCostMs, totalStart_, totalEnd_));
+        size_t copyCost = static_cast<size_t>(copyCostMs * 1000);
 
         if (traceStart) {
             for (const auto& ctx : contexts_) {
@@ -400,12 +405,10 @@ protected:
             }
             ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
             EmitCopyStartTrace(Name(), contexts_[0].deviceId, CurrentIteration(), barrierEnterNs,
-                               barrierExitNs, notifySubmitNs, startGate_.StartTimestamps());
+                               barrierExitNs, wallStartNs, releaseSubmitNs, syncEnterNs, wallEndNs,
+                               startGate_.DeviceGateCostUs(totalStart_), copyCost,
+                               startGate_.StartTimestamps());
         }
-
-        float copyCostMs = 0.f;
-        ASCEND_ASSERT(aclrtEventElapsedTime(&copyCostMs, totalStart_, totalEnd_));
-        size_t copyCost = static_cast<size_t>(copyCostMs * 1000);
 
         return {copyCost, submitCost};
     }

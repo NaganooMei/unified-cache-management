@@ -21,8 +21,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
-#ifndef FFTS_D2D_DISPATCHER_ASCEND_H
-#define FFTS_D2D_DISPATCHER_ASCEND_H
+#ifndef FFTS_SDMA_DISPATCHER_ASCEND_H
+#define FFTS_SDMA_DISPATCHER_ASCEND_H
 
 #include <acl/acl.h>
 #include <algorithm>
@@ -63,29 +63,90 @@ static_assert(sizeof(rtFftsPlusSdmaCtx_t) == 128, "rtFftsPlusSdmaCtx_t must be 1
     } while (0)
 
 struct AscendFftsCopySpec {
-    void* dst;
-    const void* src;
-    size_t size;
+    void* dst{nullptr};
+    const void* src{nullptr};
+    size_t size{0};
 };
 
-class FftsD2DDispatcher {
+inline uint16_t ResolveFftsMaxReadyLanes(size_t configuredMaxReadyLanes)
+{
+    if (configuredMaxReadyLanes != 0) {
+        ASSERT(configuredMaxReadyLanes <= std::numeric_limits<uint16_t>::max());
+        return static_cast<uint16_t>(configuredMaxReadyLanes);
+    }
+
+    const char* value = std::getenv(kFftsMaxReadyLanesEnv);
+    if (value == nullptr || value[0] == '\0') { return kDefaultFftsMaxReadyLanes; }
+
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
+        return kDefaultFftsMaxReadyLanes;
+    }
+
+    const auto maxValue = static_cast<unsigned long>(std::numeric_limits<uint16_t>::max());
+    if (parsed > maxValue) { return std::numeric_limits<uint16_t>::max(); }
+    return static_cast<uint16_t>(parsed);
+}
+
+class FftsSdmaDispatcher {
 public:
-    FftsD2DDispatcher() : maxReadyLanes_{ResolveMaxReadyLanes()} {}
-
-    explicit FftsD2DDispatcher(size_t maxReadyLanes) : FftsD2DDispatcher()
+    uint16_t BuildCopies(const std::vector<AscendFftsCopySpec>& copies,
+                         uint16_t maxReadyLanes)
     {
-        SetMaxReadyLanes(maxReadyLanes);
+        Reset();
+        ASSERT(!copies.empty());
+        ASSERT(maxReadyLanes > 0);
+
+        contexts_.reserve(copies.size());
+        const auto laneCount =
+            static_cast<uint16_t>(std::min<size_t>(copies.size(), maxReadyLanes));
+        std::vector<int32_t> lastTaskId(laneCount, -1);
+
+        for (size_t i = 0; i < copies.size(); ++i) {
+            AddMemcpy(copies[i].dst, copies[i].src, copies[i].size);
+
+            const size_t lane = i % laneCount;
+            const auto taskId = static_cast<uint32_t>(contexts_.size() - 1);
+            if (lastTaskId[lane] >= 0) {
+                AddDependency(static_cast<uint32_t>(lastTaskId[lane]), taskId);
+            }
+            lastTaskId[lane] = static_cast<int32_t>(taskId);
+        }
+
+        return laneCount;
     }
 
-    void SetMaxReadyLanes(size_t maxReadyLanes)
+    void Launch(aclrtStream stream, uint16_t readyContextNum)
     {
-        if (maxReadyLanes == 0) { return; }
-        ASSERT(maxReadyLanes <= std::numeric_limits<uint16_t>::max());
-        maxReadyLanes_ = static_cast<uint16_t>(maxReadyLanes);
+        ASSERT(stream != nullptr);
+        ASSERT(!contexts_.empty());
+        ASSERT(readyContextNum > 0);
+        ASSERT(readyContextNum <= contexts_.size());
+
+        rtFftsPlusSqe_t sqe{};
+        sqe.fftsType = RT_FFTS_PLUS_TYPE;
+        sqe.totalContextNum = static_cast<uint16_t>(contexts_.size());
+        sqe.readyContextNum = readyContextNum;
+        sqe.preloadContextNum = std::min<uint16_t>(readyContextNum, kFftsContextMaxNum);
+        sqe.timeout = 0;
+        sqe.subType = kFftsCommunicationTask;
+
+        rtFftsPlusTaskInfo_t task{};
+        task.fftsPlusSqe = &sqe;
+        task.descBuf = contexts_.data();
+        task.descBufLen = sizeof(rtFftsPlusComCtx_t) * contexts_.size();
+        task.descAddrType = RT_FFTS_PLUS_CTX_DESC_ADDR_TYPE_HOST;
+        task.argsHandleInfoNum = 0;
+        task.argsHandleInfoPtr = nullptr;
+
+        completed_ = true;
+        ASCEND_RT_ASSERT(
+            rtFftsPlusTaskLaunchWithFlag(&task, reinterpret_cast<rtStream_t>(stream), 0));
     }
 
-    void Reserve(size_t count) { contexts_.reserve(count); }
-
+private:
     void Reset()
     {
         contexts_.clear();
@@ -123,75 +184,6 @@ public:
         successor.predCnt++;
     }
 
-    uint16_t BuildCopies(const std::vector<AscendFftsCopySpec>& copies)
-    {
-        Reset();
-        if (copies.empty()) { return 0; }
-
-        Reserve(copies.size());
-        const uint16_t laneCount =
-            static_cast<uint16_t>(std::min<size_t>(copies.size(), maxReadyLanes_));
-        std::vector<int32_t> lastTaskId(laneCount, -1);
-
-        for (size_t i = 0; i < copies.size(); ++i) {
-            AddMemcpy(copies[i].dst, copies[i].src, copies[i].size);
-
-            const size_t lane = i % laneCount;
-            const uint32_t taskId = static_cast<uint32_t>(contexts_.size() - 1);
-            if (lastTaskId[lane] >= 0) {
-                AddDependency(static_cast<uint32_t>(lastTaskId[lane]), taskId);
-            }
-            lastTaskId[lane] = static_cast<int32_t>(taskId);
-        }
-
-        return laneCount;
-    }
-
-    void Launch(aclrtStream stream, uint16_t readyContextNum)
-    {
-        ASSERT(!contexts_.empty());
-        ASSERT(readyContextNum > 0);
-        ASSERT(readyContextNum <= contexts_.size());
-
-        rtFftsPlusSqe_t sqe{};
-        sqe.fftsType = RT_FFTS_PLUS_TYPE;
-        sqe.totalContextNum = static_cast<uint16_t>(contexts_.size());
-        sqe.readyContextNum = readyContextNum;
-        sqe.preloadContextNum = std::min<uint16_t>(readyContextNum, kFftsContextMaxNum);
-        sqe.timeout = 0;
-        sqe.subType = kFftsCommunicationTask;
-
-        rtFftsPlusTaskInfo_t task{};
-        task.fftsPlusSqe = &sqe;
-        task.descBuf = contexts_.data();
-        task.descBufLen = sizeof(rtFftsPlusComCtx_t) * contexts_.size();
-        task.descAddrType = RT_FFTS_PLUS_CTX_DESC_ADDR_TYPE_HOST;
-        task.argsHandleInfoNum = 0;
-        task.argsHandleInfoPtr = nullptr;
-
-        completed_ = true;
-        ASCEND_RT_ASSERT(
-            rtFftsPlusTaskLaunchWithFlag(&task, reinterpret_cast<rtStream_t>(stream), 0));
-    }
-
-private:
-    static uint16_t ResolveMaxReadyLanes()
-    {
-        const char* value = std::getenv(kFftsMaxReadyLanesEnv);
-        if (value == nullptr || value[0] == '\0') { return kDefaultFftsMaxReadyLanes; }
-
-        char* end = nullptr;
-        errno = 0;
-        const unsigned long parsed = std::strtoul(value, &end, 10);
-        if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
-            return kDefaultFftsMaxReadyLanes;
-        }
-
-        const auto maxValue = static_cast<unsigned long>(std::numeric_limits<uint16_t>::max());
-        if (parsed > maxValue) { return std::numeric_limits<uint16_t>::max(); }
-        return static_cast<uint16_t>(parsed);
-    }
-
     static uint64_t PtrToU64(const void* ptr)
     {
         return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr));
@@ -219,8 +211,7 @@ private:
     }
 
     std::vector<rtFftsPlusComCtx_t> contexts_;
-    uint16_t maxReadyLanes_ = kDefaultFftsMaxReadyLanes;
     bool completed_ = false;
 };
 
-#endif  // FFTS_D2D_DISPATCHER_ASCEND_H
+#endif  // FFTS_SDMA_DISPATCHER_ASCEND_H

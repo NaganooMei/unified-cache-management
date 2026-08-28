@@ -27,7 +27,6 @@ elseif(RUNTIME_BACKEND STREQUAL "Ascend")
         target_include_directories(copy PRIVATE
             ascend
             ascend/ffts_direct_h2d
-            ascend/h2d_ffts_pipeline
             ${ASCEND_FFTS_INCLUDE_DIRS})
         target_link_libraries(copy PRIVATE "${ASCEND_RUNTIME_LIBRARY}")
     else()

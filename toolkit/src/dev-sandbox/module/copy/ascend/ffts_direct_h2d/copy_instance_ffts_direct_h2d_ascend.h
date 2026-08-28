@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -34,18 +35,25 @@
 #include "ascend/error_handle_ascend.h"
 #include "copy_instance.h"
 #include "copy_sync_mode.h"
-#include "ffts_d2d_dispatcher_ascend.h"
+#include "ffts_sdma_dispatcher_ascend.h"
 #include "glm_io_buffer_ascend.h"
 #include "mapped_host_buffer_ffts_direct_h2d_ascend.h"
 
 class FftsDirectH2DCopyInstance : public CopyInstance {
 protected:
+    struct InFlightObject {
+        // Ascend Runtime may access dispatcher contexts asynchronously after launch.
+        // Keep both the source specs and one dispatcher alive until the Stream completes.
+        std::vector<AscendFftsCopySpec> specs;
+        FftsSdmaDispatcher dispatcher;
+    };
+
     struct DirectContext {
         size_t deviceId = 0;
         aclrtStream stream = nullptr;
         aclrtEvent endEvent = nullptr;
         std::vector<std::vector<AscendFftsCopySpec>> tasks;
-        FftsD2DDispatcher dispatcher;
+        std::vector<std::unique_ptr<InFlightObject>> inFlight;
     };
 
     std::vector<DirectContext> contexts_;
@@ -55,6 +63,7 @@ protected:
     size_t fragsPerTask_ = 0;
     size_t streamCount_ = 1;
     size_t laneCount_ = 0;
+    uint16_t maxReadyLanes_ = kDefaultFftsMaxReadyLanes;
     CopySyncMode syncMode_ = CopySyncMode::EVENT;
 
     void Prepare(const std::vector<const CopyBuffer*>& srcBuffers,
@@ -89,7 +98,6 @@ protected:
                 for (size_t stream = 0; stream < activeStreamCount; ++stream) {
                     DirectContext ctx;
                     ctx.deviceId = deviceId;
-                    ctx.dispatcher.SetMaxReadyLanes(laneCount_);
                     ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
                     if (syncMode_ == CopySyncMode::EVENT) {
                         ASCEND_ASSERT(
@@ -133,7 +141,6 @@ protected:
             for (size_t stream = 0; stream < activeStreamCount; ++stream) {
                 DirectContext ctx;
                 ctx.deviceId = deviceId;
-                ctx.dispatcher.SetMaxReadyLanes(laneCount_);
                 ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
                 if (syncMode_ == CopySyncMode::EVENT) {
                     ASCEND_ASSERT(aclrtCreateEventExWithFlag(&ctx.endEvent, ACL_EVENT_SYNC));
@@ -210,8 +217,8 @@ protected:
         const uint64_t barrierExitNs = traceStart ? CopyStartMonotonicNs() : 0;
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         const uint64_t wallStartNs = CopyStartMonotonicNs();
-        startGate_.Release();
-        const uint64_t notifySubmitNs = traceStart ? CopyStartMonotonicNs() : 0;
+        startGate_.Release(traceStart);
+        const uint64_t releaseSubmitNs = CopyStartMonotonicNs();
 
         if (syncMode_ == CopySyncMode::EVENT) {
             for (const auto& ctx : contexts_) {
@@ -225,9 +232,15 @@ protected:
         }
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         ASCEND_ASSERT(aclrtRecordEvent(totalEnd_, startGate_.ControlStream()));
+        const uint64_t syncEnterNs = CopyStartMonotonicNs();
         ASCEND_ASSERT(aclrtSynchronizeStream(startGate_.ControlStream()));
         const uint64_t wallEndNs = CopyStartMonotonicNs();
         SetWallClockRange(wallStartNs, wallEndNs);
+        ClearInFlight();
+
+        float copyCostMs = 0.0f;
+        ASCEND_ASSERT(aclrtEventElapsedTime(&copyCostMs, totalStart_, totalEnd_));
+        const auto copyCost = static_cast<size_t>(copyCostMs * 1000);
 
         if (traceStart) {
             for (const auto& ctx : contexts_) {
@@ -236,26 +249,35 @@ protected:
             }
             ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
             EmitCopyStartTrace(Name(), contexts_[0].deviceId, CurrentIteration(), barrierEnterNs,
-                               barrierExitNs, notifySubmitNs, startGate_.StartTimestamps());
+                               barrierExitNs, wallStartNs, releaseSubmitNs, syncEnterNs, wallEndNs,
+                               startGate_.DeviceGateCostUs(totalStart_), copyCost,
+                               startGate_.StartTimestamps());
         }
-
-        float copyCostMs = 0.0f;
-        ASCEND_ASSERT(aclrtEventElapsedTime(&copyCostMs, totalStart_, totalEnd_));
-        const auto copyCost = static_cast<size_t>(copyCostMs * 1000);
         return {copyCost, submitCost};
     }
 
     void SubmitContext(DirectContext& ctx) const
     {
         ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
+        ASSERT(ctx.inFlight.empty());
+        ctx.inFlight.reserve(ctx.tasks.size());
         for (const auto& copies : ctx.tasks) {
-            const auto readyCount = ctx.dispatcher.BuildCopies(copies);
+            auto object = std::make_unique<InFlightObject>();
+            object->specs = copies;
+            const auto readyCount =
+                object->dispatcher.BuildCopies(object->specs, maxReadyLanes_);
             ASSERT(readyCount > 0);
-            ctx.dispatcher.Launch(ctx.stream, readyCount);
+            object->dispatcher.Launch(ctx.stream, readyCount);
+            ctx.inFlight.push_back(std::move(object));
         }
         if (syncMode_ == CopySyncMode::EVENT) {
             ASCEND_ASSERT(aclrtRecordEvent(ctx.endEvent, ctx.stream));
         }
+    }
+
+    void ClearInFlight()
+    {
+        for (auto& ctx : contexts_) { ctx.inFlight.clear(); }
     }
 
 public:
@@ -267,6 +289,7 @@ public:
           fragsPerTask_(fragsPerTask),
           streamCount_(streamCount),
           laneCount_(laneCount),
+          maxReadyLanes_(ResolveFftsMaxReadyLanes(laneCount)),
           syncMode_(syncMode)
     {
     }
