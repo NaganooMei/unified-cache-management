@@ -95,9 +95,12 @@ public:
         ASSERT(totalStart != nullptr);
         ASSERT(releaseEvent_ != nullptr);
         ASCEND_ASSERT(aclrtSetDevice(deviceId_));
-        float costMs = 0.0f;
-        ASCEND_ASSERT(aclrtEventElapsedTime(&costMs, releaseEvent_, totalStart));
-        return static_cast<size_t>(costMs * 1000);
+        uint64_t releaseTimestampUs = 0;
+        uint64_t startTimestampUs = 0;
+        ASCEND_ASSERT(aclrtEventGetTimestamp(releaseEvent_, &releaseTimestampUs));
+        ASCEND_ASSERT(aclrtEventGetTimestamp(totalStart, &startTimestampUs));
+        ASSERT(startTimestampUs >= releaseTimestampUs);
+        return static_cast<size_t>(startTimestampUs - releaseTimestampUs);
     }
 
     aclrtStream ControlStream() const { return controlStream_; }
