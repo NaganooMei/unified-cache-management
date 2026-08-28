@@ -30,8 +30,6 @@
 #include "error_handle_ascend.h"
 
 class AscendStreamStartGate {
-    static constexpr uint64_t kDefaultNotifyFlag = 0;
-
     size_t deviceId_ = 0;
     aclrtStream controlStream_ = nullptr;
     std::vector<aclrtNotify> notifies_;
@@ -46,12 +44,12 @@ public:
         ASCEND_ASSERT(aclrtCreateStream(&controlStream_));
         notifies_.resize(streamCount);
         for (auto& notify : notifies_) {
-            ASCEND_ASSERT(aclrtCreateNotify(&notify, kDefaultNotifyFlag));
+            ASCEND_ASSERT(aclrtCreateNotify(&notify, ACL_NOTIFY_DEFAULT));
         }
         if (traceStart) {
             startEvents_.resize(streamCount);
             for (auto& event : startEvents_) {
-                ASCEND_ASSERT(aclrtCreateEventWithFlag(&event, ACL_EVENT_TIME_LINE));
+                ASCEND_ASSERT(aclrtCreateEventExWithFlag(&event, ACL_EVENT_TIME_LINE));
             }
         }
     }

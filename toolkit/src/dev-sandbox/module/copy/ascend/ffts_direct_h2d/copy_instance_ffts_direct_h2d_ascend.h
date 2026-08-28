@@ -92,7 +92,8 @@ protected:
                     ctx.dispatcher.SetMaxReadyLanes(laneCount_);
                     ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
                     if (syncMode_ == CopySyncMode::EVENT) {
-                        ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                        ASCEND_ASSERT(
+                            aclrtCreateEventExWithFlag(&ctx.endEvent, ACL_EVENT_SYNC));
                     }
                     ctx.tasks.reserve((taskCount + activeStreamCount - 1 - stream) /
                                       activeStreamCount);
@@ -135,7 +136,7 @@ protected:
                 ctx.dispatcher.SetMaxReadyLanes(laneCount_);
                 ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
                 if (syncMode_ == CopySyncMode::EVENT) {
-                    ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                    ASCEND_ASSERT(aclrtCreateEventExWithFlag(&ctx.endEvent, ACL_EVENT_SYNC));
                 }
                 ctx.tasks.reserve((taskCount + activeStreamCount - 1 - stream) /
                                   activeStreamCount);
@@ -158,8 +159,8 @@ protected:
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         for (const auto& ctx : contexts_) { ASSERT(ctx.deviceId == contexts_[0].deviceId); }
         startGate_.Setup(contexts_[0].deviceId, contexts_.size(), StartTraceEnabled());
-        ASCEND_ASSERT(aclrtCreateEvent(&totalStart_));
-        ASCEND_ASSERT(aclrtCreateEvent(&totalEnd_));
+        ASCEND_ASSERT(aclrtCreateEventExWithFlag(&totalStart_, ACL_EVENT_TIME_LINE));
+        ASCEND_ASSERT(aclrtCreateEventExWithFlag(&totalEnd_, ACL_EVENT_TIME_LINE));
     }
 
     void Cleanup() override
@@ -226,6 +227,11 @@ protected:
         ASCEND_ASSERT(aclrtSynchronizeStream(startGate_.ControlStream()));
 
         if (traceStart) {
+            for (const auto& ctx : contexts_) {
+                ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
+                ASCEND_ASSERT(aclrtSynchronizeStream(ctx.stream));
+            }
+            ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
             EmitCopyStartTrace(Name(), contexts_[0].deviceId, CurrentIteration(), barrierEnterNs,
                                barrierExitNs, notifySubmitNs, startGate_.StartTimestamps());
         }

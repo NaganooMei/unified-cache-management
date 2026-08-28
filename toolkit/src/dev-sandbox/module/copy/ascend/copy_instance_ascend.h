@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -69,7 +70,7 @@ protected:
             ctx.size = src.Size();
             ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
             ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
-            ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+            ASCEND_ASSERT(aclrtCreateEventExWithFlag(&ctx.endEvent, ACL_EVENT_SYNC));
             ctx.src.reserve(src.Number());
             ctx.dst.reserve(dst.Number());
             for (size_t j = 0; j < src.Number(); j++) {
@@ -80,8 +81,9 @@ protected:
         }
 
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
-        ASCEND_ASSERT(aclrtCreateEvent(&totalStart_));
-        ASCEND_ASSERT(aclrtCreateEvent(&totalEnd_));
+        ASCEND_ASSERT(aclrtCreateEventExWithFlag(
+            &totalStart_, static_cast<uint32_t>(ACL_EVENT_TIME_LINE | ACL_EVENT_SYNC)));
+        ASCEND_ASSERT(aclrtCreateEventExWithFlag(&totalEnd_, ACL_EVENT_TIME_LINE));
     }
 
     void Cleanup() override
@@ -267,7 +269,8 @@ protected:
                     ctx.deviceId = deviceId;
                     ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
                     if (syncMode_ == CopySyncMode::EVENT) {
-                        ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                        ASCEND_ASSERT(
+                            aclrtCreateEventExWithFlag(&ctx.endEvent, ACL_EVENT_SYNC));
                     }
                     contexts_.push_back(std::move(ctx));
                 }
@@ -302,7 +305,7 @@ protected:
                 ctx.size = src.Size();
                 ASCEND_ASSERT(aclrtCreateStream(&ctx.stream));
                 if (syncMode_ == CopySyncMode::EVENT) {
-                    ASCEND_ASSERT(aclrtCreateEvent(&ctx.endEvent));
+                    ASCEND_ASSERT(aclrtCreateEventExWithFlag(&ctx.endEvent, ACL_EVENT_SYNC));
                 }
                 ctx.src.reserve(count);
                 ctx.dst.reserve(count);
@@ -318,8 +321,8 @@ protected:
         ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
         for (const auto& ctx : contexts_) { ASSERT(ctx.deviceId == contexts_[0].deviceId); }
         startGate_.Setup(contexts_[0].deviceId, contexts_.size(), StartTraceEnabled());
-        ASCEND_ASSERT(aclrtCreateEvent(&totalStart_));
-        ASCEND_ASSERT(aclrtCreateEvent(&totalEnd_));
+        ASCEND_ASSERT(aclrtCreateEventExWithFlag(&totalStart_, ACL_EVENT_TIME_LINE));
+        ASCEND_ASSERT(aclrtCreateEventExWithFlag(&totalEnd_, ACL_EVENT_TIME_LINE));
     }
 
     void Cleanup() override
@@ -388,6 +391,11 @@ protected:
         ASCEND_ASSERT(aclrtSynchronizeStream(startGate_.ControlStream()));
 
         if (traceStart) {
+            for (const auto& ctx : contexts_) {
+                ASCEND_ASSERT(aclrtSetDevice(ctx.deviceId));
+                ASCEND_ASSERT(aclrtSynchronizeStream(ctx.stream));
+            }
+            ASCEND_ASSERT(aclrtSetDevice(contexts_[0].deviceId));
             EmitCopyStartTrace(Name(), contexts_[0].deviceId, CurrentIteration(), barrierEnterNs,
                                barrierExitNs, notifySubmitNs, startGate_.StartTimestamps());
         }
