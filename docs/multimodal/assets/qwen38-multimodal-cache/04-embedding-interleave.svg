@@ -1,80 +1,48 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="720" viewBox="0 0 1440 720" role="img" aria-labelledby="title desc">
-  <title id="title">视觉Embedding替换占位符并保持原始顺序</title>
-  <desc id="desc">文本和媒体占位符先组成Prompt，Vision Encoder输出随后按媒体所在位置替换占位区，最终形成宽度5120的统一Embedding序列。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="700" viewBox="0 0 1440 700" role="img" aria-labelledby="title desc">
+  <title id="title">视觉Embedding按媒体占位位置回填</title>
+  <desc id="desc">Prompt中的图片和视频占位区分别由对应的Vision Encoder输出替换，最终保持原始内容顺序形成宽度5120的统一Embedding序列。</desc>
   <defs>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#334155" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <style>
-      text { font-family: Arial, 'Microsoft YaHei', sans-serif; fill: #0f172a; }
-      .title { font-size: 34px; font-weight: 700; }
-      .subtitle { font-size: 18px; fill: #475569; }
-      .label { font-size: 18px; font-weight: 700; }
-      .small { font-size: 14px; fill: #475569; }
-      .tiny { font-size: 12px; fill: #334155; }
-      .flow { fill: none; stroke: #475569; stroke-width: 3; marker-end: url(#arrow); }
+      text{font-family:'Segoe Print','Comic Sans MS','KaiTi',sans-serif;fill:#1f2937;font-weight:600}.body{font-family:'Microsoft YaHei','Segoe UI',sans-serif;font-weight:400}.title{font-size:34px}.sub{font-size:17px;fill:#64748b}.label{font-size:18px}.small{font-size:14px;fill:#64748b}.rough{fill:#fffdf8;stroke:#334155;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}.blue{stroke:#4c6ef5}.green{stroke:#2f9e44}.orange{stroke:#f08c00}.purple{stroke:#7950f2}.bluefill{fill:#edf2ff}.greenfill{fill:#ebfbee}.orangefill{fill:#fff4e6}.purplefill{fill:#f3f0ff}.line{fill:none;stroke:#334155;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
     </style>
   </defs>
-  <rect width="1440" height="720" fill="#f8fafc"/>
-  <text x="72" y="58" class="title">不是“拼到末尾”：视觉 Embedding 回填到原占位位置</text>
-  <text x="72" y="92" class="subtitle">横向宽度用于帮助理解顺序，不按真实token数比例绘制</text>
+  <rect width="1440" height="700" fill="#fffdf8"/>
+  <text x="58" y="58" class="title">视觉 Embedding 回填原占位位置</text>
+  <text x="60" y="88" class="sub body">不是统一拼到序列末尾</text>
+  <path d="M61 99 C209 94 357 103 505 97" class="line orange" opacity=".42"/>
 
-  <text x="72" y="150" class="label">① Processor生成的Prompt结构</text>
-  <g transform="translate(72,174)" filter="url(#shadow)">
-    <rect width="190" height="72" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="95" y="32" text-anchor="middle" class="label">系统词 + 文本A</text><text x="95" y="55" text-anchor="middle" class="small">text token IDs</text>
-    <rect x="190" width="240" height="72" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/>
-    <text x="310" y="32" text-anchor="middle" class="label">图片1占位区</text><text x="310" y="55" text-anchor="middle" class="small">Nvis₁ = 16384</text>
-    <rect x="430" width="130" height="72" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="495" y="42" text-anchor="middle" class="label">文本B</text>
-    <rect x="560" width="180" height="72" fill="#ffedd5" stroke="#ea580c" stroke-width="2"/>
-    <text x="650" y="32" text-anchor="middle" class="label">图片2占位区</text><text x="650" y="55" text-anchor="middle" class="small">Nvis₂ = 4096</text>
-    <rect x="740" width="130" height="72" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="805" y="42" text-anchor="middle" class="label">文本C</text>
-    <rect x="870" width="190" height="72" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
-    <text x="965" y="32" text-anchor="middle" class="label">视频占位区</text><text x="965" y="55" text-anchor="middle" class="small">Nvisᵥ = 4096</text>
-    <rect x="1060" width="236" height="72" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="1178" y="32" text-anchor="middle" class="label">最终问题</text><text x="1178" y="55" text-anchor="middle" class="small">text token IDs</text>
+  <text x="60" y="143" class="label">1. Processor 展开媒体占位区</text>
+  <g transform="translate(60,166)">
+    <path d="M0 0 Q2 -6 11 -5 L203 -6 Q212 -2 210 8 L212 66 Q209 76 201 73 L10 76 Q0 73 2 63 Z" class="rough blue bluefill"/><text x="106" y="33" text-anchor="middle" class="label">文本 A</text><text x="106" y="57" text-anchor="middle" class="small body">text token</text>
+    <path d="M212 0 Q214 -6 223 -5 L447 -6 Q456 -2 454 8 L456 66 Q453 76 445 73 L222 76 Q212 73 214 63 Z" class="rough green greenfill"/><text x="334" y="33" text-anchor="middle" class="label">图片 1 占位区</text><text x="334" y="57" text-anchor="middle" class="small body">Nvis₁ = 16384</text>
+    <path d="M456 0 Q458 -6 467 -5 L585 -6 Q594 -2 592 8 L594 66 Q591 76 583 73 L466 76 Q456 73 458 63 Z" class="rough blue bluefill"/><text x="525" y="45" text-anchor="middle" class="label">文本 B</text>
+    <path d="M594 0 Q596 -6 605 -5 L783 -6 Q792 -2 790 8 L792 66 Q789 76 781 73 L604 76 Q594 73 596 63 Z" class="rough orange orangefill"/><text x="693" y="33" text-anchor="middle" class="label">图片 2</text><text x="693" y="57" text-anchor="middle" class="small body">Nvis₂ = 4096</text>
+    <path d="M792 0 Q794 -6 803 -5 L921 -6 Q930 -2 928 8 L930 66 Q927 76 919 73 L802 76 Q792 73 794 63 Z" class="rough blue bluefill"/><text x="861" y="45" text-anchor="middle" class="label">文本 C</text>
+    <path d="M930 0 Q932 -6 941 -5 L1133 -6 Q1142 -2 1140 8 L1142 66 Q1139 76 1131 73 L940 76 Q930 73 932 63 Z" class="rough purple purplefill"/><text x="1036" y="33" text-anchor="middle" class="label">视频占位区</text><text x="1036" y="57" text-anchor="middle" class="small body">Nvisᵥ = 4096</text>
+    <path d="M1142 0 Q1144 -6 1153 -5 L1307 -6 Q1316 -2 1314 8 L1316 66 Q1313 76 1305 73 L1152 76 Q1142 73 1144 63 Z" class="rough blue bluefill"/><text x="1229" y="45" text-anchor="middle" class="label">最终问题</text>
   </g>
 
-  <text x="72" y="326" class="label">② Vision Encoder独立返回每个媒体项的结果</text>
-  <g transform="translate(230,352)">
-    <rect width="280" height="82" rx="14" fill="#ccfbf1" stroke="#0f766e" stroke-width="2" filter="url(#shadow)"/>
-    <text x="140" y="34" text-anchor="middle" class="label">Image 1 Embeddings</text>
-    <text x="140" y="61" text-anchor="middle" class="small">[16384, 5120]</text>
-  </g>
-  <g transform="translate(580,352)">
-    <rect width="280" height="82" rx="14" fill="#ffedd5" stroke="#ea580c" stroke-width="2" filter="url(#shadow)"/>
-    <text x="140" y="34" text-anchor="middle" class="label">Image 2 Embeddings</text>
-    <text x="140" y="61" text-anchor="middle" class="small">[4096, 5120]</text>
-  </g>
-  <g transform="translate(930,352)">
-    <rect width="280" height="82" rx="14" fill="#ede9fe" stroke="#7c3aed" stroke-width="2" filter="url(#shadow)"/>
-    <text x="140" y="34" text-anchor="middle" class="label">Video Embeddings</text>
-    <text x="140" y="61" text-anchor="middle" class="small">[4096, 5120]</text>
-  </g>
+  <text x="60" y="308" class="label">2. Vision Encoder 分别输出</text>
+  <path d="M178 331 Q181 320 194 323 L470 320 Q484 324 481 338 L484 408 Q481 421 468 418 L194 422 Q180 418 183 405 Z" class="rough green greenfill"/>
+  <text x="331" y="362" text-anchor="middle" class="label">Image 1 Embeddings</text><text x="331" y="393" text-anchor="middle" class="body" font-size="15">[16384,5120]</text>
+  <path d="M564 331 Q567 320 580 323 L856 320 Q870 324 867 338 L870 408 Q867 421 854 418 L580 422 Q566 418 569 405 Z" class="rough orange orangefill"/>
+  <text x="717" y="362" text-anchor="middle" class="label">Image 2 Embeddings</text><text x="717" y="393" text-anchor="middle" class="body" font-size="15">[4096,5120]</text>
+  <path d="M950 331 Q953 320 966 323 L1242 320 Q1256 324 1253 338 L1256 408 Q1253 421 1240 418 L966 422 Q952 418 955 405 Z" class="rough purple purplefill"/>
+  <text x="1103" y="362" text-anchor="middle" class="label">Video Embeddings</text><text x="1103" y="393" text-anchor="middle" class="body" font-size="15">[4096,5120]</text>
 
-  <path class="flow" d="M370 434 C370 474 382 468 382 504"/>
-  <path class="flow" d="M720 434 C720 474 722 468 722 504"/>
-  <path class="flow" d="M1070 434 C1070 474 1037 468 1037 504"/>
+  <path d="M331 422 C330 452 347 466 374 485" class="line green" marker-end="url(#arrow)"/><path d="M717 422 C716 452 717 466 717 485" class="line orange" marker-end="url(#arrow)"/><path d="M1103 422 C1104 452 1082 466 1055 485" class="line purple" marker-end="url(#arrow)"/>
 
-  <text x="72" y="510" class="label">③ 按占位位置回填后的统一序列</text>
-  <g transform="translate(72,534)" filter="url(#shadow)">
-    <rect width="190" height="80" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="95" y="34" text-anchor="middle" class="label">文本Embedding</text><text x="95" y="59" text-anchor="middle" class="tiny">[..., 5120]</text>
-    <rect x="190" width="240" height="80" fill="#5eead4" stroke="#0f766e" stroke-width="2"/>
-    <text x="310" y="34" text-anchor="middle" class="label">Image 1</text><text x="310" y="59" text-anchor="middle" class="tiny">[16384,5120]</text>
-    <rect x="430" width="130" height="80" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="495" y="48" text-anchor="middle" class="label">文本</text>
-    <rect x="560" width="180" height="80" fill="#fdba74" stroke="#ea580c" stroke-width="2"/>
-    <text x="650" y="34" text-anchor="middle" class="label">Image 2</text><text x="650" y="59" text-anchor="middle" class="tiny">[4096,5120]</text>
-    <rect x="740" width="130" height="80" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="805" y="48" text-anchor="middle" class="label">文本</text>
-    <rect x="870" width="190" height="80" fill="#c4b5fd" stroke="#7c3aed" stroke-width="2"/>
-    <text x="965" y="34" text-anchor="middle" class="label">Video</text><text x="965" y="59" text-anchor="middle" class="tiny">[4096,5120]</text>
-    <rect x="1060" width="236" height="80" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="1178" y="34" text-anchor="middle" class="label">问题Embedding</text><text x="1178" y="59" text-anchor="middle" class="tiny">[..., 5120]</text>
+  <text x="60" y="508" class="label">3. 依原位置替换</text>
+  <g transform="translate(60,535)">
+    <path d="M0 0 Q2 -6 11 -5 L203 -6 Q212 -2 210 8 L212 72 Q209 82 201 79 L10 82 Q0 79 2 69 Z" class="rough blue bluefill"/><text x="106" y="43" text-anchor="middle" class="label">Text Embedding</text>
+    <path d="M212 0 Q214 -6 223 -5 L447 -6 Q456 -2 454 8 L456 72 Q453 82 445 79 L222 82 Q212 79 214 69 Z" class="rough green greenfill"/><text x="334" y="32" text-anchor="middle" class="label">Image 1</text><text x="334" y="59" text-anchor="middle" class="small body">[16384,5120]</text>
+    <path d="M456 0 Q458 -6 467 -5 L585 -6 Q594 -2 592 8 L594 72 Q591 82 583 79 L466 82 Q456 79 458 69 Z" class="rough blue bluefill"/><text x="525" y="47" text-anchor="middle" class="label">Text</text>
+    <path d="M594 0 Q596 -6 605 -5 L783 -6 Q792 -2 790 8 L792 72 Q789 82 781 79 L604 82 Q594 79 596 69 Z" class="rough orange orangefill"/><text x="693" y="32" text-anchor="middle" class="label">Image 2</text><text x="693" y="59" text-anchor="middle" class="small body">[4096,5120]</text>
+    <path d="M792 0 Q794 -6 803 -5 L921 -6 Q930 -2 928 8 L930 72 Q927 82 919 79 L802 82 Q792 79 794 69 Z" class="rough blue bluefill"/><text x="861" y="47" text-anchor="middle" class="label">Text</text>
+    <path d="M930 0 Q932 -6 941 -5 L1133 -6 Q1142 -2 1140 8 L1142 72 Q1139 82 1131 79 L940 82 Q930 79 932 69 Z" class="rough purple purplefill"/><text x="1036" y="32" text-anchor="middle" class="label">Video</text><text x="1036" y="59" text-anchor="middle" class="small body">[4096,5120]</text>
+    <path d="M1142 0 Q1144 -6 1153 -5 L1307 -6 Q1316 -2 1314 8 L1316 72 Q1313 82 1305 79 L1152 82 Q1142 79 1144 69 Z" class="rough blue bluefill"/><text x="1229" y="47" text-anchor="middle" class="label">Question</text>
   </g>
-
-  <rect x="424" y="646" width="592" height="48" rx="12" fill="#ffffff" stroke="#334155" stroke-width="2"/>
-  <text x="720" y="677" text-anchor="middle" class="label">merged_inputs_embeds = [S, 5120] → Language Transformer</text>
+  <path d="M444 647 Q447 636 460 639 L980 636 Q994 640 991 654 L994 681 Q991 694 978 691 L460 695 Q446 691 449 678 Z" class="rough"/>
+  <text x="719" y="672" text-anchor="middle" class="label">merged_inputs_embeds [S, 5120]</text>
 </svg>

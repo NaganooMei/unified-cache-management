@@ -1,170 +1,80 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1080" viewBox="0 0 1440 1080" role="img" aria-labelledby="title desc">
-  <title id="title">文本图片视频Tensor维度瀑布图</title>
-  <desc id="desc">文本经过Tokenizer与Embedding，图片和视频经过Patchify、Vision Transformer及Patch Merger，最终所有模态都变为宽度5120的Embedding。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="980" viewBox="0 0 1440 980" role="img" aria-labelledby="title desc">
+  <title id="title">文本、图片和视频的Tensor维度变化</title>
+  <desc id="desc">展示文本、4096图片、2048图片和8帧视频从原始输入到宽度5120的Embedding的形状变化。</desc>
   <defs>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#334155" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <style>
-      text { font-family: Arial, 'Microsoft YaHei', sans-serif; fill: #0f172a; }
-      .title { font-size: 34px; font-weight: 700; }
-      .subtitle { font-size: 18px; fill: #475569; }
-      .head { font-size: 20px; font-weight: 700; }
-      .label { font-size: 17px; font-weight: 700; }
-      .shape { font-size: 15px; fill: #334155; }
-      .note { font-size: 14px; fill: #64748b; }
-      .box { filter: url(#shadow); stroke-width: 2; }
-      .flow { fill: none; stroke: #64748b; stroke-width: 2.5; marker-end: url(#arrow); }
+      text{font-family:'Segoe Print','Comic Sans MS','KaiTi',sans-serif;fill:#1f2937;font-weight:600}.body{font-family:'Microsoft YaHei','Segoe UI',sans-serif;font-weight:400}.title{font-size:34px}.sub{font-size:17px;fill:#64748b}.head{font-size:22px}.label{font-size:18px}.small{font-size:14px;fill:#64748b}.rough{fill:#fffdf8;stroke:#334155;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}.echo{fill:none;stroke:#334155;stroke-width:1.2;opacity:.18}.blue{stroke:#4c6ef5}.green{stroke:#2f9e44}.orange{stroke:#f08c00}.purple{stroke:#7950f2}.bluefill{fill:#edf2ff}.greenfill{fill:#ebfbee}.orangefill{fill:#fff4e6}.purplefill{fill:#f3f0ff}.line{fill:none;stroke:#334155;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
     </style>
   </defs>
-  <rect width="1440" height="1080" fill="#f8fafc"/>
-  <text x="72" y="58" class="title">每一步的 Tensor 怎样变化</text>
-  <text x="72" y="92" class="subtitle">示例数值用于把量级画清楚；真实尺寸会随动态Resize、抽帧和文本长度变化</text>
+  <rect width="1440" height="980" fill="#fffdf8"/>
+  <text x="58" y="58" class="title">从原始输入到 [S, 5120]</text>
+  <text x="60" y="88" class="sub body">示例假设预处理后尺寸等于图中尺寸</text>
+  <path d="M61 99 C196 94 330 103 467 97" class="line green" opacity=".42"/>
 
-  <g transform="translate(54,132)">
-    <rect width="305" height="760" rx="22" fill="#eff6ff"/>
-    <text x="152" y="42" text-anchor="middle" class="head">文本</text>
-    <g transform="translate(32,78)">
-      <rect class="box" width="241" height="78" rx="14" fill="#ffffff" stroke="#2563eb"/>
-      <text x="120" y="31" text-anchor="middle" class="label">原始文本</text>
-      <text x="120" y="56" text-anchor="middle" class="shape">Unicode字符串</text>
-    </g>
-    <path class="flow" d="M152 156 V198"/>
-    <g transform="translate(32,208)">
-      <rect class="box" width="241" height="78" rx="14" fill="#dbeafe" stroke="#2563eb"/>
-      <text x="120" y="31" text-anchor="middle" class="label">Tokenizer</text>
-      <text x="120" y="56" text-anchor="middle" class="shape">token_ids [Ntext]</text>
-    </g>
-    <path class="flow" d="M152 286 V328"/>
-    <g transform="translate(32,338)">
-      <rect class="box" width="241" height="78" rx="14" fill="#dbeafe" stroke="#2563eb"/>
-      <text x="120" y="31" text-anchor="middle" class="label">Text Embedding</text>
-      <text x="120" y="56" text-anchor="middle" class="shape">[Ntext, 5120]</text>
-    </g>
-    <path class="flow" d="M152 416 V558"/>
-    <g transform="translate(32,568)">
-      <rect class="box" width="241" height="106" rx="14" fill="#bfdbfe" stroke="#1d4ed8"/>
-      <text x="120" y="32" text-anchor="middle" class="label">进入统一序列</text>
-      <text x="120" y="61" text-anchor="middle" class="shape">宽度已是5120</text>
-      <text x="120" y="85" text-anchor="middle" class="note">等待视觉位置替换</text>
-    </g>
+  <g transform="translate(46,132)">
+    <text x="150" y="28" text-anchor="middle" class="head blue">文本</text>
+    <path d="M22 66 Q24 55 37 58 L263 55 Q277 59 274 73 L277 142 Q274 155 261 152 L37 156 Q23 152 26 139 Z" class="rough blue bluefill"/><path d="M28 64 Q34 57 44 60 L266 58" class="echo blue"/>
+    <text x="150" y="98" text-anchor="middle" class="label">原始字符串</text><text x="150" y="127" text-anchor="middle" class="small body">Unicode</text>
+    <path d="M150 157 C148 178 152 190 150 207" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 218 Q24 207 37 210 L263 207 Q277 211 274 225 L277 294 Q274 307 261 304 L37 308 Q23 304 26 291 Z" class="rough blue bluefill"/>
+    <text x="150" y="250" text-anchor="middle" class="label">Tokenizer</text><text x="150" y="279" text-anchor="middle" class="body" font-size="15">token_ids [Ntext]</text>
+    <path d="M150 309 C148 332 152 344 150 361" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 372 Q24 361 37 364 L263 361 Q277 365 274 379 L277 448 Q274 461 261 458 L37 462 Q23 458 26 445 Z" class="rough blue bluefill"/>
+    <text x="150" y="404" text-anchor="middle" class="label">Text Embedding</text><text x="150" y="433" text-anchor="middle" class="body" font-size="15">[Ntext, 5120]</text>
+    <path d="M150 463 C149 559 151 631 150 705" class="line blue" marker-end="url(#arrow)"/>
   </g>
 
-  <g transform="translate(379,132)">
-    <rect width="305" height="760" rx="22" fill="#f0fdfa"/>
-    <text x="152" y="42" text-anchor="middle" class="head">图片 1 · 4K</text>
-    <g transform="translate(32,78)">
-      <rect class="box" width="241" height="78" rx="14" fill="#ffffff" stroke="#0f766e"/>
-      <text x="120" y="31" text-anchor="middle" class="label">原始 RGB</text>
-      <text x="120" y="56" text-anchor="middle" class="shape">[4096,4096,3]</text>
-    </g>
-    <path class="flow" d="M152 156 V182"/>
-    <g transform="translate(32,192)">
-      <rect class="box" width="241" height="96" rx="14" fill="#ccfbf1" stroke="#0f766e"/>
-      <text x="120" y="29" text-anchor="middle" class="label">Patchify · 2×16×16×RGB</text>
-      <text x="120" y="57" text-anchor="middle" class="shape">grid [1,256,256]</text>
-      <text x="120" y="80" text-anchor="middle" class="shape">[65536,1536]</text>
-    </g>
-    <path class="flow" d="M152 288 V316"/>
-    <g transform="translate(32,326)">
-      <rect class="box" width="241" height="82" rx="14" fill="#99f6e4" stroke="#0f766e"/>
-      <text x="120" y="31" text-anchor="middle" class="label">Vision Transformer</text>
-      <text x="120" y="59" text-anchor="middle" class="shape">[65536,1152]</text>
-    </g>
-    <path class="flow" d="M152 408 V436"/>
-    <g transform="translate(32,446)">
-      <rect class="box" width="241" height="96" rx="14" fill="#5eead4" stroke="#0f766e"/>
-      <text x="120" y="29" text-anchor="middle" class="label">2×2 Patch Merger</text>
-      <text x="120" y="57" text-anchor="middle" class="shape">token数 ÷ 4</text>
-      <text x="120" y="80" text-anchor="middle" class="shape">[16384,5120]</text>
-    </g>
-    <path class="flow" d="M152 542 V558"/>
-    <g transform="translate(32,568)">
-      <rect class="box" width="241" height="106" rx="14" fill="#2dd4bf" fill-opacity="0.4" stroke="#0f766e"/>
-      <text x="120" y="32" text-anchor="middle" class="label">视觉 Embedding</text>
-      <text x="120" y="61" text-anchor="middle" class="shape">Nvis₁ = 16384</text>
-      <text x="120" y="85" text-anchor="middle" class="note">宽度5120</text>
-    </g>
+  <g transform="translate(383,132)">
+    <text x="150" y="28" text-anchor="middle" class="head green">图片 1 · 4096²</text>
+    <path d="M22 66 Q24 55 37 58 L263 55 Q277 59 274 73 L277 142 Q274 155 261 152 L37 156 Q23 152 26 139 Z" class="rough green greenfill"/>
+    <text x="150" y="98" text-anchor="middle" class="label">RGB</text><text x="150" y="127" text-anchor="middle" class="body" font-size="15">[4096,4096,3]</text>
+    <path d="M150 157 C148 178 152 190 150 207" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 218 Q24 207 37 210 L263 207 Q277 211 274 225 L277 316 Q274 329 261 326 L37 330 Q23 326 26 313 Z" class="rough green greenfill"/>
+    <text x="150" y="247" text-anchor="middle" class="label">Patchify</text><text x="150" y="275" text-anchor="middle" class="body" font-size="15">grid [1,256,256]</text><text x="150" y="304" text-anchor="middle" class="body" font-size="15">pixel_values [65536,1536]</text>
+    <path d="M150 331 C148 350 152 360 150 377" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 388 Q24 377 37 380 L263 377 Q277 381 274 395 L277 464 Q274 477 261 474 L37 478 Q23 474 26 461 Z" class="rough green greenfill"/>
+    <text x="150" y="420" text-anchor="middle" class="label">Vision Transformer</text><text x="150" y="449" text-anchor="middle" class="body" font-size="15">[65536,1152]</text>
+    <path d="M150 479 C148 500 152 512 150 529" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 540 Q24 529 37 532 L263 529 Q277 533 274 547 L277 630 Q274 643 261 640 L37 644 Q23 640 26 627 Z" class="rough green greenfill"/>
+    <text x="150" y="572" text-anchor="middle" class="label">2×2 Patch Merger</text><text x="150" y="601" text-anchor="middle" class="body" font-size="15">Nvis = 65536 / 4</text><text x="150" y="626" text-anchor="middle" class="body" font-size="15">[16384,5120]</text>
+    <path d="M150 645 C149 668 151 684 150 705" class="line green" marker-end="url(#arrow)"/>
   </g>
 
-  <g transform="translate(704,132)">
-    <rect width="305" height="760" rx="22" fill="#fff7ed"/>
-    <text x="152" y="42" text-anchor="middle" class="head">图片 2 · 2K</text>
-    <g transform="translate(32,78)">
-      <rect class="box" width="241" height="78" rx="14" fill="#ffffff" stroke="#ea580c"/>
-      <text x="120" y="31" text-anchor="middle" class="label">原始 RGB</text>
-      <text x="120" y="56" text-anchor="middle" class="shape">[2048,2048,3]</text>
-    </g>
-    <path class="flow" d="M152 156 V182"/>
-    <g transform="translate(32,192)">
-      <rect class="box" width="241" height="96" rx="14" fill="#ffedd5" stroke="#ea580c"/>
-      <text x="120" y="29" text-anchor="middle" class="label">Patchify · 2×16×16×RGB</text>
-      <text x="120" y="57" text-anchor="middle" class="shape">grid [1,128,128]</text>
-      <text x="120" y="80" text-anchor="middle" class="shape">[16384,1536]</text>
-    </g>
-    <path class="flow" d="M152 288 V316"/>
-    <g transform="translate(32,326)">
-      <rect class="box" width="241" height="82" rx="14" fill="#fed7aa" stroke="#ea580c"/>
-      <text x="120" y="31" text-anchor="middle" class="label">Vision Transformer</text>
-      <text x="120" y="59" text-anchor="middle" class="shape">[16384,1152]</text>
-    </g>
-    <path class="flow" d="M152 408 V436"/>
-    <g transform="translate(32,446)">
-      <rect class="box" width="241" height="96" rx="14" fill="#fdba74" stroke="#ea580c"/>
-      <text x="120" y="29" text-anchor="middle" class="label">2×2 Patch Merger</text>
-      <text x="120" y="57" text-anchor="middle" class="shape">token数 ÷ 4</text>
-      <text x="120" y="80" text-anchor="middle" class="shape">[4096,5120]</text>
-    </g>
-    <path class="flow" d="M152 542 V558"/>
-    <g transform="translate(32,568)">
-      <rect class="box" width="241" height="106" rx="14" fill="#fb923c" fill-opacity="0.35" stroke="#ea580c"/>
-      <text x="120" y="32" text-anchor="middle" class="label">视觉 Embedding</text>
-      <text x="120" y="61" text-anchor="middle" class="shape">Nvis₂ = 4096</text>
-      <text x="120" y="85" text-anchor="middle" class="note">宽度5120</text>
-    </g>
+  <g transform="translate(720,132)">
+    <text x="150" y="28" text-anchor="middle" class="head orange">图片 2 · 2048²</text>
+    <path d="M22 66 Q24 55 37 58 L263 55 Q277 59 274 73 L277 142 Q274 155 261 152 L37 156 Q23 152 26 139 Z" class="rough orange orangefill"/>
+    <text x="150" y="98" text-anchor="middle" class="label">RGB</text><text x="150" y="127" text-anchor="middle" class="body" font-size="15">[2048,2048,3]</text>
+    <path d="M150 157 C148 178 152 190 150 207" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 218 Q24 207 37 210 L263 207 Q277 211 274 225 L277 316 Q274 329 261 326 L37 330 Q23 326 26 313 Z" class="rough orange orangefill"/>
+    <text x="150" y="247" text-anchor="middle" class="label">Patchify</text><text x="150" y="275" text-anchor="middle" class="body" font-size="15">grid [1,128,128]</text><text x="150" y="304" text-anchor="middle" class="body" font-size="15">pixel_values [16384,1536]</text>
+    <path d="M150 331 C148 350 152 360 150 377" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 388 Q24 377 37 380 L263 377 Q277 381 274 395 L277 464 Q274 477 261 474 L37 478 Q23 474 26 461 Z" class="rough orange orangefill"/>
+    <text x="150" y="420" text-anchor="middle" class="label">Vision Transformer</text><text x="150" y="449" text-anchor="middle" class="body" font-size="15">[16384,1152]</text>
+    <path d="M150 479 C148 500 152 512 150 529" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 540 Q24 529 37 532 L263 529 Q277 533 274 547 L277 630 Q274 643 261 640 L37 644 Q23 640 26 627 Z" class="rough orange orangefill"/>
+    <text x="150" y="572" text-anchor="middle" class="label">2×2 Patch Merger</text><text x="150" y="601" text-anchor="middle" class="body" font-size="15">Nvis = 16384 / 4</text><text x="150" y="626" text-anchor="middle" class="body" font-size="15">[4096,5120]</text>
+    <path d="M150 645 C149 668 151 684 150 705" class="line orange" marker-end="url(#arrow)"/>
   </g>
 
-  <g transform="translate(1029,132)">
-    <rect width="357" height="760" rx="22" fill="#f5f3ff"/>
-    <text x="178" y="42" text-anchor="middle" class="head">视频 · 8帧 / 1024×1024</text>
-    <g transform="translate(42,78)">
-      <rect class="box" width="273" height="78" rx="14" fill="#ffffff" stroke="#7c3aed"/>
-      <text x="136" y="31" text-anchor="middle" class="label">抽帧后 RGB</text>
-      <text x="136" y="56" text-anchor="middle" class="shape">[8,1024,1024,3]</text>
-    </g>
-    <path class="flow" d="M178 156 V182"/>
-    <g transform="translate(42,192)">
-      <rect class="box" width="273" height="96" rx="14" fill="#ede9fe" stroke="#7c3aed"/>
-      <text x="136" y="29" text-anchor="middle" class="label">时空 Patchify</text>
-      <text x="136" y="57" text-anchor="middle" class="shape">grid [4,64,64]</text>
-      <text x="136" y="80" text-anchor="middle" class="shape">[16384,1536]</text>
-    </g>
-    <path class="flow" d="M178 288 V316"/>
-    <g transform="translate(42,326)">
-      <rect class="box" width="273" height="82" rx="14" fill="#ddd6fe" stroke="#7c3aed"/>
-      <text x="136" y="31" text-anchor="middle" class="label">Vision Transformer</text>
-      <text x="136" y="59" text-anchor="middle" class="shape">[16384,1152]</text>
-    </g>
-    <path class="flow" d="M178 408 V436"/>
-    <g transform="translate(42,446)">
-      <rect class="box" width="273" height="96" rx="14" fill="#c4b5fd" stroke="#7c3aed"/>
-      <text x="136" y="29" text-anchor="middle" class="label">2×2 Patch Merger</text>
-      <text x="136" y="57" text-anchor="middle" class="shape">空间token数 ÷ 4</text>
-      <text x="136" y="80" text-anchor="middle" class="shape">[4096,5120]</text>
-    </g>
-    <path class="flow" d="M178 542 V558"/>
-    <g transform="translate(42,568)">
-      <rect class="box" width="273" height="106" rx="14" fill="#a78bfa" fill-opacity="0.35" stroke="#7c3aed"/>
-      <text x="136" y="32" text-anchor="middle" class="label">视觉 Embedding</text>
-      <text x="136" y="61" text-anchor="middle" class="shape">Nvisᵥ = 4096</text>
-      <text x="136" y="85" text-anchor="middle" class="note">宽度5120</text>
-    </g>
+  <g transform="translate(1057,132)">
+    <text x="170" y="28" text-anchor="middle" class="head purple">视频 · 8帧 / 1024²</text>
+    <path d="M22 66 Q24 55 37 58 L303 55 Q317 59 314 73 L317 142 Q314 155 301 152 L37 156 Q23 152 26 139 Z" class="rough purple purplefill"/>
+    <text x="170" y="98" text-anchor="middle" class="label">抽帧后 RGB</text><text x="170" y="127" text-anchor="middle" class="body" font-size="15">[8,1024,1024,3]</text>
+    <path d="M170 157 C168 178 172 190 170 207" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 218 Q24 207 37 210 L303 207 Q317 211 314 225 L317 316 Q314 329 301 326 L37 330 Q23 326 26 313 Z" class="rough purple purplefill"/>
+    <text x="170" y="247" text-anchor="middle" class="label">时空 Patchify</text><text x="170" y="275" text-anchor="middle" class="body" font-size="15">grid [4,64,64]</text><text x="170" y="304" text-anchor="middle" class="body" font-size="15">pixel_values [16384,1536]</text>
+    <path d="M170 331 C168 350 172 360 170 377" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 388 Q24 377 37 380 L303 377 Q317 381 314 395 L317 464 Q314 477 301 474 L37 478 Q23 474 26 461 Z" class="rough purple purplefill"/>
+    <text x="170" y="420" text-anchor="middle" class="label">Vision Transformer</text><text x="170" y="449" text-anchor="middle" class="body" font-size="15">[16384,1152]</text>
+    <path d="M170 479 C168 500 172 512 170 529" class="line" marker-end="url(#arrow)"/>
+    <path d="M22 540 Q24 529 37 532 L303 529 Q317 533 314 547 L317 630 Q314 643 301 640 L37 644 Q23 640 26 627 Z" class="rough purple purplefill"/>
+    <text x="170" y="572" text-anchor="middle" class="label">2×2 Patch Merger</text><text x="170" y="601" text-anchor="middle" class="body" font-size="15">Nvis = 16384 / 4</text><text x="170" y="626" text-anchor="middle" class="body" font-size="15">[4096,5120]</text>
+    <path d="M170 645 C169 668 171 684 170 705" class="line purple" marker-end="url(#arrow)"/>
   </g>
 
-  <path d="M206 806 C206 956 720 938 720 984" class="flow"/>
-  <path d="M531 806 C531 930 720 938 720 984" class="flow"/>
-  <path d="M856 806 C856 930 720 938 720 984" class="flow"/>
-  <path d="M1207 806 C1207 956 720 938 720 984" class="flow"/>
-  <rect x="448" y="992" width="544" height="60" rx="16" fill="#ffffff" stroke="#334155" stroke-width="2.5" filter="url(#shadow)"/>
-  <text x="720" y="1020" text-anchor="middle" class="label">统一 Embedding 序列 [S, 5120]</text>
-  <text x="720" y="1042" text-anchor="middle" class="note">序列长度不同，但最后一维必须一致</text>
+  <path d="M111 850 Q114 836 130 839 L1304 835 Q1320 840 1317 856 L1320 918 Q1317 933 1302 930 L130 934 Q113 931 117 915 Z" class="rough"/>
+  <text x="718" y="880" text-anchor="middle" class="head">统一序列：merged_inputs_embeds [S, 5120]</text>
+  <text x="718" y="910" text-anchor="middle" class="small body">3 × temporal_patch_size(2) × patch_size²(16²) = 1536；spatial_merge_size² = 4</text>
+  <path d="M196 839 C340 798 554 812 718 849" class="line blue"/><path d="M533 839 C580 806 657 817 718 849" class="line green"/><path d="M870 839 C824 806 765 817 718 849" class="line orange"/><path d="M1227 839 C1088 798 886 813 718 849" class="line purple"/>
 </svg>

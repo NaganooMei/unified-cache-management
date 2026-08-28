@@ -1,115 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="720" viewBox="0 0 1440 720" role="img" aria-labelledby="title desc">
-  <title id="title">一个文本、多图、视频混合请求的原始顺序</title>
-  <desc id="desc">请求由系统提示词、文本A、4096乘4096图片、文本B、2048乘2048图片、文本C、八帧视频和最终问题依次组成，模型输入保持这个顺序。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="650" viewBox="0 0 1440 650" role="img" aria-labelledby="title desc">
+  <title id="title">文本、多图和视频在一个请求中的排列</title>
+  <desc id="desc">请求依次包含系统提示词、文本、两张图片、更多文本、一段视频和最终问题；处理后仍保持原始顺序。</desc>
   <defs>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
-    </marker>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/>
-    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#334155" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <style>
-      text { font-family: Arial, 'Microsoft YaHei', sans-serif; fill: #0f172a; }
-      .title { font-size: 34px; font-weight: 700; }
-      .subtitle { font-size: 18px; fill: #475569; }
-      .step { font-size: 15px; font-weight: 700; fill: #64748b; }
-      .label { font-size: 19px; font-weight: 700; }
-      .detail { font-size: 15px; fill: #475569; }
-      .small { font-size: 14px; fill: #64748b; }
-      .box { filter: url(#shadow); stroke-width: 2; }
+      text{font-family:'Segoe Print','Comic Sans MS','KaiTi',sans-serif;fill:#1f2937;font-weight:600}.body{font-family:'Microsoft YaHei','Segoe UI',sans-serif;font-weight:400}.title{font-size:34px}.sub{font-size:17px;fill:#64748b}.label{font-size:19px}.small{font-size:14px;fill:#64748b}.rough{fill:#fffdf8;stroke:#334155;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}.echo{fill:none;stroke:#334155;stroke-width:1.2;opacity:.18}.blue{stroke:#4c6ef5}.green{stroke:#2f9e44}.orange{stroke:#f08c00}.purple{stroke:#7950f2}.bluefill{fill:#edf2ff}.greenfill{fill:#ebfbee}.orangefill{fill:#fff4e6}.purplefill{fill:#f3f0ff}.line{fill:none;stroke:#334155;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
     </style>
   </defs>
+  <rect width="1440" height="650" fill="#fffdf8"/>
+  <text x="58" y="58" class="title">一个请求里，文本 / 图片 / 视频可以交错出现</text>
+  <text x="60" y="88" class="sub body">Processor 保留消息内容的原始顺序</text>
+  <path d="M61 99 C248 94 441 103 630 97" class="line blue" opacity=".45"/>
 
-  <rect width="1440" height="720" fill="#f8fafc"/>
-  <text x="72" y="64" class="title">示例请求：文本、两张图片和一段视频交错出现</text>
-  <text x="72" y="98" class="subtitle">顺序由消息内容决定；图片和视频不会统一挪到文本之前或之后</text>
+  <path d="M54 160 Q56 146 70 149 L221 146 Q236 150 233 166 L236 275 Q232 289 219 286 L70 290 Q55 286 58 272 Z" class="rough blue bluefill"/>
+  <path d="M60 157 Q68 149 78 151 L223 149" class="echo blue"/>
+  <text x="145" y="201" text-anchor="middle" class="label">系统词 + 文本 A</text><text x="145" y="235" text-anchor="middle" class="small body">普通文本 token</text><text x="145" y="263" text-anchor="middle" class="small">01</text>
 
-  <line x1="96" y1="304" x2="1344" y2="304" stroke="#cbd5e1" stroke-width="4" marker-end="url(#arrow)"/>
+  <path d="M274 145 Q278 132 292 136 L454 132 Q469 136 466 152 L469 291 Q466 306 451 302 L292 307 Q277 303 280 288 Z" class="rough green greenfill"/>
+  <path d="M282 142 Q289 135 300 138 L456 135" class="echo green"/>
+  <path d="M310 183 L346 153 L377 181 L408 150 L439 192 L310 192 Z" fill="#b2f2bb" stroke="#2f9e44" stroke-width="2" stroke-linejoin="round"/><circle cx="413" cy="160" r="10" fill="#fff3bf" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="372" y="230" text-anchor="middle" class="label">图片 1</text><text x="372" y="258" text-anchor="middle" class="small body">4096 × 4096</text><text x="372" y="288" text-anchor="middle" class="small">02</text>
 
-  <g transform="translate(68,150)">
-    <text x="80" y="-18" text-anchor="middle" class="step">01</text>
-    <rect class="box" width="160" height="124" rx="18" fill="#e0f2fe" stroke="#2563eb"/>
-    <text x="80" y="48" text-anchor="middle" class="label">系统提示词</text>
-    <text x="80" y="78" text-anchor="middle" class="detail">角色与规则</text>
+  <path d="M504 160 Q507 146 521 149 L651 146 Q666 150 663 166 L666 275 Q662 289 649 286 L521 290 Q506 286 509 272 Z" class="rough blue bluefill"/><path d="M511 157 Q518 149 528 151 L653 149" class="echo blue"/>
+  <text x="586" y="205" text-anchor="middle" class="label">文本 B</text><text x="586" y="238" text-anchor="middle" class="small body">比较第二张图</text><text x="586" y="266" text-anchor="middle" class="small">03</text>
+
+  <path d="M704 145 Q708 132 722 136 L884 132 Q899 136 896 152 L899 291 Q896 306 881 302 L722 307 Q707 303 710 288 Z" class="rough orange orangefill"/><path d="M712 142 Q719 135 730 138 L886 135" class="echo orange"/>
+  <path d="M740 183 L776 155 L807 181 L838 151 L869 192 L740 192 Z" fill="#ffd8a8" stroke="#f08c00" stroke-width="2" stroke-linejoin="round"/><circle cx="755" cy="158" r="10" fill="#fff9db" stroke="#f08c00" stroke-width="1.5"/>
+  <text x="802" y="230" text-anchor="middle" class="label">图片 2</text><text x="802" y="258" text-anchor="middle" class="small body">2048 × 2048</text><text x="802" y="288" text-anchor="middle" class="small">04</text>
+
+  <path d="M934 160 Q937 146 951 149 L1081 146 Q1096 150 1093 166 L1096 275 Q1092 289 1079 286 L951 290 Q936 286 939 272 Z" class="rough blue bluefill"/><path d="M941 157 Q948 149 958 151 L1083 149" class="echo blue"/>
+  <text x="1016" y="205" text-anchor="middle" class="label">文本 C</text><text x="1016" y="238" text-anchor="middle" class="small body">观察视频</text><text x="1016" y="266" text-anchor="middle" class="small">05</text>
+
+  <path d="M1134 145 Q1138 132 1152 136 L1314 132 Q1329 136 1326 152 L1329 291 Q1326 306 1311 302 L1152 307 Q1137 303 1140 288 Z" class="rough purple purplefill"/><path d="M1142 142 Q1149 135 1160 138 L1316 135" class="echo purple"/>
+  <path d="M1206 159 L1262 188 L1206 217 Z" fill="#d0bfff" stroke="#7950f2" stroke-width="2" stroke-linejoin="round"/>
+  <text x="1232" y="246" text-anchor="middle" class="label">视频</text><text x="1232" y="273" text-anchor="middle" class="small body">8 帧 · 1024²</text><text x="1232" y="298" text-anchor="middle" class="small">06</text>
+
+  <path d="M236 220 C251 218 258 222 269 219" class="line" marker-end="url(#arrow)"/><path d="M469 220 C481 218 488 222 499 219" class="line" marker-end="url(#arrow)"/><path d="M666 220 C679 218 687 222 699 219" class="line" marker-end="url(#arrow)"/><path d="M899 220 C912 218 920 222 930 219" class="line" marker-end="url(#arrow)"/><path d="M1096 220 C1109 218 1117 222 1129 219" class="line" marker-end="url(#arrow)"/>
+
+  <path d="M550 352 Q553 339 568 342 L884 339 Q900 343 897 359 L900 427 Q897 442 882 439 L568 444 Q552 440 555 425 Z" class="rough"/>
+  <text x="726" y="382" text-anchor="middle" class="label">最终问题</text><text x="726" y="412" text-anchor="middle" class="body" font-size="16">“总结两张图片与视频中的变化。”</text>
+  <path d="M1233 307 C1232 345 1023 353 908 382" class="line" marker-end="url(#arrow)"/>
+
+  <text x="58" y="502" class="label">进入模型前的逻辑序列</text><path d="M59 513 C228 508 396 517 565 511" class="line" opacity=".35"/>
+  <g transform="translate(60,535)">
+    <path d="M0 0 Q2 -5 10 -4 L169 -5 Q178 -2 176 7 L178 53 Q175 62 167 60 L9 62 Q0 59 2 50 Z" class="rough blue bluefill"/><text x="89" y="35" text-anchor="middle" class="body" font-size="15">文本 token</text>
+    <path d="M178 0 Q180 -5 188 -4 L385 -5 Q394 -2 392 7 L394 53 Q391 62 383 60 L187 62 Q178 59 180 50 Z" class="rough green greenfill"/><text x="286" y="35" text-anchor="middle" class="body" font-size="15">图片1占位区</text>
+    <path d="M394 0 Q396 -5 404 -4 L511 -5 Q520 -2 518 7 L520 53 Q517 62 509 60 L403 62 Q394 59 396 50 Z" class="rough blue bluefill"/><text x="457" y="35" text-anchor="middle" class="body" font-size="15">文本</text>
+    <path d="M520 0 Q522 -5 530 -4 L691 -5 Q700 -2 698 7 L700 53 Q697 62 689 60 L529 62 Q520 59 522 50 Z" class="rough orange orangefill"/><text x="610" y="35" text-anchor="middle" class="body" font-size="15">图片2占位区</text>
+    <path d="M700 0 Q702 -5 710 -4 L817 -5 Q826 -2 824 7 L826 53 Q823 62 815 60 L709 62 Q700 59 702 50 Z" class="rough blue bluefill"/><text x="763" y="35" text-anchor="middle" class="body" font-size="15">文本</text>
+    <path d="M826 0 Q828 -5 836 -4 L1015 -5 Q1024 -2 1022 7 L1024 53 Q1021 62 1013 60 L835 62 Q826 59 828 50 Z" class="rough purple purplefill"/><text x="925" y="35" text-anchor="middle" class="body" font-size="15">视频占位区</text>
+    <path d="M1024 0 Q1026 -5 1034 -4 L1301 -5 Q1310 -2 1308 7 L1310 53 Q1307 62 1299 60 L1033 62 Q1024 59 1026 50 Z" class="rough blue bluefill"/><text x="1167" y="35" text-anchor="middle" class="body" font-size="15">最终问题 token</text>
   </g>
-
-  <g transform="translate(250,150)">
-    <text x="70" y="-18" text-anchor="middle" class="step">02</text>
-    <rect class="box" width="140" height="124" rx="18" fill="#dbeafe" stroke="#2563eb"/>
-    <text x="70" y="48" text-anchor="middle" class="label">文本 A</text>
-    <text x="70" y="78" text-anchor="middle" class="detail">先看第一张图</text>
-  </g>
-
-  <g transform="translate(412,130)">
-    <text x="92" y="-18" text-anchor="middle" class="step">03</text>
-    <rect class="box" width="184" height="164" rx="18" fill="#ccfbf1" stroke="#0f766e"/>
-    <rect x="25" y="24" width="134" height="76" rx="10" fill="#5eead4" opacity="0.65"/>
-    <path d="M36 88 L72 50 L96 74 L119 52 L149 88 Z" fill="#0f766e" opacity="0.75"/>
-    <circle cx="126" cy="46" r="10" fill="#fef3c7"/>
-    <text x="92" y="126" text-anchor="middle" class="label">图片 1</text>
-    <text x="92" y="151" text-anchor="middle" class="detail">4096 × 4096</text>
-  </g>
-
-  <g transform="translate(618,150)">
-    <text x="70" y="-18" text-anchor="middle" class="step">04</text>
-    <rect class="box" width="140" height="124" rx="18" fill="#dbeafe" stroke="#2563eb"/>
-    <text x="70" y="48" text-anchor="middle" class="label">文本 B</text>
-    <text x="70" y="78" text-anchor="middle" class="detail">再比较第二张</text>
-  </g>
-
-  <g transform="translate(780,130)">
-    <text x="92" y="-18" text-anchor="middle" class="step">05</text>
-    <rect class="box" width="184" height="164" rx="18" fill="#ffedd5" stroke="#ea580c"/>
-    <rect x="25" y="24" width="134" height="76" rx="10" fill="#fdba74" opacity="0.7"/>
-    <path d="M36 88 L70 58 L94 78 L119 48 L149 88 Z" fill="#c2410c" opacity="0.72"/>
-    <circle cx="53" cy="45" r="10" fill="#fff7ed"/>
-    <text x="92" y="126" text-anchor="middle" class="label">图片 2</text>
-    <text x="92" y="151" text-anchor="middle" class="detail">2048 × 2048</text>
-  </g>
-
-  <g transform="translate(986,150)">
-    <text x="70" y="-18" text-anchor="middle" class="step">06</text>
-    <rect class="box" width="140" height="124" rx="18" fill="#dbeafe" stroke="#2563eb"/>
-    <text x="70" y="48" text-anchor="middle" class="label">文本 C</text>
-    <text x="70" y="78" text-anchor="middle" class="detail">最后观察视频</text>
-  </g>
-
-  <g transform="translate(1148,130)">
-    <text x="92" y="-18" text-anchor="middle" class="step">07</text>
-    <rect class="box" width="184" height="164" rx="18" fill="#ede9fe" stroke="#7c3aed"/>
-    <rect x="27" y="27" width="130" height="74" rx="10" fill="#c4b5fd"/>
-    <path d="M79 48 L116 64 L79 82 Z" fill="#6d28d9"/>
-    <rect x="19" y="39" width="10" height="14" rx="2" fill="#7c3aed"/>
-    <rect x="19" y="72" width="10" height="14" rx="2" fill="#7c3aed"/>
-    <rect x="155" y="39" width="10" height="14" rx="2" fill="#7c3aed"/>
-    <rect x="155" y="72" width="10" height="14" rx="2" fill="#7c3aed"/>
-    <text x="92" y="126" text-anchor="middle" class="label">视频 1</text>
-    <text x="92" y="151" text-anchor="middle" class="detail">抽取 8 帧</text>
-  </g>
-
-  <g transform="translate(510,382)">
-    <rect width="420" height="104" rx="20" fill="#ffffff" stroke="#94a3b8" stroke-width="2" filter="url(#shadow)"/>
-    <text x="210" y="43" text-anchor="middle" class="label">08　最终问题</text>
-    <text x="210" y="75" text-anchor="middle" class="detail">“总结两张图片与视频中的变化。”</text>
-  </g>
-  <path d="M1240 304 C1240 350 1000 356 930 414" fill="none" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
-
-  <g transform="translate(72,546)">
-    <rect width="1296" height="112" rx="18" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
-    <text x="28" y="34" class="label">进入模型前的逻辑序列</text>
-    <rect x="28" y="54" width="150" height="34" rx="7" fill="#dbeafe"/>
-    <text x="103" y="77" text-anchor="middle" class="small">文本 token</text>
-    <rect x="186" y="54" width="214" height="34" rx="7" fill="#ccfbf1"/>
-    <text x="293" y="77" text-anchor="middle" class="small">图片1占位区</text>
-    <rect x="408" y="54" width="126" height="34" rx="7" fill="#dbeafe"/>
-    <text x="471" y="77" text-anchor="middle" class="small">文本</text>
-    <rect x="542" y="54" width="168" height="34" rx="7" fill="#ffedd5"/>
-    <text x="626" y="77" text-anchor="middle" class="small">图片2占位区</text>
-    <rect x="718" y="54" width="126" height="34" rx="7" fill="#dbeafe"/>
-    <text x="781" y="77" text-anchor="middle" class="small">文本</text>
-    <rect x="852" y="54" width="222" height="34" rx="7" fill="#ede9fe"/>
-    <text x="963" y="77" text-anchor="middle" class="small">视频占位区</text>
-    <rect x="1082" y="54" width="186" height="34" rx="7" fill="#dbeafe"/>
-    <text x="1175" y="77" text-anchor="middle" class="small">最终问题 token</text>
-  </g>
+  <text x="1110" y="630" class="small body">图中省略边界控制 token</text>
 </svg>
