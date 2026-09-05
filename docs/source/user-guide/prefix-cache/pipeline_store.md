@@ -125,6 +125,21 @@ Parameters inside `ucm_connector_config`:
   Note: when multiple data-parallel instances run on the same node,  
   each creates its own Cache Store buffer.
 
+* **share_buffer_rank_striped** *(optional, default: false)*
+  With shared buffering enabled, `false` retains the ordinary SHM allocation path.
+  `true` creates per-rank shared data segments, binds them evenly across NUMA nodes before
+  touching pages, and retains the existing segment rotation during transfers.
+  Each creating rank verifies every page before making its segment ready for registration.
+
+* **share_buffer_numa_nodes** *(optional, default: `[0, 1, 2, 3, 4, 5, 6, 7]`)*
+  An ordered list of physical NUMA IDs used only when `share_buffer_rank_striped` is true,
+  for example `[0, 1, 2, 3, 4, 5, 6, 7]`. Otherwise this option is ignored.
+  Omitting this option or passing an empty list selects physical nodes 0-7.
+  Override this list for other topologies; unavailable or disallowed nodes fail initialization.
+  `local_rank_size` must be a multiple of the number of selected nodes; segment `s` is bound
+  to node `nodes[s % nodes.size()]`. Workers must agree on this list and its order.
+  Binding or page-verification errors fail initialization. Metadata uses the default policy.
+
 * **posix_capacity_gb** *(optional, default: 0)*  
   The maximum storage capacity in GB for the Posix Store.  
   When set to a value greater than 0, garbage collection (GC) is enabled  
