@@ -24,35 +24,74 @@
 #ifndef UNIFIEDCACHE_POSIX_STORE_CC_IO_ENGINE_PSYNC_H
 #define UNIFIEDCACHE_POSIX_STORE_CC_IO_ENGINE_PSYNC_H
 
+#include <atomic>
+#include <thread>
 #include "logger/logger.h"
 #include "metrics_api.h"
+#include "template/spsc_ring_queue.h"
 #include "template/task_wrapper.h"
 #include "trans_queue.h"
 
 namespace UC::PosixStore {
 
 class IoEnginePsync : public Detail::TaskWrapper<TransTask, Detail::TaskHandle> {
+    static constexpr size_t kDispatchQueueDepth = 8192;
+
     TransQueue queue_;
     size_t shardSize_;
+    SpscRingQueue<TaskPair> waiting_;
+    alignas(64) std::atomic_bool stop_{false};
+    std::thread dispatcher_;
 
 public:
     Status Setup(const Config& config, const SpaceLayout* layout)
     {
         timeoutMs_ = config.timeoutMs;
         shardSize_ = config.shardSize;
-        return queue_.Setup(config, &failureSet_, layout);
+        auto s = queue_.Setup(config, &failureSet_, layout);
+        if (s.Failure()) [[unlikely]] { return s; }
+        waiting_.Setup(kDispatchQueueDepth);
+        dispatcher_ = std::thread(&IoEnginePsync::DispatchStage, this);
+        return Status::OK();
+    }
+    ~IoEnginePsync() { Close(); }
+    void Close()
+    {
+        if (stop_.exchange(true)) { return; }
+        if (dispatcher_.joinable()) { dispatcher_.join(); }
+        TaskPair pair;
+        while (waiting_.TryPop(pair)) {
+            if (pair.second) { pair.second->Done(); }
+        }
     }
 
 protected:
     Status FailureStatus(const TaskPtr& task) const override { return task->FailureStatus(); }
     void Dispatch(TaskPtr t, WaiterPtr w) override
     {
+        w->Up();
+        waiting_.Push({t, w});
+    }
+    void Cancel(TaskPtr t) override { queue_.Cancel(t); }
+
+private:
+    void DispatchStage() { waiting_.ConsumerLoop(stop_, &IoEnginePsync::DispatchOne, this); }
+    void DispatchOne(TaskPair&& pair)
+    {
+        auto& t = pair.first;
+        auto& w = pair.second;
+        if (failureSet_.Contains(t->id)) {
+            w->Done();
+            return;
+        }
         const auto id = t->id;
         const auto& brief = t->desc.brief;
         const auto num = t->desc.size();
         const auto size = shardSize_ * num;
         const auto tp = w->startTp;
         const auto isDump = (t->type == TransTask::Type::DUMP);
+        UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("posix_load_spsc_wait_duration_ms"),
+                                 (NowTime::Now() - tp) * 1e3);
         UC_DEBUG("Posix task({},{},{},{}) dispatching.", id, brief, num, size);
         w->SetEpilog([id, brief = std::move(brief), num, size, tp, isDump] {
             auto cost = NowTime::Now() - tp;
@@ -72,7 +111,6 @@ protected:
         });
         queue_.Push(t, w);
     }
-    void Cancel(TaskPtr t) override { queue_.Cancel(t); }
 };
 
 }  // namespace UC::PosixStore

@@ -393,6 +393,43 @@ TEST_F(UCPosixStoreTest, PsyncTruncatedLoadReturnsNotFound)
     EXPECT_EQ(store.Wait(load.Value()), UC::Status::NotFound());
 }
 
+TEST_F(UCPosixStoreTest, PsyncDispatchQueueServesManySingleShardLoads)
+{
+    using namespace UC::PosixStore;
+    PosixStore store;
+    ASSERT_EQ(store.Setup(MakePsyncConfig(Path())), UC::Status::OK());
+
+    auto block = UC::Test::Detail::TypesHelper::MakeBlockIdRandomly();
+    UC::Test::Detail::DataGenerator source{1, AIO_TEST_DATA_SIZE};
+    source.GenerateRandom();
+    UC::Detail::TaskDesc dump;
+    dump.brief = "Dump";
+    dump.push_back(UC::Detail::Shard{block, 0, {source.Buffer()}});
+    auto dumpHandle = store.Dump(std::move(dump));
+    ASSERT_TRUE(dumpHandle.HasValue());
+    ASSERT_EQ(store.Wait(dumpHandle.Value()), UC::Status::OK());
+
+    constexpr size_t kTasks = 256;
+    std::vector<UC::Test::Detail::DataGenerator> targets;
+    std::vector<UC::Detail::TaskHandle> handles;
+    targets.reserve(kTasks);
+    handles.reserve(kTasks);
+    for (size_t i = 0; i < kTasks; ++i) {
+        targets.emplace_back(1, AIO_TEST_DATA_SIZE);
+        targets.back().Generate();
+        UC::Detail::TaskDesc load;
+        load.brief = "Load";
+        load.push_back(UC::Detail::Shard{block, 0, {targets.back().Buffer()}});
+        auto handle = store.Load(std::move(load));
+        ASSERT_TRUE(handle.HasValue());
+        handles.push_back(handle.Value());
+    }
+    for (size_t i = 0; i < kTasks; ++i) {
+        ASSERT_EQ(store.Wait(handles[i]), UC::Status::OK());
+        ASSERT_EQ(source.Compare(targets[i]), 0);
+    }
+}
+
 TEST_F(UCPosixStoreTest, AioTruncatedLoadReturnsNotFound)
 {
     using namespace UC::PosixStore;
