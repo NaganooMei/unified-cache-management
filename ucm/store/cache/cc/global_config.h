@@ -45,9 +45,11 @@ struct Config {
     StoreV1* storeBackend{};
     std::string uniqueId{};
     int32_t deviceId{-1};
+    int32_t physicalDeviceId{-1};
     std::vector<size_t> tensorSizes{};
     size_t shardSize{0};
     size_t blockSize{0};
+    size_t alignSize{4096};
     bool ioDirect{true};
     std::vector<ssize_t> cpuAffinityCores{};
     size_t bufferCapacity{256ULL << 30};
