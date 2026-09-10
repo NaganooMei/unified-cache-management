@@ -39,7 +39,7 @@ class TransManager : public Detail::TaskWrapper<TransTask, Detail::TaskHandle> {
     DumpQueue dumpQ_;
 
 public:
-    Status Setup(const Config& config, TransBuffer* buffer)
+    Status Setup(const Config& config, Buffer* buffer)
     {
         timeoutMs_ = config.timeoutMs;
         shardSize_ = config.shardSize;

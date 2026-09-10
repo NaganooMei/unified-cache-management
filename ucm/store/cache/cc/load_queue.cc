@@ -35,7 +35,7 @@ LoadQueue::~LoadQueue()
     if (transfer_.joinable()) { transfer_.join(); }
 }
 
-Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer* buffer)
+Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, Buffer* buffer)
 {
     failureSet_ = failureSet;
     buffer_ = buffer;
@@ -116,7 +116,7 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     for (size_t i = 0; i < nShard; i++) {
         auto& shard = task->desc[indexes[i]];
         ShardTask shardTask;
-        shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true, true);
+        shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true);
         shardTask.backendTaskHandle = 0;
         shardTask.fromPosix = !shardTask.bufferHandle.Ready();
         if (shardTask.fromPosix) { waitShardCount++; }
@@ -132,7 +132,7 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
                     NAME_TO_METRIC_ID("cache_backend_load_submit_errors_total"), 1.0);
                 RecordLoadSourceShards(i + 1, waitShardCount);
                 RecordFailedShards(nShard - i);
-                shardTask.bufferHandle.MarkFailed(res.Error());
+                shardTask.bufferHandle.MarkFailed();
                 task->Fail(res.Error());
                 failureSet_->Insert(task->id);
                 waiter->Done();
@@ -255,7 +255,7 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
                      task.task->id);
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_backend_load_wait_errors_total"),
                                      1.0);
-            task.bufferHandle.MarkFailed(s);
+            task.bufferHandle.MarkFailed();
             return s;
         }
         task.bufferHandle.MarkReady();
@@ -263,8 +263,8 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
     }
     for (;;) {
         auto state = task.bufferHandle.GetState();
-        if (state == TransBuffer::State::READY) { return Status::OK(); }
-        if (state == TransBuffer::State::FAILED) { return task.bufferHandle.FailureStatus(); }
+        if (state == State::Ready) { return Status::OK(); }
+        if (state == State::Failed) { return Status::Retry(); }
         if (failureSet_->Contains(task.task->id)) { return task.task->FailureStatus(); }
         std::this_thread::yield();
     }

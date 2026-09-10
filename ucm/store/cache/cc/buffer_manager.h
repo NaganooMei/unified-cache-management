@@ -27,13 +27,14 @@
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "time/stopwatch.h"
-#include "trans_buffer.h"
+// #include "trans_buffer.h"
+#include "cache_buffer.h"
 #include "ucmstore_v1.h"
 
 namespace UC::CacheStore {
 
 class BufferManager {
-    std::unique_ptr<TransBuffer> buffer_{nullptr};
+    std::unique_ptr<Buffer> buffer_{nullptr};
     StoreV1* backend_{nullptr};
     bool loadBackendOnly_{false};
 
@@ -58,13 +59,13 @@ public:
             return Status::OK();
         }
         try {
-            buffer_ = std::make_unique<TransBuffer>();
+            buffer_ = std::make_unique<Buffer>();
         } catch (const std::exception& e) {
             return Status::Error(fmt::format("failed({}) to make buffer", e.what()));
         }
         return buffer_->Setup(config);
     }
-    TransBuffer* GetTransBuffer() { return buffer_ ? buffer_.get() : nullptr; }
+    Buffer* GetTransBuffer() { return buffer_ ? buffer_.get() : nullptr; }
     Expected<std::vector<uint8_t>> Lookup(const Detail::BlockId* blocks, size_t num)
     {
         if (!buffer_ || loadBackendOnly_) { return LookupThrough<&StoreV1::Lookup>(blocks, num); }

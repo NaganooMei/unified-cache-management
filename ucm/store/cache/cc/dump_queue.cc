@@ -38,7 +38,7 @@ DumpQueue::~DumpQueue()
     if (dumper_.joinable()) { dumper_.join(); }
 }
 
-Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, TransBuffer* buffer)
+Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, Buffer* buffer)
 {
     failureSet_ = failureSet;
     buffer_ = buffer;

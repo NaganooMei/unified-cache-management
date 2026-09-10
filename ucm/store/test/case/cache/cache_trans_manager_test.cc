@@ -55,10 +55,11 @@ TEST_F(UCCacheTransManagerTest, DumpThenLoad)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
     config.bufferCapacity = config.shardSize * 2049;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = true;
-    TransBuffer buffer;
+    Buffer buffer;
     auto s = buffer.Setup(config);
     ASSERT_EQ(s, UC::Status::OK());
     TransManager transMgr;
@@ -101,12 +102,14 @@ TEST_F(UCCacheTransManagerTest, BackendNotFoundIsPreserved)
     config.shardSize = 4096;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
     config.bufferCapacity = config.shardSize * 2049;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = false;
 
-    TransBuffer buffer;
-    ASSERT_EQ(buffer.Setup(config), UC::Status::OK());
+    Buffer buffer;
+    auto s = buffer.Setup(config);
+    ASSERT_EQ(s, UC::Status::OK()) << s.ToString();
     TransManager transMgr;
     ASSERT_EQ(transMgr.Setup(config, &buffer), UC::Status::OK());
 
@@ -135,11 +138,12 @@ TEST_F(UCCacheTransManagerTest, BackendSubmitNotFoundIsPreserved)
     config.shardSize = 4096;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
     config.bufferCapacity = config.shardSize * 2049;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = false;
 
-    TransBuffer buffer;
+    Buffer buffer;
     ASSERT_EQ(buffer.Setup(config), UC::Status::OK());
     TransManager transMgr;
     ASSERT_EQ(transMgr.Setup(config, &buffer), UC::Status::OK());
@@ -178,11 +182,12 @@ TEST_F(UCCacheTransManagerTest, DumpThenLoadWithLayerWise)
     config.shardSize = shardSize;
     config.blockSize = blockSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
     config.bufferCapacity = shardSize * 2049;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = true;
     config.timeoutMs = 10 * 60 * 1000;
-    TransBuffer buffer;
+    Buffer buffer;
     auto s = buffer.Setup(config);
     ASSERT_EQ(s, UC::Status::OK());
     TransManager transMgr;
@@ -246,11 +251,12 @@ TEST_F(UCCacheTransManagerTest, DumpThenLoadWithLayerAndChunk)
     config.shardSize = shardSize;
     config.blockSize = blockSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
     config.bufferCapacity = shardSize * 2049;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = true;
     config.timeoutMs = 10 * 60 * 1000;
-    TransBuffer buffer;
+    Buffer buffer;
     auto s = buffer.Setup(config);
     ASSERT_EQ(s, UC::Status::OK());
     TransManager transMgr;
@@ -328,10 +334,11 @@ TEST_F(UCCacheTransManagerTest, DumpThenLoadWithVariableLengthIo)
     config.shardSize = shardSize;
     config.blockSize = blockSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
     config.bufferCapacity = shardSize * 2049;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = true;
-    TransBuffer buffer;
+    Buffer buffer;
     auto s = buffer.Setup(config);
     ASSERT_EQ(s, UC::Status::OK());
     TransManager transMgr;

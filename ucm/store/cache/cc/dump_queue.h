@@ -31,7 +31,8 @@
 #include "template/hashset.h"
 #include "template/spsc_ring_queue.h"
 #include "thread/latch.h"
-#include "trans_buffer.h"
+// #include "trans_buffer.h"
+#include "cache_buffer.h"
 #include "trans_task.h"
 #include "ucmstore_v1.h"
 
@@ -45,14 +46,14 @@ class DumpQueue {
     struct DumpCtx {
         Detail::TaskHandle taskHandle;
         Detail::TaskHandle backendTaskHandle;
-        std::vector<TransBuffer::Handle> bufferHandles;
+        std::vector<Buffer::Handle> bufferHandles;
     };
 
 private:
     alignas(64) std::atomic_bool stop_{false};
     Detail::TaskHandle finishedBackendTaskHandle_{0};
     TaskIdSet* failureSet_{nullptr};
-    TransBuffer* buffer_{nullptr};
+    Buffer* buffer_{nullptr};
     StoreV1* backend_{nullptr};
     int32_t deviceId_{-1};
     std::vector<size_t> tensorSizes_{};
@@ -68,7 +69,7 @@ private:
 
 public:
     ~DumpQueue();
-    Status Setup(const Config& config, TaskIdSet* failureSet, TransBuffer* buffer);
+    Status Setup(const Config& config, TaskIdSet* failureSet, Buffer* buffer);
     void Submit(TaskPtr task, WaiterPtr waiter);
 
 private:

@@ -26,11 +26,7 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
-#include <mutex>
-#include <string>
-#include <sys/mman.h>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 #include "cache_types.h"
 #include "ctrl_strategy.h"
@@ -75,6 +71,7 @@ public:
         explicit operator bool() const { return Valid(); }
         bool Owner() const { return owner_; }
         void* Data() { return Valid() ? buf_->DataAt(slotIdx_) : nullptr; }
+        void* DeviceData() { return Valid() ? buf_->DeviceDataAt(slotIdx_) : nullptr; }
         bool Ready() const { return Valid() && buf_->Ready(slotIdx_); }
         State GetState() const { return Valid() ? buf_->GetState(slotIdx_) : State::Failed; }
         void MarkReady()
@@ -97,21 +94,13 @@ public:
     };
 
 private:
-    struct RemoteEntry {
-        std::atomic<void*> addr{nullptr};
-        int32_t fd{-1};
-        size_t size{0};
-    };
     std::unique_ptr<CtrlStrategy> ctrl_;
     std::unique_ptr<DataStrategy> data_;
-    /* Guards lazy init / teardown of remoteCache_ entries; remoteCache_ is process-local. */
-    std::mutex remoteMtx_;
     size_t myRank_{kInvalidIndex};
     size_t nSlotsPerRank_{0};
     size_t nBuckets_{0};
     size_t slotSize_{0};
     size_t reserved_{0};
-    RemoteEntry remoteCache_[kMaxRanks];
 
     /* Optimistic pin attempts before falling back to the bucket-lock path. */
     static constexpr size_t kPinSpinFast = 64;
@@ -123,18 +112,6 @@ public:
     Buffer() = default;
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
-
-    ~Buffer()
-    {
-        std::lock_guard<std::mutex> guard(remoteMtx_);
-        for (size_t r = 0; r < kMaxRanks; r++) {
-            void* a = remoteCache_[r].addr.load(std::memory_order_acquire);
-            if (a != nullptr) {
-                ::munmap(a, remoteCache_[r].size);
-                ::close(remoteCache_[r].fd);
-            }
-        }
-    }
 
     Status Setup(const Config& cfg)
     {
@@ -173,7 +150,8 @@ public:
                 ctrl_->Layout().InitSlotRange(myRank_);
             }
             data_ = std::make_unique<DataStrategy>();
-            if (auto s = data_->Setup(cfg.physicalDeviceId, slotSize_, nSlotsPerRank_ * slotSize_);
+            if (auto s =
+                    data_->Setup(ctrl_->Layout(), cfg.deviceId, myRank_, slotSize_, nSlotsPerRank_);
                 s.Failure()) {
                 return s;
             }
@@ -200,41 +178,18 @@ public:
         return ctrl_->Layout().Hdr()->rankDescs[rank].ready.load(std::memory_order_acquire) == 1;
     }
 
-    /* Prefetch command rings. Contract: exactly one producer thread per domain (the
-     * scheduler's Prefetch caller) and one consumer thread per rank (the worker's
-     * prefetch executor); neither end of a ring may be called concurrently. Overflow
-     * keeps the front of the batch, drops the remainder and counts it. */
+    /* Prefetch command rings: the SPSC ring ops live in CtrlLayout (contract there). */
     void EnqueuePrefetch(size_t rank, const Detail::BlockId* blocks, size_t num)
     {
-        if (rank >= kMaxRanks || num == 0) { return; }
-        auto* ring = ctrl_->Layout().RingOf(rank);
-        auto h = ring->head.load(std::memory_order_relaxed);
-        auto t = ring->tail.load(std::memory_order_acquire);
-        auto free = kPrefetchDepth - static_cast<size_t>(h - t);
-        auto n = num < free ? num : free;
-        for (size_t i = 0; i < n; i++) { ring->entries[(h + i) % kPrefetchDepth] = blocks[i]; }
-        ring->head.store(h + n, std::memory_order_release);
-        if (n < num) { ring->dropped.fetch_add(num - n, std::memory_order_relaxed); }
+        ctrl_->Layout().RingPush(rank, blocks, num);
     }
 
     size_t DrainPrefetch(size_t rank, Detail::BlockId* out, size_t max)
     {
-        if (rank >= kMaxRanks || max == 0) { return 0; }
-        auto* ring = ctrl_->Layout().RingOf(rank);
-        auto t = ring->tail.load(std::memory_order_relaxed);
-        auto h = ring->head.load(std::memory_order_acquire);
-        auto avail = static_cast<size_t>(h - t);
-        auto n = max < avail ? max : avail;
-        for (size_t i = 0; i < n; i++) { out[i] = ring->entries[(t + i) % kPrefetchDepth]; }
-        ring->tail.store(t + n, std::memory_order_release);
-        return n;
+        return ctrl_->Layout().RingDrain(rank, out, max);
     }
 
-    uint64_t PrefetchDropped(size_t rank) const
-    {
-        if (rank >= kMaxRanks) { return 0; }
-        return ctrl_->Layout().RingOf(rank)->dropped.load(std::memory_order_relaxed);
-    }
+    uint64_t PrefetchDropped(size_t rank) const { return ctrl_->Layout().RingDropped(rank); }
 
     Handle Get(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false)
     {
@@ -325,51 +280,11 @@ public:
         }
     }
 
-    void* DataAt(size_t slotIdx)
-    {
-        if (!data_ || slotIdx == kInvalidIndex || nSlotsPerRank_ == 0) { return nullptr; }
-        auto rank = slotIdx / nSlotsPerRank_;
-        auto localIdx = slotIdx % nSlotsPerRank_;
-        if (rank == myRank_) { return data_->LocalDataAddr(localIdx); }
-        if (rank >= kMaxRanks) { return nullptr; }
-        auto& entry = remoteCache_[rank];
-        void* cur = entry.addr.load(std::memory_order_acquire);
-        if (cur != nullptr) { return static_cast<std::byte*>(cur) + localIdx * slotSize_; }
-        return MapRemoteData(rank, localIdx);
-    }
+    void* DataAt(size_t slotIdx) { return data_ ? data_->DataAt(slotIdx) : nullptr; }
+
+    void* DeviceDataAt(size_t slotIdx) { return data_ ? data_->DeviceDataAt(slotIdx) : nullptr; }
 
 private:
-    void* MapRemoteData(size_t rank, size_t localIdx)
-    {
-        std::lock_guard<std::mutex> guard(remoteMtx_);
-        auto& entry = remoteCache_[rank];
-        void* cur = entry.addr.load(std::memory_order_acquire);
-        if (cur != nullptr) { return static_cast<std::byte*>(cur) + localIdx * slotSize_; }
-        auto desc = ctrl_->Layout().GetRankDesc(rank);
-        if (!desc || desc.Value().ready.load(std::memory_order_relaxed) != 1) { return nullptr; }
-        std::string name = "ucm_v2_data_" + std::to_string(rank);
-        FdSocket s;
-        if (s.Connect(name).Failure()) { return nullptr; }
-        int32_t fd = -1;
-        if (s.RecvFd(fd).Failure()) {
-            s.Close();
-            return nullptr;
-        }
-        s.Close();
-        size_t size = nSlotsPerRank_ * slotSize_;
-        void* a = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (a == MAP_FAILED) {
-            ::close(fd);
-            return nullptr;
-        }
-        /* fd/size are written before addr is published so any thread that observes the
-         * mapping through addr (acquire) also observes consistent teardown fields. */
-        entry.fd = fd;
-        entry.size = size;
-        entry.addr.store(a, std::memory_order_release);
-        return static_cast<std::byte*>(a) + localIdx * slotSize_;
-    }
-
     /* Lock-free reader pin: filter by key, CAS the pin, re-validate. Returns false when
      * the key does not match or the slot stays claimed beyond spinBudget (optimistic
      * callers then retry under the bucket lock). On success the caller holds a pin: the

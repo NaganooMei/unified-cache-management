@@ -52,13 +52,15 @@ TEST_F(UCCacheLoadQueueTest, LoadSameBlockTwice)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
+    config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = true;
-    TransBuffer buffer;
+    Buffer buffer;
     LoadQueue loadQ;
     auto s = buffer.Setup(config);
-    ASSERT_EQ(s, UC::Status::OK());
+    ASSERT_EQ(s, UC::Status::OK()) << s.ToString();
     s = loadQ.Setup(config, &failureSet, &buffer);
     ASSERT_EQ(s, UC::Status::OK());
     auto blockId = UC::Test::Detail::TypesHelper::MakeBlockId("a1b2c3d4e5f6789012345678901234ab");
@@ -93,10 +95,12 @@ TEST_F(UCCacheLoadQueueTest, SharedFailureStopsNonOwnerWait)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
+    config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = true;
-    TransBuffer buffer;
+    Buffer buffer;
     LoadQueue loadQ;
     auto s = buffer.Setup(config);
     ASSERT_EQ(s, UC::Status::OK());
@@ -104,7 +108,7 @@ TEST_F(UCCacheLoadQueueTest, SharedFailureStopsNonOwnerWait)
     ASSERT_EQ(s, UC::Status::OK());
     auto blockId = UC::Test::Detail::TypesHelper::MakeBlockId("a1b2c3d4e5f6789012345678901234ab");
     constexpr size_t shardIdx = 0;
-    auto owner = buffer.Get(blockId, shardIdx, true, true);
+    auto owner = buffer.Get(blockId, shardIdx, true);
     UC::Test::Detail::DataGenerator data{1, config.blockSize};
     data.Generate();
     UC::Detail::TaskDesc desc{
@@ -114,11 +118,11 @@ TEST_F(UCCacheLoadQueueTest, SharedFailureStopsNonOwnerWait)
     auto waiter = std::make_shared<UC::Latch>();
     loadQ.Submit(task, waiter);
 
-    owner.MarkFailed(UC::Status::NotFound());
+    owner.MarkFailed();
 
     ASSERT_TRUE(waiter->WaitForDuration(1000));
     ASSERT_TRUE(failureSet.Contains(task->id));
-    ASSERT_EQ(task->FailureStatus(), UC::Status::NotFound());
+    ASSERT_TRUE(task->FailureStatus().Failure());
 }
 
 TEST_F(UCCacheLoadQueueTest, LoadWhileBackendSubmitFailed)
@@ -143,10 +147,12 @@ TEST_F(UCCacheLoadQueueTest, LoadWhileBackendSubmitFailed)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
+    config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = true;
-    TransBuffer buffer;
+    Buffer buffer;
     LoadQueue loadQ;
     auto s = buffer.Setup(config);
     ASSERT_EQ(s, UC::Status::OK());
@@ -163,15 +169,13 @@ TEST_F(UCCacheLoadQueueTest, LoadWhileBackendSubmitFailed)
     auto waiter = std::make_shared<UC::Latch>();
     loadQ.Submit(task, waiter);
     submitEntered.get_future().wait();
-    auto observer = buffer.Get(blockId, shardIdx, true, true);
+    auto observer = buffer.Get(blockId, shardIdx, true);
 
     allowSubmitFailure.set_value();
 
     ASSERT_TRUE(waiter->WaitForDuration(1000));
     ASSERT_TRUE(failureSet.Contains(task->id));
-    ASSERT_EQ(observer.GetState(), TransBuffer::State::FAILED);
-    ASSERT_EQ(observer.FailureStatus(), UC::Status::NotFound());
-    ASSERT_EQ(task->FailureStatus(), UC::Status::NotFound());
+    ASSERT_EQ(observer.GetState(), State::Failed);
 }
 
 TEST_F(UCCacheLoadQueueTest, LoadWhileBackendWaitFailed)
@@ -196,10 +200,12 @@ TEST_F(UCCacheLoadQueueTest, LoadWhileBackendWaitFailed)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
+    config.physicalDeviceId = 0;
+    config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
     config.shareBufferEnable = true;
-    TransBuffer buffer;
+    Buffer buffer;
     LoadQueue loadQ;
     auto s = buffer.Setup(config);
     ASSERT_EQ(s, UC::Status::OK());
@@ -216,13 +222,11 @@ TEST_F(UCCacheLoadQueueTest, LoadWhileBackendWaitFailed)
     auto waiter = std::make_shared<UC::Latch>();
     loadQ.Submit(task, waiter);
     waitEntered.get_future().wait();
-    auto observer = buffer.Get(blockId, shardIdx, true, true);
+    auto observer = buffer.Get(blockId, shardIdx, true);
 
     allowWaitFailure.set_value();
 
     ASSERT_TRUE(waiter->WaitForDuration(1000));
     ASSERT_TRUE(failureSet.Contains(task->id));
-    ASSERT_EQ(observer.GetState(), TransBuffer::State::FAILED);
-    ASSERT_EQ(observer.FailureStatus(), UC::Status::NotFound());
-    ASSERT_EQ(task->FailureStatus(), UC::Status::NotFound());
+    ASSERT_EQ(observer.GetState(), State::Failed);
 }

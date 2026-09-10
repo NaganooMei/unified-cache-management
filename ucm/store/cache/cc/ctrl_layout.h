@@ -103,6 +103,42 @@ public:
         return rings + rank;
     }
 
+    /* Prefetch ring ops. Contract: exactly one producer thread per domain (the
+     * scheduler's Prefetch caller) and one consumer thread per rank (the worker's
+     * prefetch executor); neither end of a ring may be called concurrently. Overflow
+     * keeps the front of the batch, drops the remainder and counts it. */
+    void RingPush(size_t rank, const Detail::BlockId* blocks, size_t num)
+    {
+        if (rank >= maxRanks_ || num == 0) { return; }
+        auto* ring = RingOf(rank);
+        auto h = ring->head.load(std::memory_order_relaxed);
+        auto t = ring->tail.load(std::memory_order_acquire);
+        auto free = kPrefetchDepth - static_cast<size_t>(h - t);
+        auto n = num < free ? num : free;
+        for (size_t i = 0; i < n; i++) { ring->entries[(h + i) % kPrefetchDepth] = blocks[i]; }
+        ring->head.store(h + n, std::memory_order_release);
+        if (n < num) { ring->dropped.fetch_add(num - n, std::memory_order_relaxed); }
+    }
+
+    size_t RingDrain(size_t rank, Detail::BlockId* out, size_t max)
+    {
+        if (rank >= maxRanks_ || max == 0) { return 0; }
+        auto* ring = RingOf(rank);
+        auto t = ring->tail.load(std::memory_order_relaxed);
+        auto h = ring->head.load(std::memory_order_acquire);
+        auto avail = static_cast<size_t>(h - t);
+        auto n = max < avail ? max : avail;
+        for (size_t i = 0; i < n; i++) { out[i] = ring->entries[(t + i) % kPrefetchDepth]; }
+        ring->tail.store(t + n, std::memory_order_release);
+        return n;
+    }
+
+    uint64_t RingDropped(size_t rank) const
+    {
+        if (rank >= maxRanks_) { return 0; }
+        return RingOf(rank)->dropped.load(std::memory_order_relaxed);
+    }
+
     /* Initializes everything except slot metadata (see InitSlotRange). */
     void InitHeader(size_t slotSize)
     {
