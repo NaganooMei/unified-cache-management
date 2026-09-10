@@ -71,6 +71,7 @@ user-guide/trace_mode
 :maxdepth: 1
 developer-guide/contribute
 developer-guide/deepdive_ucm
+developer-guide/cache_buffer_management
 developer-guide/add_metrics
 developer-guide/extending_store
 :::
