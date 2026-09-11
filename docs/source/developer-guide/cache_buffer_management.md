@@ -272,40 +272,52 @@ classDiagram
 
 ```mermaid
 classDiagram
-    direction TB
+    direction LR
 
     class TransBuffer {
       -BufferStrategy strategy
       +Get(blockId, shardIndex)
       +Exist(blockId, shardIndex)
-      -FindAt(bucket, key)
-      -Alloc(key, bucket)
-      -MoveTo(bucket, node)
-      -Remove(bucket, node)
+      -FindAt(iBucket, key)
+      -Alloc(key, iBucket)
+      -MoveTo(iBucket, iNode)
+      -Remove(iBucket, iNode)
+    }
+
+    class Handle {
+      -TransBuffer buf
+      -Index pos
+      -bool owner
+      +Data()
+      +DeviceData()
+      +Ready()
+      +MarkReady()
     }
 
     class BufferStrategy {
-      <<interface>>
-      +FirstAt(bucket)
-      +FetchNode(...)
-      +DataAt(node)
-      +MetaAt(node)
-      +SegmentAt(node)
-      +BucketLock(bucket)
-      +NodeLock(node)
+      <<abstract>>
+      +FirstAt(iBucket)
+      +FetchNode(preferredSegment)
+      +MetaAt(iNode)
+      +DataAt(iNode)
+      +BucketLock(iBucket)
+      +NodeLock(iNode)
     }
 
-    class BufferHeader {
-      +buckets[16411]
-      +bucketLocks[16411]
-      +nodeLocks[nNode]
-      +accessed[nNode]
-      +segmentCursors[]
+    class LocalBufferStrategy {
+      -BufferHeader header
+      -header.buckets[16411]
+      -BufferMetaNode[] meta
+      -atomic[] accessed
+      -void data
     }
 
-    class BucketHead {
-      <<concept>>
-      +headNodeIndex
+    class SharedBufferStrategy {
+      -BufferHeader* header
+      -header.buckets[16411]
+      -BufferMetaNode* meta
+      -atomic* accessed
+      -byte* data
     }
 
     class BufferMetaNode {
@@ -316,61 +328,40 @@ classDiagram
       +prev
       +next
       +state
-    }
-
-    class PayloadSlot {
-      <<concept>>
-      +shardSize bytes
-    }
-
-    class Handle {
-      -Index pos
-      -bool owner
-      +Data()
-      +Ready()
-      +MarkReady()
-    }
-
-    class LocalBufferStrategy {
-      per-process pinned buffer
-    }
-
-    class SharedBufferStrategy {
-      one POSIX SHM
+      +errorCode
     }
 
     class RankStripedSharedBufferStrategy {
-      shared metadata
-      multiple data segments
-      NUMA placement
+      -vector dataShmNames
+      -vector dataBases
+      -vector dataOnDeviceBases
+      -segmentSize
+      -numaNodes
     }
 
     class SharedBufferWatcherStrategy {
-      metadata-only mapping
+      +Setup()
     }
 
     TransBuffer *-- BufferStrategy
     TransBuffer --> Handle : returns
-    BufferStrategy *-- BufferHeader : maps or owns
-    BufferHeader "1" *-- "16411" BucketHead : buckets array
-    BucketHead --> BufferMetaNode : head index
-    BufferMetaNode --> BufferMetaNode : prev and next indexes
-    BufferStrategy *-- BufferMetaNode : MetaAt
-    BufferStrategy *-- PayloadSlot : DataAt
-    Handle --> BufferMetaNode : pos identifies node
-    BufferMetaNode --> PayloadSlot : same iNode
+    Handle --> TransBuffer : buf and pos
     BufferStrategy <|-- LocalBufferStrategy
     BufferStrategy <|-- SharedBufferStrategy
     SharedBufferStrategy <|-- RankStripedSharedBufferStrategy
     SharedBufferStrategy <|-- SharedBufferWatcherStrategy
+    LocalBufferStrategy *-- BufferMetaNode : meta array
+    SharedBufferStrategy --> BufferMetaNode : meta array
 ```
 
-图里的 `BucketHead` 和 `PayloadSlot` 是为了说明布局引入的概念，并不是源码中的独立 C++ 类：
+图中只保留源码里真实存在并且有助于理解查找路径的类型。
 
-- `BufferHeader::buckets[iBucket]` 保存该 bucket 的第一个 `iNode`；
-- `BufferMetaNode[iNode].prev/next` 把同一 bucket 中的 node 串起来；
-- `Handle::pos` 保存 `iNode`，从而同时定位 `BufferMetaNode[iNode]` 和对应 payload slot；
-- `TransBuffer` 实现哈希、链表、引用计数和状态转换，`BufferStrategy` 提供这些数组的实际地址和锁。
+- bucket 位于 Local/Shared Strategy 各自的 `BufferHeader::buckets[16411]` 中，每个元素保存链表头
+  `iNode`；
+- node 不是单独的 C++ 类型。`iNode` 同时索引 `BufferMetaNode` 数组和 Strategy 持有的数据区；
+- `BufferMetaNode[iNode].prev/next` 连接同一 bucket 内的 node；
+- `Handle::pos` 就是 `iNode`，`Handle` 通过 `buf_` 回调 `TransBuffer` 取得数据地址和状态；
+- rank-striped 继承共享元数据，只把单个 `data_` 改为多个 `dataBases_`。
 
 配置决定使用哪种 Strategy：
 
