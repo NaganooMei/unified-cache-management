@@ -1,10 +1,11 @@
 # UCM Cache Buffer 管理：布局、元数据与淘汰
 
-本文解释 CacheStore 中 `TransBuffer` 的内存缓存管理。重点回答三个问题：
+本文解释 CacheStore 中 `TransBuffer` 的内存缓存管理。重点回答四个问题：
 
 1. 一块固定容量的 Cache Buffer 在内存中怎样布局；
 2. `(blockId, shardIndex)` 怎样通过元数据找到 payload；
-3. 容量用满后，Clock 算法怎样选择可以复用的槽位。
+3. 容量用满后，Clock 算法怎样选择可以复用的槽位；
+4. `LoadQueue` 怎样调用 `TransBuffer`、Store backend 和 H2D 接口。
 
 文中的 `node` 表示一个固定大小的缓存槽位，大小等于 `shardSize`。它不是 NUMA node。
 `segment` 是 rank-striped 布局中的一组连续缓存槽位，NUMA node 是物理内存节点。
@@ -31,17 +32,206 @@ flowchart LR
 - 返回可用于 S2H、H2D 或 D2H 的 host 地址；
 - 在固定容量中分配和淘汰 slot。
 
+### 1.1 Setup 调用路径
+
+服务启动时，CacheStore 先创建和映射 Cache Buffer，再启动 Load/Dump 队列：
+
+```mermaid
+flowchart TD
+    CS["CacheStore::Setup"]
+    CONF["ParseConfig + CheckConfig"]
+    BM["BufferManager::Setup"]
+    TB["TransBuffer::Setup"]
+    SELECT{"按配置选择 BufferStrategy"}
+    LOCAL["LocalBufferStrategy::Setup"]
+    SHARED["SharedBufferStrategy::Setup"]
+    STRIPED["RankStripedSharedBufferStrategy::Setup"]
+    WATCHER["SharedBufferWatcherStrategy::Setup"]
+    WATCHDONE["watcher 初始化完成<br/>不启动传输队列"]
+    TM["TransManager::Setup"]
+    LQS["LoadQueue::Setup"]
+    DQS["DumpQueue::Setup"]
+    QUEUES["初始化 waiting_ / running_ 队列"]
+    THREADS["启动 dispatcher_ / transfer_ 线程"]
+    STREAM["transfer_ 线程创建 CopyStream"]
+
+    CS --> CONF --> BM --> TB --> SELECT
+    SELECT --> LOCAL
+    SELECT --> SHARED
+    SELECT --> STRIPED
+    SELECT --> WATCHER
+    LOCAL --> TM
+    SHARED --> TM
+    STRIPED --> TM
+    WATCHER --> WATCHDONE
+    TM --> LQS --> QUEUES --> THREADS --> STREAM --> DQS
+```
+
+`TransBuffer::Setup()` 只负责选择并初始化 Buffer Strategy。`TransManager::Setup()` 随后把同一个
+`TransBuffer*` 交给 `LoadQueue` 和 `DumpQueue`。因此 Load/Dump 队列不会自己创建另一块 Cache
+Buffer。
+
+### 1.2 一个 Load task 怎样进入 LoadQueue
+
+下面的箭头包含两次队列切换，因此它不是一个线程中的连续函数栈：
+
+```mermaid
+flowchart TD
+    API["CacheStore::Load(task)"]
+    SUBMIT["TransManager::Submit"]
+    DISPATCH["TransManager::Dispatch"]
+    LSUBMIT["LoadQueue::Submit"]
+    WAITING["waiting_ queue"]
+    DSTAGE["dispatcher_ thread<br/>DispatchStage"]
+    DONE1["DispatchOneTask"]
+    RUNNING["running_ queue<br/>每项是一个 ShardTask"]
+    TSTAGE["transfer_ thread<br/>TransferStage"]
+    DONE2["TransferOneTask"]
+    FINISH["最后一个 shard 完成<br/>waiter::Done"]
+
+    API --> SUBMIT --> DISPATCH --> LSUBMIT --> WAITING
+    WAITING --> DSTAGE --> DONE1 --> RUNNING
+    RUNNING --> TSTAGE --> DONE2 --> FINISH
+```
+
+- `waiting_` 中保存整个 Load task；
+- `DispatchOneTask()` 把 task 拆成多个 `ShardTask`；
+- `running_` 中保存已经取得 Cache Buffer Handle、可以等待 S2H 或执行 H2D 的单个 shard；
+- `TransferOneTask()` 按 `running_` 的顺序处理这些 shard。
+
+### 1.3 DispatchOneTask 和 TransBuffer::Get
+
+`DispatchOneTask()` 对每个 shard 执行下面的调用链：
+
+```mermaid
+flowchart TD
+    START["DispatchOneTask"]
+    ORDER["RearrangeIndex<br/>生成本 rank 的 shard 遍历顺序"]
+    GET["TransBuffer::Get(blockId, shardIndex)"]
+    HASH["Hash<br/>得到 iBucket"]
+    BLOCK["BucketLock(iBucket)"]
+    FIND["FindAt<br/>从 bucket 链表头开始遍历 node"]
+    HIT{"找到 key"}
+    USE["node.reference++"]
+    ALLOC["Alloc<br/>FetchNode 选择可用 node"]
+    LINK["Remove 旧 key<br/>MoveTo 新 bucket"]
+    UNLOCK["BucketUnlock(iBucket)<br/>返回 Handle(iNode)"]
+    READY{"Handle::Ready"}
+    CACHED["Cache 已命中<br/>不提交 backend Load"]
+    OWNER{"Handle::Owner"}
+    BACKEND["StoreV1::Load<br/>S2H 写入 Handle::Data"]
+    PEER["已有其他 owner<br/>本 shard 后续等待 READY"]
+    PUSH["running_.Push(ShardTask)"]
+    MORE{"还有 shard"}
+    PREALLOC["循环结束后<br/>TransBuffer::Prealloc"]
+
+    START --> ORDER --> GET --> HASH --> BLOCK --> FIND --> HIT
+    HIT -->|是| USE
+    HIT -->|否| ALLOC --> LINK --> USE
+    USE --> UNLOCK --> READY
+    READY -->|是| CACHED --> PUSH
+    READY -->|否| OWNER
+    OWNER -->|是| BACKEND --> PUSH
+    OWNER -->|否| PEER --> PUSH
+    PUSH --> MORE
+    MORE -->|是| GET
+    MORE -->|否| PREALLOC
+```
+
+`Get()` 的返回值是 `Handle`，不是 payload 的复制结果。`Handle` 内部保存 `iNode`：
+
+```text
+Handle::Data()       -> 取得 iNode 对应的 host 地址，供 backend S2H 使用
+Handle::DeviceData() -> 取得设备可访问的 host 地址，供 SDMA Direct 使用
+Handle::Ready()      -> 读取 iNode 的状态
+Handle::Owner()      -> 判断当前调用者是否负责填充这个 slot
+Handle::Segment()    -> 查询 iNode 的实际 segment
+```
+
+### 1.4 TransferOneTask：从 READY 到 H2D
+
+```mermaid
+flowchart TD
+    POP["running_ 取出一个 ShardTask"]
+    TRANSFER["TransferOneTask"]
+    WAIT["WaitBackendTaskReady"]
+    OWN{"有 backendTaskHandle"}
+    BWAIT["StoreV1::Wait<br/>完成后 MarkReady"]
+    STATE{"Handle::GetState"}
+    YIELD["LOADING<br/>yield 后继续检查"]
+    FAIL["FAILED<br/>返回失败状态"]
+    H2D["CopyStream::HostToDeviceAsync"]
+    LAST{"是不是 task 的最后一个 shard"}
+    HOLD["放入 holder_<br/>保持 Handle 和 host slot 存活"]
+    SYNC["CopyStream::Synchronize"]
+    RELEASE["记录结果并清空 holder_"]
+    DONE["waiter::Done"]
+
+    POP --> TRANSFER --> WAIT --> OWN
+    OWN -->|是| BWAIT --> H2D
+    OWN -->|否| STATE
+    STATE -->|READY| H2D
+    STATE -->|LOADING| YIELD --> STATE
+    STATE -->|FAILED| FAIL
+    H2D --> LAST
+    LAST -->|否| HOLD
+    LAST -->|是| SYNC --> RELEASE --> DONE
+```
+
+纯 Cache 命中时，Handle 在进入 `running_` 前已经是 `READY`，所以
+`WaitBackendTaskReady()` 立即返回，然后直接提交 H2D。Posix 命中时，owner shard 先等待
+`StoreV1::Wait()` 完成 S2H，再执行 H2D；非 owner shard 等待共享元数据中的状态变为 `READY`。
+
 ## 2. 主要类及职责
+
+调用和执行层的关系如下：
 
 ```mermaid
 classDiagram
-    direction LR
+    direction TB
+
+    class CacheStore {
+      +Setup(config)
+      +Load(task)
+      +Lookup(blocks)
+    }
 
     class BufferManager {
       -TransBuffer buffer
       -StoreV1 backend
+      +Setup(config)
       +Lookup(blocks)
       +GetTransBuffer()
+    }
+
+    class TransManager {
+      -LoadQueue loadQ
+      -DumpQueue dumpQ
+      +Setup(config, buffer)
+      +Submit(task)
+      -Dispatch(task)
+    }
+
+    class LoadQueue {
+      -Queue waiting
+      -Queue running
+      +Setup(config, buffer)
+      +Submit(task, waiter)
+      -DispatchOneTask(pair)
+      -TransferOneTask(stream, shardTask)
+      -WaitBackendTaskReady(shardTask)
+    }
+
+    class StoreV1 {
+      <<interface>>
+      +Load(task)
+      +Wait(taskHandle)
+      +Lookup(blocks)
+    }
+
+    class CopyStream {
+      +HostToDeviceAsync(host, device)
+      +Synchronize()
     }
 
     class TransBuffer {
@@ -66,14 +256,79 @@ classDiagram
       +MarkReady()
     }
 
+    CacheStore *-- BufferManager
+    CacheStore *-- TransManager
+    TransManager *-- LoadQueue
+    BufferManager *-- TransBuffer
+    BufferManager --> StoreV1 : lookup miss
+    LoadQueue --> StoreV1 : Load and Wait
+    LoadQueue --> TransBuffer : Get and Prealloc
+    LoadQueue --> CopyStream : H2D and sync
+    TransBuffer --> Handle : returns
+    Handle --> TransBuffer : retains node
+```
+
+`TransBuffer` 内部的 bucket、node 和 payload 位置如下：
+
+```mermaid
+classDiagram
+    direction TB
+
+    class TransBuffer {
+      -BufferStrategy strategy
+      +Get(blockId, shardIndex)
+      +Exist(blockId, shardIndex)
+      -FindAt(bucket, key)
+      -Alloc(key, bucket)
+      -MoveTo(bucket, node)
+      -Remove(bucket, node)
+    }
+
     class BufferStrategy {
       <<interface>>
+      +FirstAt(bucket)
       +FetchNode(...)
       +DataAt(node)
       +MetaAt(node)
       +SegmentAt(node)
       +BucketLock(bucket)
       +NodeLock(node)
+    }
+
+    class BufferHeader {
+      +buckets[16411]
+      +bucketLocks[16411]
+      +nodeLocks[nNode]
+      +accessed[nNode]
+      +segmentCursors[]
+    }
+
+    class BucketHead {
+      <<concept>>
+      +headNodeIndex
+    }
+
+    class BufferMetaNode {
+      +block
+      +shard
+      +reference
+      +hash
+      +prev
+      +next
+      +state
+    }
+
+    class PayloadSlot {
+      <<concept>>
+      +shardSize bytes
+    }
+
+    class Handle {
+      -Index pos
+      -bool owner
+      +Data()
+      +Ready()
+      +MarkReady()
     }
 
     class LocalBufferStrategy {
@@ -94,15 +349,28 @@ classDiagram
       metadata-only mapping
     }
 
-    BufferManager *-- TransBuffer
     TransBuffer *-- BufferStrategy
     TransBuffer --> Handle : returns
-    Handle --> TransBuffer : retains slot
+    BufferStrategy *-- BufferHeader : maps or owns
+    BufferHeader "1" *-- "16411" BucketHead : buckets array
+    BucketHead --> BufferMetaNode : head index
+    BufferMetaNode --> BufferMetaNode : prev and next indexes
+    BufferStrategy *-- BufferMetaNode : MetaAt
+    BufferStrategy *-- PayloadSlot : DataAt
+    Handle --> BufferMetaNode : pos identifies node
+    BufferMetaNode --> PayloadSlot : same iNode
     BufferStrategy <|-- LocalBufferStrategy
     BufferStrategy <|-- SharedBufferStrategy
     SharedBufferStrategy <|-- RankStripedSharedBufferStrategy
     SharedBufferStrategy <|-- SharedBufferWatcherStrategy
 ```
+
+图里的 `BucketHead` 和 `PayloadSlot` 是为了说明布局引入的概念，并不是源码中的独立 C++ 类：
+
+- `BufferHeader::buckets[iBucket]` 保存该 bucket 的第一个 `iNode`；
+- `BufferMetaNode[iNode].prev/next` 把同一 bucket 中的 node 串起来；
+- `Handle::pos` 保存 `iNode`，从而同时定位 `BufferMetaNode[iNode]` 和对应 payload slot；
+- `TransBuffer` 实现哈希、链表、引用计数和状态转换，`BufferStrategy` 提供这些数组的实际地址和锁。
 
 配置决定使用哪种 Strategy：
 
