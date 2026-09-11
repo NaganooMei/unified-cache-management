@@ -13,7 +13,7 @@
 
 `TransBuffer` 是 Store backend 与设备 KV Cache 之间的固定容量主机内存缓存：
 
-```{mermaid}
+```mermaid
 flowchart LR
     SSD[Posix / 其他 Store backend]
     TB[TransBuffer<br/>固定数量的 host slots]
@@ -33,7 +33,7 @@ flowchart LR
 
 ## 2. 主要类及职责
 
-```{mermaid}
+```mermaid
 classDiagram
     direction LR
 
@@ -132,7 +132,7 @@ nNode = 32 GiB / 2 MiB = 16384 slots
 
 每个 slot 由同一个全局 `iNode` 标识，并在逻辑上分成三部分：
 
-```{mermaid}
+```mermaid
 flowchart TB
     IDX[iNode = 42]
     META[meta 42<br/>block, shard, reference,<br/>hash, prev, next, state]
@@ -180,7 +180,7 @@ flowchart TB
 
 rank-striped 把共享元数据与大容量 payload 分开：
 
-```{mermaid}
+```mermaid
 flowchart TB
     META[rs_meta<br/>header, buckets, locks,<br/>accessed, cursors, ready, BufferMetaNode]
 
@@ -227,7 +227,7 @@ address = dataBases[2] + 345 * shardSize
 
 32 GiB 被分成 16 个约 2 GiB 的 segment：
 
-```{mermaid}
+```mermaid
 flowchart LR
     S0[seg 0<br/>2 GiB] --> N0[NUMA 0<br/>4 GiB]
     S8[seg 8<br/>2 GiB] --> N0
@@ -235,8 +235,8 @@ flowchart LR
     S1[seg 1<br/>2 GiB] --> N1[NUMA 1<br/>4 GiB]
     S9[seg 9<br/>2 GiB] --> N1
 
-    SD[seg 2..7] --> ND[NUMA 2..7]
-    SE[seg 10..15] --> ND
+    SD[seg 2..7] --> NUMAS[NUMA 2..7]
+    SE[seg 10..15] --> NUMAS
 ```
 
 每个数据段的创建者执行：
@@ -274,7 +274,7 @@ iBucket = Hash(blockId, shardIndex) % 16411
 
 不同 key 可能进入同一个 bucket，所以每个 bucket 保存一条由 node index 连接的双向链表：
 
-```{mermaid}
+```mermaid
 flowchart LR
     B[buckets 731 = node 8]
     N8[node 8<br/>block A, shard 0<br/>prev = invalid<br/>next = 21]
@@ -311,7 +311,7 @@ flowchart LR
 
 ## 7. `Get()`：命中和未命中
 
-```{mermaid}
+```mermaid
 flowchart TD
     G[Get blockId, shardIndex]
     H[计算 bucket 并加 bucket lock]
@@ -350,7 +350,7 @@ handle.Ready() == false
 
 ### 7.2 Handle 为什么重要
 
-```{mermaid}
+```mermaid
 sequenceDiagram
     participant Q as LoadQueue
     participant B as TransBuffer
@@ -369,7 +369,7 @@ sequenceDiagram
 
 ## 8. 状态机
 
-```{mermaid}
+```mermaid
 stateDiagram-v2
     [*] --> LOADING: Alloc 新 slot
     LOADING --> READY: backend 或 D2H 完成后 MarkReady
@@ -398,7 +398,7 @@ Clock 使用两个信号：
 
 ### 9.1 一次扫描
 
-```{mermaid}
+```mermaid
 flowchart TD
     C[Clock cursor 指向候选 slot]
     A{accessed == 1?}
@@ -492,7 +492,7 @@ segment 1: cursor[1] → 本段 slots
 segment N: cursor[N] → 本段 slots
 ```
 
-```{mermaid}
+```mermaid
 flowchart LR
     P[preferredSegment = 2]
     C2[cursor 2]
@@ -541,7 +541,7 @@ rank-striped 模式会把当前 shard 的实际 segment 作为下一 shard 的�
 
 ## 12. Lookup、Load 和 Dump 的关系
 
-```{mermaid}
+```mermaid
 flowchart TB
     LOOKUP[BufferManager::Lookup]
     EXIST[TransBuffer::Exist]

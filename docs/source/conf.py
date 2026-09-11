@@ -30,6 +30,7 @@ extensions = [
 ]
 
 myst_enable_extensions = ["colon_fence", "substitution"]
+myst_fence_as_directive = ["mermaid"]
 
 # templates_path = ['_templates']
 exclude_patterns = []
