@@ -36,35 +36,29 @@ flowchart LR
 
 服务启动时，CacheStore 先创建和映射 Cache Buffer，再启动 Load/Dump 队列：
 
-```mermaid
-flowchart TD
-    CS["CacheStore::Setup"]
-    CONF["ParseConfig + CheckConfig"]
-    BM["BufferManager::Setup"]
-    TB["TransBuffer::Setup"]
-    SELECT{"按配置选择 BufferStrategy"}
-    LOCAL["LocalBufferStrategy::Setup"]
-    SHARED["SharedBufferStrategy::Setup"]
-    STRIPED["RankStripedSharedBufferStrategy::Setup"]
-    WATCHER["SharedBufferWatcherStrategy::Setup"]
-    WATCHDONE["watcher 初始化完成<br/>不启动传输队列"]
-    TM["TransManager::Setup"]
-    LQS["LoadQueue::Setup"]
-    DQS["DumpQueue::Setup"]
-    QUEUES["初始化 waiting_ / running_ 队列"]
-    THREADS["启动 dispatcher_ / transfer_ 线程"]
-    STREAM["transfer_ 线程创建 CopyStream"]
-
-    CS --> CONF --> BM --> TB --> SELECT
-    SELECT --> LOCAL
-    SELECT --> SHARED
-    SELECT --> STRIPED
-    SELECT --> WATCHER
-    LOCAL --> TM
-    SHARED --> TM
-    STRIPED --> TM
-    WATCHER --> WATCHDONE
-    TM --> LQS --> QUEUES --> THREADS --> STREAM --> DQS
+```text
+CacheStore::Setup()
+  ├─ ParseConfig() + CheckConfig()
+  ├─ BufferManager::Setup()
+  │    └─ TransBuffer::Setup()
+  │         ├─ shareBufferEnable=false
+  │         │    └─ LocalBufferStrategy::Setup()
+  │         ├─ shareBufferEnable=true，rank-striped=false
+  │         │    └─ SharedBufferStrategy::Setup()
+  │         ├─ shareBufferEnable=true，rank-striped=true
+  │         │    └─ RankStripedSharedBufferStrategy::Setup()
+  │         └─ watcher 进程
+  │              └─ SharedBufferWatcherStrategy::Setup()
+  └─ 检查 deviceId
+       ├─ deviceId >= 0
+       │    └─ TransManager::Setup(同一个 TransBuffer*)
+       │         ├─ LoadQueue::Setup()
+       │         │    ├─ 初始化 waiting_ / running_ 队列
+       │         │    ├─ 启动 dispatcher_ / transfer_ 线程
+       │         │    └─ transfer_ 线程创建 CopyStream
+       │         └─ DumpQueue::Setup()
+       └─ deviceId < 0（watcher）
+            └─ 不启动传输队列
 ```
 
 `TransBuffer::Setup()` 只负责选择并初始化 Buffer Strategy。`TransManager::Setup()` 随后把同一个
@@ -73,25 +67,32 @@ Buffer。
 
 ### 1.2 一个 Load task 怎样进入 LoadQueue
 
-下面的箭头包含两次队列切换，因此它不是一个线程中的连续函数栈：
+下面的流程包含两次队列切换，因此它不是一个线程中的连续函数栈：
 
-```mermaid
-flowchart TD
-    API["CacheStore::Load(task)"]
-    SUBMIT["TransManager::Submit"]
-    DISPATCH["TransManager::Dispatch"]
-    LSUBMIT["LoadQueue::Submit"]
-    WAITING["waiting_ queue"]
-    DSTAGE["dispatcher_ thread<br/>DispatchStage"]
-    DONE1["DispatchOneTask"]
-    RUNNING["running_ queue<br/>每项是一个 ShardTask"]
-    TSTAGE["transfer_ thread<br/>TransferStage"]
-    DONE2["TransferOneTask"]
-    FINISH["最后一个 shard 完成<br/>waiter::Done"]
+```text
+调用线程
+  └─ CacheStore::Load(task)
+       └─ TransManager::Submit(task)
+            └─ TransManager::Dispatch(task)
+                 └─ LoadQueue::Submit(task, waiter)
+                      └─ waiting_.Push(整个 Load task)
 
-    API --> SUBMIT --> DISPATCH --> LSUBMIT --> WAITING
-    WAITING --> DSTAGE --> DONE1 --> RUNNING
-    RUNNING --> TSTAGE --> DONE2 --> FINISH
+                         [第一次队列切换]
+
+dispatcher_ 线程
+  └─ DispatchStage()
+       └─ DispatchOneTask()
+            └─ 拆成多个 ShardTask
+                 └─ running_.Push(ShardTask)
+
+                    [第二次队列切换]
+
+transfer_ 线程
+  └─ TransferStage()
+       └─ TransferOneTask()
+            ├─ 等待 S2H/READY
+            ├─ 提交 H2D
+            └─ 最后一个 shard 完成时 waiter::Done()
 ```
 
 - `waiting_` 中保存整个 Load task；
@@ -101,41 +102,86 @@ flowchart TD
 
 ### 1.3 DispatchOneTask 和 TransBuffer::Get
 
-`DispatchOneTask()` 对每个 shard 执行下面的调用链：
+`DispatchOneTask()` 的外层流程如下：
 
-```mermaid
-flowchart TD
-    START["DispatchOneTask"]
-    ORDER["RearrangeIndex<br/>生成本 rank 的 shard 遍历顺序"]
-    GET["TransBuffer::Get(blockId, shardIndex)"]
-    HASH["Hash<br/>得到 iBucket"]
-    BLOCK["BucketLock(iBucket)"]
-    FIND["FindAt<br/>从 bucket 链表头开始遍历 node"]
-    HIT{"找到 key"}
-    USE["node.reference++"]
-    ALLOC["Alloc<br/>FetchNode 选择可用 node"]
-    LINK["Remove 旧 key<br/>MoveTo 新 bucket"]
-    UNLOCK["BucketUnlock(iBucket)<br/>返回 Handle(iNode)"]
-    READY{"Handle::Ready"}
-    CACHED["Cache 已命中<br/>不提交 backend Load"]
-    OWNER{"Handle::Owner"}
-    BACKEND["StoreV1::Load<br/>S2H 写入 Handle::Data"]
-    PEER["已有其他 owner<br/>本 shard 后续等待 READY"]
-    PUSH["running_.Push(ShardTask)"]
-    MORE{"还有 shard"}
-    PREALLOC["循环结束后<br/>TransBuffer::Prealloc"]
+```text
+LoadQueue::DispatchOneTask(task)
+  ├─ RearrangeIndex(nShard, bufferRank, localRankSize)
+  │    └─ 生成当前 rank 的 shard 遍历顺序 indexes
+  ├─ 依次处理 indexes 中的每个 originalIndex
+  │    ├─ 计算 preferredSegment（仅 rank-striped）
+  │    ├─ TransBuffer::Get(blockId, shardIndex, ...)
+  │    ├─ fromPosix = !Handle::Ready()
+  │    ├─ owner 且非 READY
+  │    │    └─ backend_->Load(目标地址为 Handle::Data())
+  │    ├─ 记录下一 shard 的 PreallocHint
+  │    └─ running_.Push(ShardTask)
+  └─ 所有 shard 入队后
+       └─ 按 PreallocHint 调用 TransBuffer::Prealloc()
+```
 
-    START --> ORDER --> GET --> HASH --> BLOCK --> FIND --> HIT
-    HIT -->|是| USE
-    HIT -->|否| ALLOC --> LINK --> USE
-    USE --> UNLOCK --> READY
-    READY -->|是| CACHED --> PUSH
-    READY -->|否| OWNER
-    OWNER -->|是| BACKEND --> PUSH
-    OWNER -->|否| PEER --> PUSH
-    PUSH --> MORE
-    MORE -->|是| GET
-    MORE -->|否| PREALLOC
+其中一次 `TransBuffer::Get()` 的缓存查找如下：
+
+```text
+TransBuffer::Get(blockId, shardIndex, ...)
+  ├─ Hash(blockId, shardIndex)
+  │    └─ 得到 iBucket
+  ├─ strategy_->BucketLock(iBucket)
+  ├─ FindAt(iBucket, blockId, shardIndex)
+  │    ├─ strategy_->FirstAt(iBucket)
+  │    ├─ 沿 BufferMetaNode::next 遍历
+  │    ├─ strategy_->MetaAt(iNode)
+  │    └─ 找到匹配 node 时
+  │         ├─ strategy_->NodeLock(iNode)
+  │         ├─ owner = (reference == 0)
+  │         ├─ reference++
+  │         ├─ strategy_->MarkAccessed(iNode)
+  │         └─ strategy_->NodeUnlock(iNode)
+  ├─ 找到 node
+  │    ├─ strategy_->BucketUnlock(iBucket)
+  │    └─ 返回 Handle(this, iNode, owner)
+  └─ 没找到 node
+       ├─ Alloc(blockId, shardIndex, iBucket, ...)
+       ├─ strategy_->BucketUnlock(iBucket)
+       └─ 返回 Handle(this, iNode, true)
+```
+
+`Alloc()` 负责挑选并复用固定缓存池中的一个 node：
+
+```text
+TransBuffer::Alloc(blockId, shardIndex, iBucket, ...)
+  ├─ strategy_->FetchNode()
+  │    └─ 按 CLOCK 挑候选 iNode
+  ├─ strategy_->NodeLock(iNode)
+  ├─ 检查 node.reference
+  │    ├─ reference > 0：正在使用，解锁并重新 FetchNode()
+  │    └─ reference = 0：可以复用
+  ├─ node 原来属于另一个 bucket
+  │    ├─ oldBucket 有效时尝试锁住旧 bucket
+  │    │    ├─ 加锁失败：解锁 node，重新 FetchNode()
+  │    │    └─ 加锁成功：Remove(oldBucket, iNode)，再解锁旧 bucket
+  │    └─ MoveTo(iBucket, iNode)
+  ├─ reference++，并设置 accessed=1
+  ├─ 写入新的 blockId / shardIndex
+  ├─ state = LOADING，清除旧错误码
+  ├─ strategy_->NodeUnlock(iNode)
+  └─ 返回 iNode
+```
+
+`Get()` 返回 `Handle` 后，`DispatchOneTask()` 决定数据来源：
+
+```text
+Handle
+  ├─ Ready() = true
+  │    └─ Cache 命中，不提交 backend Load
+  └─ Ready() = false
+       ├─ Owner() = true
+       │    └─ backend_->Load(S2H 写入 Handle::Data())
+       └─ Owner() = false
+            └─ 不重复提交 S2H，TransferOneTask 中等待共享状态 READY
+
+上述两条路径最终都执行：
+  └─ running_.Push(ShardTask)
 ```
 
 `Get()` 的返回值是 `Handle`，不是 payload 的复制结果。`Handle` 内部保存 `iNode`：
@@ -150,32 +196,26 @@ Handle::Segment()    -> 查询 iNode 的实际 segment
 
 ### 1.4 TransferOneTask：从 READY 到 H2D
 
-```mermaid
-flowchart TD
-    POP["running_ 取出一个 ShardTask"]
-    TRANSFER["TransferOneTask"]
-    WAIT["WaitBackendTaskReady"]
-    OWN{"有 backendTaskHandle"}
-    BWAIT["StoreV1::Wait<br/>完成后 MarkReady"]
-    STATE{"Handle::GetState"}
-    YIELD["LOADING<br/>yield 后继续检查"]
-    FAIL["FAILED<br/>返回失败状态"]
-    H2D["CopyStream::HostToDeviceAsync"]
-    LAST{"是不是 task 的最后一个 shard"}
-    HOLD["放入 holder_<br/>保持 Handle 和 host slot 存活"]
-    SYNC["CopyStream::Synchronize"]
-    RELEASE["记录结果并清空 holder_"]
-    DONE["waiter::Done"]
-
-    POP --> TRANSFER --> WAIT --> OWN
-    OWN -->|是| BWAIT --> H2D
-    OWN -->|否| STATE
-    STATE -->|READY| H2D
-    STATE -->|LOADING| YIELD --> STATE
-    STATE -->|FAILED| FAIL
-    H2D --> LAST
-    LAST -->|否| HOLD
-    LAST -->|是| SYNC --> RELEASE --> DONE
+```text
+LoadQueue::TransferStage()
+  └─ running_ 取出一个 ShardTask
+       └─ TransferOneTask(stream, shardTask)
+            ├─ WaitBackendTaskReady(shardTask)
+            │    ├─ backendTaskHandle != 0（当前 rank 是 S2H owner）
+            │    │    ├─ backend_->Wait(handle)
+            │    │    └─ S2H 完成后 Handle::MarkReady()
+            │    └─ backendTaskHandle == 0（Cache 命中或 peer 是 owner）
+            │         ├─ READY：立即继续
+            │         ├─ LOADING：yield 后再次检查
+            │         └─ FAILED：返回错误
+            ├─ 选择 Handle::Data() 或 Handle::DeviceData()
+            ├─ CopyStream::HostToDeviceAsync()
+            ├─ 当前不是最后一个 shard
+            │    └─ 放入 holder_，保持 Handle 和 host slot 存活
+            └─ 当前是最后一个 shard
+                 ├─ CopyStream::Synchronize()
+                 ├─ 记录结果并清空 holder_
+                 └─ waiter::Done()
 ```
 
 纯 Cache 命中时，Handle 在进入 `running_` 前已经是 `READY`，所以
@@ -800,25 +840,23 @@ rank-striped 模式会把当前 shard 的实际 segment 作为下一 shard 的�
 
 ## 12. Lookup、Load 和 Dump 的关系
 
-```mermaid
-flowchart TB
-    LOOKUP[BufferManager::Lookup]
-    EXIST[TransBuffer::Exist]
-    LQ[LoadQueue]
-    DQ[DumpQueue]
+```text
+BufferManager::Lookup(blocks)
+  └─ TransBuffer::Exist(blockId, shardIndex)
+       ├─ 存在：直接报告 Cache 命中
+       └─ 不存在：继续查询 Store backend
 
-    LOOKUP --> EXIST
-    EXIST -->|命中| FAST[直接报告缓存命中]
-    EXIST -->|未命中| STORELOOKUP[查询 Store backend]
+LoadQueue
+  └─ TransBuffer::Get() → Handle
+       ├─ READY：直接 H2D
+       └─ 非 READY 且 owner
+            ├─ backend Load：S2H 写入 host slot
+            └─ S2H 完成后执行 H2D
 
-    LQ --> GETL[Get + Handle]
-    GETL -->|READY| H2D[直接 H2D]
-    GETL -->|非 READY 且 owner| S2H[backend Load 到 host slot]
-    S2H --> H2D
-
-    DQ --> GETD[Get + Handle]
-    GETD --> D2H[device 写入 host slot]
-    D2H --> DUMP[backend Dump]
+DumpQueue
+  └─ TransBuffer::Get() → Handle
+       ├─ D2H：device 写入 host slot
+       └─ backend Dump：host slot 写入 Store backend
 ```
 
 ## 13. 生命周期
