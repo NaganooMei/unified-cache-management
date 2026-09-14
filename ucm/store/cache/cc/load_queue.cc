@@ -117,10 +117,23 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
         auto& shard = task->desc[indexes[i]];
         ShardTask shardTask;
         shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true);
+        if (!shardTask.bufferHandle) {
+            task->Fail(Status::Retry());
+            failureSet_->Insert(task->id);
+            waiter->Done();
+            return;
+        }
         shardTask.backendTaskHandle = 0;
         shardTask.fromPosix = !shardTask.bufferHandle.Ready();
         if (shardTask.fromPosix) { waitShardCount++; }
         if (shardTask.bufferHandle.Owner() && !shardTask.bufferHandle.Ready()) {
+            if (shardTask.bufferHandle.Data() == nullptr) {
+                shardTask.bufferHandle.MarkFailed();
+                task->Fail(Status::Error("cache host mapping unavailable"));
+                failureSet_->Insert(task->id);
+                waiter->Done();
+                return;
+            }
             Detail::TaskDesc backendTask{
                 Detail::Shard{shard.owner, shard.index, {shardTask.bufferHandle.Data()}}
             };
@@ -191,8 +204,11 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
     auto parentTask = task.task;
     const auto taskHandle = parentTask->id;
     if (failureSet_->Contains(taskHandle)) {
+        // Backend writes must finish before their pinned host storage is released.
+        if (task.backendTaskHandle != 0) { WaitBackendTaskReady(task); }
         RecordFailedShards(1);
         if (task.waiter) {
+            stream.Synchronize();
             holder_.clear();
             task.waiter->Done();
         }
@@ -213,6 +229,10 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
                                  (tpBackendReady - tpBackendWait) * 1e3);
 
         auto* host = cacheSdmaDirect_ ? task.bufferHandle.DeviceData() : task.bufferHandle.Data();
+        if (host == nullptr) {
+            s = Status::Error("cache transfer mapping unavailable");
+            break;
+        }
         s = HostToDeviceAsync(stream, host, task.shard.addrs.data());
         auto tpH2dSubmitted = NowTime::Now();
         if (s.Failure()) [[unlikely]] {
@@ -240,6 +260,8 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
         }
     } while (0);
     if (s.Failure()) [[unlikely]] {
+        stream.Synchronize();
+        holder_.clear();
         parentTask->Fail(s);
         failureSet_->Insert(taskHandle);
     }

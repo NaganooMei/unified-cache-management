@@ -138,13 +138,22 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     for (size_t i = 0; i < nShard; i++) {
         auto& shard = task->desc[i];
         auto handle = buffer_->Get(shard.owner, shard.index);
+        if (!handle) {
+            stream.Synchronize();
+            return Status::Retry();
+        }
         if (!handle.Owner()) { continue; }
         if (!handle.Ready()) {
             auto* host = cacheSdmaDirect_ ? handle.DeviceData() : handle.Data();
+            if (host == nullptr) {
+                stream.Synchronize();
+                return Status::Error("cache transfer mapping unavailable");
+            }
             auto s = DeviceToHostAsync(stream, shard.addrs.data(), host);
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to do D2H for task({}).", s, task->id);
                 UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
+                stream.Synchronize();
                 return s;
             }
             copiedShards++;

@@ -82,8 +82,7 @@ public:
                                                       BucketsOffset());
     }
     /* Striped lock: one lock array entry per kLockStripes buckets. Distinct buckets may
-     * share a stripe (prob. 1/kLockStripes), which only adds serialization; the Alloc
-     * TryLock backoff handles the same-stripe case naturally. */
+     * share a stripe. Alloc reuses the held lock when both buckets share a stripe. */
     BucketLock* LockOf(size_t iBucket) const
     {
         auto* stripes =
@@ -103,14 +102,15 @@ public:
         return rings + rank;
     }
 
-    /* Prefetch ring ops. Contract: exactly one producer thread per domain (the
-     * scheduler's Prefetch caller) and one consumer thread per rank (the worker's
-     * prefetch executor); neither end of a ring may be called concurrently. Overflow
-     * keeps the front of the batch, drops the remainder and counts it. */
+    // Multiple producers, one consumer per rank. Lookup must not wait on a producer.
     void RingPush(size_t rank, const Detail::BlockId* blocks, size_t num)
     {
-        if (rank >= maxRanks_ || num == 0) { return; }
+        if (rank >= maxRanks_ || num == 0 || blocks == nullptr) { return; }
         auto* ring = RingOf(rank);
+        if (!ring->producers.TryLock()) {
+            ring->dropped.fetch_add(num, std::memory_order_relaxed);
+            return;
+        }
         auto h = ring->head.load(std::memory_order_relaxed);
         auto t = ring->tail.load(std::memory_order_acquire);
         auto free = kPrefetchDepth - static_cast<size_t>(h - t);
@@ -118,11 +118,12 @@ public:
         for (size_t i = 0; i < n; i++) { ring->entries[(h + i) % kPrefetchDepth] = blocks[i]; }
         ring->head.store(h + n, std::memory_order_release);
         if (n < num) { ring->dropped.fetch_add(num - n, std::memory_order_relaxed); }
+        ring->producers.Unlock();
     }
 
     size_t RingDrain(size_t rank, Detail::BlockId* out, size_t max)
     {
-        if (rank >= maxRanks_ || max == 0) { return 0; }
+        if (rank >= maxRanks_ || max == 0 || out == nullptr) { return 0; }
         auto* ring = RingOf(rank);
         auto t = ring->tail.load(std::memory_order_relaxed);
         auto h = ring->head.load(std::memory_order_acquire);
@@ -162,6 +163,7 @@ public:
         /* Ring counters only; entries stay untouched until first use. */
         for (size_t r = 0; r < maxRanks_; r++) {
             auto* ring = RingOf(r);
+            ring->producers.Init();
             ring->head.store(0, std::memory_order_relaxed);
             ring->tail.store(0, std::memory_order_relaxed);
             ring->dropped.store(0, std::memory_order_relaxed);

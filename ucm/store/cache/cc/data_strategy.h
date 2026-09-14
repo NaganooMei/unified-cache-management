@@ -32,6 +32,7 @@
 #include <thread>
 #include <unistd.h>
 #include "cache_types.h"
+#include "cache_domain.h"
 #include "ctrl_layout.h"
 #include "global_config.h"
 #include "ipc/fd_socket.h"
@@ -57,6 +58,7 @@ class DataStrategy {
     CtrlLayout* ctrl_{nullptr};
     size_t myRank_{kInvalidIndex};
     size_t nSlotsPerRank_{0};
+    std::string domainName_;
     /* Guards lazy init / teardown of remoteCache_ entries; remoteCache_ is process-local. */
     std::mutex remoteMtx_;
     RemoteEntry remoteCache_[kMaxRanks];
@@ -85,14 +87,15 @@ public:
     }
 
     Status Setup(CtrlLayout& ctrl, int32_t deviceId, size_t rank, size_t slotSize,
-                 size_t nSlotsPerRank)
+                 size_t nSlotsPerRank, const Config& config)
     {
         ctrl_ = &ctrl;
         myRank_ = rank;
         nSlotsPerRank_ = nSlotsPerRank;
         slotSize_ = slotSize;
         auto size = nSlotsPerRank * slotSize;
-        std::string name = "ucm_v2_data_" + std::to_string(rank);
+        domainName_ = CacheDomainName(config.uniqueId);
+        std::string name = domainName_ + "_data_" + std::to_string(rank);
         auto s = data_.Create(name, size, true);
         if (s.Failure()) { return s; }
         constexpr size_t kFirstTouchChunk = 256 * 1024 * 1024;
@@ -104,6 +107,7 @@ public:
         }
         s = Trans::Buffer::RegisterHostBuffer(data_.Addr(), size, &devicePtr_);
         if (s.Failure()) { return s; }
+        if (!config.shareBufferEnable) { return Status::OK(); }
         s = dataSock_.Listen(name);
         if (s.Failure()) { return s; }
         acceptThread_ = std::thread([this] {
@@ -120,7 +124,7 @@ public:
         auto rank = slotIdx / nSlotsPerRank_;
         auto localIdx = slotIdx % nSlotsPerRank_;
         if (rank == myRank_) { return LocalDataAddr(localIdx); }
-        if (rank >= kMaxRanks) { return nullptr; }
+        if (rank >= ctrl_->Hdr()->maxRanks) { return nullptr; }
         auto& entry = remoteCache_[rank];
         void* cur = entry.addr.load(std::memory_order_acquire);
         if (cur != nullptr) { return static_cast<std::byte*>(cur) + localIdx * slotSize_; }
@@ -133,13 +137,11 @@ public:
         auto rank = slotIdx / nSlotsPerRank_;
         auto localIdx = slotIdx % nSlotsPerRank_;
         if (rank == myRank_) { return LocalDeviceDataAddr(localIdx); }
-        if (rank >= kMaxRanks) { return nullptr; }
+        if (rank >= ctrl_->Hdr()->maxRanks) { return nullptr; }
         auto& entry = remoteCache_[rank];
         void* cur = entry.deviceAddr.load(std::memory_order_acquire);
         if (cur != nullptr) { return static_cast<std::byte*>(cur) + localIdx * slotSize_; }
-        /* First touch maps the rank and registers it with the device in one go (see
-         * MapRemoteData). A non-null host mapping with a null deviceAddr means
-         * registration failed once and is not retried. */
+        // A failed mapping or registration is not published and can be retried.
         if (MapRemoteData(rank, localIdx) == nullptr) { return nullptr; }
         cur = entry.deviceAddr.load(std::memory_order_acquire);
         return cur != nullptr ? static_cast<std::byte*>(cur) + localIdx * slotSize_ : nullptr;
@@ -164,7 +166,7 @@ private:
         if (cur != nullptr) { return static_cast<std::byte*>(cur) + localIdx * slotSize_; }
         auto desc = ctrl_->GetRankDesc(rank);
         if (!desc || desc.Value().ready.load(std::memory_order_relaxed) != 1) { return nullptr; }
-        std::string name = "ucm_v2_data_" + std::to_string(rank);
+        std::string name = domainName_ + "_data_" + std::to_string(rank);
         FdSocket s;
         if (s.Connect(name).Failure()) { return nullptr; }
         int32_t fd = -1;
@@ -179,12 +181,13 @@ private:
             ::close(fd);
             return nullptr;
         }
-        /* Register the mapping with the local device for SDMA-direct access. On failure
-         * the host mapping stays usable and deviceAddr stays null (not retried). */
         void* dev = nullptr;
-        if (Trans::Buffer::RegisterHostBuffer(a, size, &dev).Success()) {
-            entry.deviceAddr.store(dev, std::memory_order_release);
+        if (Trans::Buffer::RegisterHostBuffer(a, size, &dev).Failure()) {
+            ::munmap(a, size);
+            ::close(fd);
+            return nullptr;
         }
+        entry.deviceAddr.store(dev, std::memory_order_release);
         /* fd/size/deviceAddr are written before addr is published so any thread that
          * observes the mapping through addr (acquire) also observes consistent teardown
          * fields. */

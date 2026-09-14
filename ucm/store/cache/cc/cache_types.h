@@ -56,7 +56,7 @@ inline constexpr size_t kPrefetchDepth = 4096;
 /* Bumped on every incompatible SlotMeta / layout change; all ranks sharing one cache
  * domain must run the same binary. */
 inline constexpr uint32_t kMagic =
-    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 5u;
+    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 6u;
 
 enum class State : uint8_t { Loading, Ready, Failed };
 
@@ -115,12 +115,10 @@ struct SlotMeta {
     }
 };
 
-/* Per-rank SPSC command ring for prefetch requests: producer is the scheduler's
- * (single-threaded) Prefetch caller, consumer is the owning worker's prefetch executor
- * thread. Entries are dropped and counted when the ring is full — prefetch is a
- * fire-and-forget hint. Entry publication: relaxed write + head release-store; slot
- * reclamation: entry read + tail release-store. */
+/* Per-rank command ring: try-lock serialization supports concurrent producers.
+ * One worker consumes each ring. Hints may be dropped on contention or overflow. */
 struct PrefetchRing {
+    alignas(64) BucketLock producers;
     alignas(64) std::atomic<uint64_t> head{0};
     alignas(64) std::atomic<uint64_t> tail{0};
     alignas(64) std::atomic<uint64_t> dropped{0};
@@ -158,7 +156,7 @@ inline size_t NextPow2(size_t value)
  * sane range so tiny domains do not degenerate and huge ones do not waste head memory. */
 inline size_t CalcBucketCount(size_t nSlotsPerRank)
 {
-    auto target = kBucketSizingRanks * nSlotsPerRank / 2;
+    auto target = kBucketSizingRanks * std::min(nSlotsPerRank, kMaxBuckets) / 2;
     return std::min(std::max(NextPow2(target), kMinBuckets), kMaxBuckets);
 }
 

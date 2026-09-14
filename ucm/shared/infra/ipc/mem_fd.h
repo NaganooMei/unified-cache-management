@@ -49,7 +49,7 @@ public:
 
     Status Create(const std::string& name, size_t size, bool seal)
     {
-        fd_ = ::memfd_create(name.c_str(), MFD_ALLOW_SEALING);
+        fd_ = ::memfd_create(name.c_str(), MFD_ALLOW_SEALING | MFD_CLOEXEC);
         if (fd_ < 0) { return Status::OsApiError("memfd_create failed"); }
         if (::ftruncate(fd_, static_cast<off_t>(size)) != 0) {
             return Status::OsApiError("ftruncate failed");
@@ -74,12 +74,12 @@ public:
 
     Status Adopt(int32_t fd, size_t size)
     {
+        fd_ = fd;
         addr_ = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (addr_ == MAP_FAILED) {
             addr_ = nullptr;
             return Status::OsApiError("mmap adopt failed");
         }
-        fd_ = fd;
         size_ = size;
         return Status::OK();
     }

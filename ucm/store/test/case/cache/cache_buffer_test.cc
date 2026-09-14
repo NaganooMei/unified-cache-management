@@ -370,7 +370,7 @@ TEST(UcmV2CacheBufferTest, PreallocThenGetOwnerLoading)
     ASSERT_TRUE(buf.Setup(cfg).Success());
     auto blk = MakeBlockId('w');
     buf.Prealloc(blk, 0);
-    EXPECT_TRUE(buf.Exist(blk, 0));
+    EXPECT_FALSE(buf.Exist(blk, 0));
     auto h = buf.Get(blk, 0);
     ASSERT_TRUE(h);
     EXPECT_TRUE(h.Owner());
@@ -538,4 +538,84 @@ TEST(UcmV2CacheBufferTest, PrefetchRingFifoOverflowDropReuse)
     EXPECT_EQ(buf.DrainPrefetch(3, out.data(), out.size()), 10u);
     for (size_t i = 0; i < 10; i++) { EXPECT_EQ(out[i], in[i]); }
     EXPECT_EQ(buf.PrefetchDropped(3), 7u);
+}
+
+TEST(UcmV2CacheBufferTest, CacheDomainsAndPrivateBuffersAreIsolated)
+{
+    auto cfg = MakeConfig(0);
+    cfg.uniqueId = "domain-a";
+    UC::CacheStore::Buffer a, b, local1, local2;
+    ASSERT_TRUE(a.Setup(cfg).Success());
+    cfg.uniqueId = "domain-b";
+    ASSERT_TRUE(b.Setup(cfg).Success());
+    auto key = MakeBlockId('i');
+    auto h = a.Get(key, 0);
+    h.MarkReady();
+    EXPECT_FALSE(b.Exist(key, 0));
+    cfg.shareBufferEnable = false;
+    ASSERT_TRUE(local1.Setup(cfg).Success());
+    ASSERT_TRUE(local2.Setup(cfg).Success());
+    auto local = local1.Get(key, 0);
+    local.MarkReady();
+    EXPECT_FALSE(local2.Exist(key, 0));
+}
+
+TEST(UcmV2CacheBufferTest, SpeculationDoesNotWaitForPinnedSlots)
+{
+    auto cfg = MakeConfig(0, 2);
+    cfg.timeoutMs = 5;
+    UC::CacheStore::Buffer buf;
+    ASSERT_TRUE(buf.Setup(cfg).Success());
+    auto a = buf.Get(MakeBlockId('a'), 0);
+    auto b = buf.Get(MakeBlockId('b'), 0);
+    ASSERT_TRUE(a);
+    ASSERT_TRUE(b);
+    EXPECT_FALSE(buf.TryGet(MakeBlockId('c'), 0));
+    EXPECT_FALSE(buf.TryPrealloc(MakeBlockId('c'), 0));
+    EXPECT_FALSE(buf.Get(MakeBlockId('c'), 0));
+    a = {};
+    EXPECT_TRUE(buf.TryGet(MakeBlockId('c'), 0));
+}
+
+TEST(UcmV2CacheBufferTest, AbandonedOwnerPublishesFailureAndCanRetry)
+{
+    auto cfg = MakeConfig(0);
+    UC::CacheStore::Buffer buf;
+    ASSERT_TRUE(buf.Setup(cfg).Success());
+    auto key = MakeBlockId('a');
+    auto owner = buf.Get(key, 0);
+    auto reader = buf.Get(key, 0);
+    EXPECT_FALSE(buf.Exist(key, 0));
+    owner = {};
+    EXPECT_EQ(reader.GetState(), UC::CacheStore::State::Failed);
+    EXPECT_FALSE(buf.Exist(key, 0));
+    reader = {};
+    auto retry = buf.Get(key, 0);
+    ASSERT_TRUE(retry.Owner());
+    retry.MarkReady();
+    EXPECT_TRUE(buf.Exist(key, 0));
+}
+
+TEST(UcmV2CacheBufferTest, ConcurrentPrefetchProducersDoNotOverwriteCommands)
+{
+    auto cfg = MakeConfig(-1);
+    UC::CacheStore::Buffer buf;
+    ASSERT_TRUE(buf.Setup(cfg).Success());
+    constexpr size_t producers = 4;
+    constexpr size_t count = 128;
+    std::vector<std::thread> threads;
+    for (size_t p = 0; p < producers; ++p) {
+        threads.emplace_back([&, p] {
+            for (size_t i = 0; i < count; ++i) {
+                auto key = MakeBlockIdN(p * count + i);
+                buf.EnqueuePrefetch(0, &key, 1);
+            }
+        });
+    }
+    for (auto& thread : threads) { thread.join(); }
+    std::vector<UC::Detail::BlockId> out(producers * count);
+    auto n = buf.DrainPrefetch(0, out.data(), out.size());
+    std::set<UC::Detail::BlockId> unique(out.begin(), out.begin() + n);
+    EXPECT_EQ(unique.size(), n);
+    EXPECT_EQ(n + buf.PrefetchDropped(0), producers * count);
 }

@@ -29,13 +29,12 @@
 #include <string>
 #include <thread>
 #include "ctrl_layout.h"
+#include "cache_domain.h"
 #include "global_config.h"
 #include "ipc/fd_socket.h"
 #include "ipc/mem_fd.h"
 
 namespace UC::CacheStore {
-
-inline constexpr const char* kAbstractSockName = "ucm_v2_cache_ctrl";
 
 class CtrlStrategy {
     MemFd ctrlMem_;
@@ -43,6 +42,7 @@ class CtrlStrategy {
     int32_t ctrlFd_{-1};
     std::thread acceptThread_;
     CtrlLayout layout_;
+    std::string socketName_;
 
 public:
     ~CtrlStrategy()
@@ -53,7 +53,9 @@ public:
 
     Status Setup(const Config& cfg)
     {
-        auto s = socket_.Listen(kAbstractSockName);
+        socketName_ = CacheDomainName(cfg.uniqueId) + "_ctrl";
+        if (!cfg.shareBufferEnable) { return SetupCreator(cfg); }
+        auto s = socket_.Listen(socketName_);
         if (s.Success()) {
             auto r = SetupCreator(cfg);
             if (r.Failure()) { socket_.Close(); }
@@ -68,11 +70,18 @@ public:
 private:
     Status SetupCreator(const Config& cfg)
     {
+        if (cfg.alignSize == 0 || (cfg.alignSize & (cfg.alignSize - 1)) != 0 ||
+            cfg.shardSize > std::numeric_limits<size_t>::max() - (cfg.alignSize - 1)) {
+            return Status::InvalidParam("invalid cache slot alignment");
+        }
         auto slotSize = AlignUp(cfg.shardSize, cfg.alignSize);
         if (slotSize == 0 || cfg.bufferCapacity < slotSize) {
             return Status::InvalidParam("ctrl creator requires valid shardSize and capacity");
         }
         auto m = cfg.bufferCapacity / slotSize;
+        if (m > (std::numeric_limits<size_t>::max() / sizeof(SlotMeta) - kMaxBuckets) / kMaxRanks) {
+            return Status::InvalidParam("cache control layout too large");
+        }
         auto nBuckets = CalcBucketCount(m);
         auto totalSize = CtrlLayout::TotalSize(nBuckets, kMaxRanks * m);
         auto s = ctrlMem_.Create("ucm_v2_ctrl", totalSize, true);
@@ -80,8 +89,8 @@ private:
         ctrlFd_ = ctrlMem_.Fd();
         layout_.Bind(ctrlMem_.Addr(), kMaxRanks, m, nBuckets);
         layout_.InitHeader(slotSize);
-        acceptThread_ = std::thread([this] { AcceptLoop(); });
         layout_.SetMagic();
+        if (cfg.shareBufferEnable) { acceptThread_ = std::thread([this] { AcceptLoop(); }); }
         return Status::OK();
     }
 
@@ -90,7 +99,7 @@ private:
         constexpr auto backoff = std::chrono::milliseconds(50);
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(cfg.timeoutMs);
         for (;;) {
-            auto s = socket_.Connect(kAbstractSockName);
+            auto s = socket_.Connect(socketName_);
             if (s.Success()) { break; }
             if (cfg.timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) {
                 return Status::Retry();
@@ -107,8 +116,13 @@ private:
         if (!layout_.WaitReady(cfg.timeoutMs)) { return Status::Retry(); }
         auto m = layout_.Hdr()->nSlotsPerRank;
         auto nBuckets = layout_.Hdr()->nBuckets;
-        if (m == 0 || nBuckets == 0 || (nBuckets & (nBuckets - 1)) != 0) {
+        if (m == 0 || nBuckets == 0 || nBuckets > kMaxBuckets ||
+            (nBuckets & (nBuckets - 1)) != 0 || layout_.Hdr()->maxRanks != kMaxRanks ||
+            m > (std::numeric_limits<size_t>::max() / sizeof(SlotMeta) - kMaxBuckets) / kMaxRanks) {
             return Status::InvalidParam("ctrl header invalid");
+        }
+        if (cfg.shardSize != 0 && AlignUp(cfg.shardSize, cfg.alignSize) != layout_.Hdr()->slotSize) {
+            return Status::InvalidParam("cache participants disagree on slot size");
         }
         s = ctrlMem_.Remap(CtrlLayout::TotalSize(nBuckets, kMaxRanks * m));
         if (s.Failure()) { return s; }

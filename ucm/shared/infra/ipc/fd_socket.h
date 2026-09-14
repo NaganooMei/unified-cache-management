@@ -24,6 +24,8 @@
 #pragma once
 
 #include <cstddef>
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <errno.h>
 #include <string>
@@ -35,7 +37,7 @@
 namespace UC {
 
 class FdSocket {
-    int32_t sock_{-1};
+    std::atomic<int32_t> sock_{-1};
 
     static void FillAbstractAddr(sockaddr_un& addr, const std::string& name)
     {
@@ -43,7 +45,7 @@ class FdSocket {
         addr.sun_family = AF_UNIX;
         addr.sun_path[0] = '\0';
         auto cap = sizeof(addr.sun_path) - 1;
-        auto len = std::min<std::size_t>(name.size(), cap - 1);
+        auto len = std::min<std::size_t>(name.size(), cap);
         std::memcpy(addr.sun_path + 1, name.data(), len);
     }
 
@@ -55,13 +57,19 @@ public:
 
     Status Listen(const std::string& abstractName)
     {
-        sock_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        Close();
+        if (abstractName.size() >= sizeof(sockaddr_un{}.sun_path)) {
+            return Status::InvalidParam("abstract socket name too long");
+        }
+        sock_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (sock_ < 0) { return Status::OsApiError("socket failed"); }
         sockaddr_un addr{};
         FillAbstractAddr(addr, abstractName);
         socklen_t addrlen = static_cast<socklen_t>(sizeof(sa_family_t) + 1 + abstractName.size());
         if (::bind(sock_, reinterpret_cast<sockaddr*>(&addr), addrlen) != 0) {
-            if (errno == EADDRINUSE) { return Status::DuplicateKey(); }
+            auto err = errno;
+            Close();
+            if (err == EADDRINUSE) { return Status::DuplicateKey(); }
             return Status::OsApiError("bind failed");
         }
         if (::listen(sock_, kMaxRanksBacklog) != 0) { return Status::OsApiError("listen failed"); }
@@ -86,7 +94,7 @@ public:
         cmsg->cmsg_type = SCM_RIGHTS;
         cmsg->cmsg_len = CMSG_LEN(sizeof(int32_t));
         std::memcpy(CMSG_DATA(cmsg), &fdToSend, sizeof(int32_t));
-        auto sent = ::sendmsg(conn, &msg, 0);
+        auto sent = ::sendmsg(conn, &msg, MSG_NOSIGNAL);
         ::close(conn);
         if (sent < 0) { return Status::OsApiError("sendmsg failed"); }
         return Status::OK();
@@ -94,12 +102,17 @@ public:
 
     Status Connect(const std::string& abstractName)
     {
-        sock_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        Close();
+        if (abstractName.size() >= sizeof(sockaddr_un{}.sun_path)) {
+            return Status::InvalidParam("abstract socket name too long");
+        }
+        sock_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (sock_ < 0) { return Status::OsApiError("socket failed"); }
         sockaddr_un addr{};
         FillAbstractAddr(addr, abstractName);
         socklen_t addrlen = static_cast<socklen_t>(sizeof(sa_family_t) + 1 + abstractName.size());
         if (::connect(sock_, reinterpret_cast<sockaddr*>(&addr), addrlen) != 0) {
+            Close();
             return Status::OsApiError("connect failed");
         }
         return Status::OK();
@@ -107,6 +120,7 @@ public:
 
     Status RecvFd(int32_t& fdOut)
     {
+        fdOut = -1;
         msghdr msg{};
         char buf = 0;
         iovec iov{&buf, 1};
@@ -116,12 +130,17 @@ public:
         std::memset(cmsgbuf, 0, sizeof(cmsgbuf));
         msg.msg_control = cmsgbuf;
         msg.msg_controllen = sizeof(cmsgbuf);
-        auto recvd = ::recvmsg(sock_, &msg, 0);
+        auto recvd = ::recvmsg(sock_, &msg, MSG_CMSG_CLOEXEC);
         if (recvd <= 0) { return Status::OsApiError("recvmsg failed"); }
         int32_t fd = -1;
         auto cmsg = CMSG_FIRSTHDR(&msg);
-        if (cmsg != nullptr && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+        if (cmsg != nullptr && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
+            cmsg->cmsg_len == CMSG_LEN(sizeof(int32_t))) {
             std::memcpy(&fd, CMSG_DATA(cmsg), sizeof(int32_t));
+        }
+        if (fd < 0 || (msg.msg_flags & MSG_CTRUNC)) {
+            if (fd >= 0) { ::close(fd); }
+            return Status::OsApiError("missing or truncated descriptor");
         }
         fdOut = fd;
         return Status::OK();
@@ -130,10 +149,10 @@ public:
     int32_t SockFd() const { return sock_; }
     void Close()
     {
-        if (sock_ >= 0) {
-            ::shutdown(sock_, SHUT_RDWR);
-            ::close(sock_);
-            sock_ = -1;
+        auto fd = sock_.exchange(-1);
+        if (fd >= 0) {
+            ::shutdown(fd, SHUT_RDWR);
+            ::close(fd);
         }
     }
 

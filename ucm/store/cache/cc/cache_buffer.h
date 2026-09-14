@@ -24,6 +24,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <thread>
@@ -66,7 +67,10 @@ public:
         }
         ~Handle()
         {
-            if (Valid()) { buf_->Release(slotIdx_); }
+            if (Valid()) {
+                if (owner_ && GetState() == State::Loading) { MarkFailed(); }
+                buf_->Release(slotIdx_);
+            }
         }
         explicit operator bool() const { return Valid(); }
         bool Owner() const { return owner_; }
@@ -101,21 +105,26 @@ private:
     size_t nBuckets_{0};
     size_t slotSize_{0};
     size_t reserved_{0};
+    size_t timeoutMs_{30000};
 
     /* Optimistic pin attempts before falling back to the bucket-lock path. */
     static constexpr size_t kPinSpinFast = 64;
-    /* With the bucket lock held a claim on a chained slot is always transient (the claimer
-     * must TryLock this bucket, fail and roll back), so the slow path may wait it out. */
-    static constexpr size_t kPinSpinSlow = std::numeric_limits<size_t>::max();
 
 public:
     Buffer() = default;
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
+    ~Buffer()
+    {
+        if (data_ && myRank_ != kInvalidIndex) {
+            ctrl_->Layout().Hdr()->rankDescs[myRank_].ready.store(3, std::memory_order_release);
+        }
+    }
 
     Status Setup(const Config& cfg)
     {
         reserved_ = cfg.loadExclusiveBufferNumber;
+        timeoutMs_ = cfg.timeoutMs;
         ctrl_ = MakeCtrlStrategy();
         if (auto s = ctrl_->Setup(cfg); s.Failure()) { return s; }
         slotSize_ = ctrl_->Layout().Hdr()->slotSize;
@@ -140,18 +149,17 @@ public:
                     reserved_, nSlotsPerRank_);
             }
             myRank_ = static_cast<size_t>(cfg.physicalDeviceId);
-            /* Lazy per-rank slot initialization. The ready flag is the rejoin guard: once
-             * set, this rank's slots may be pinned by remote processes and must not be
-             * reset; while it is clear, no slot of this rank can be reachable from any
-             * bucket (linking requires a completed Setup), so (re-)initialization is
-             * safe. */
-            if (ctrl_->Layout().Hdr()->rankDescs[myRank_].ready.load(std::memory_order_acquire) ==
-                0) {
-                ctrl_->Layout().InitSlotRange(myRank_);
+            // 0 = unused, 2 = initializing, 1 = ready, 3 = stopped/failed.
+            // A stopped rank must not silently replace payload referenced by peers.
+            auto& ready = ctrl_->Layout().Hdr()->rankDescs[myRank_].ready;
+            uint8_t expected = 0;
+            if (!ready.compare_exchange_strong(expected, 2, std::memory_order_acq_rel)) {
+                return Status::DuplicateKey();
             }
+            ctrl_->Layout().InitSlotRange(myRank_);
             data_ = std::make_unique<DataStrategy>();
             if (auto s =
-                    data_->Setup(ctrl_->Layout(), cfg.deviceId, myRank_, slotSize_, nSlotsPerRank_);
+                    data_->Setup(ctrl_->Layout(), cfg.deviceId, myRank_, slotSize_, nSlotsPerRank_, cfg);
                 s.Failure()) {
                 return s;
             }
@@ -194,6 +202,20 @@ public:
     Handle Get(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false)
     {
         if (myRank_ == kInvalidIndex) { return Handle{}; }
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs_);
+        do {
+            auto h = TryGet(blockId, offset, allowReserved, 2 * nSlotsPerRank_);
+            if (h) { return h; }
+            std::this_thread::yield();
+        } while (timeoutMs_ == 0 || std::chrono::steady_clock::now() < deadline);
+        return Handle{};
+    }
+
+    // Speculative callers neither wait for a bucket lock nor scan without a bound.
+    Handle TryGet(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
+                  size_t attempts = 128)
+    {
+        if (myRank_ == kInvalidIndex || attempts == 0) { return Handle{}; }
         auto iBucket = HashKey(blockId, nBuckets_);
         auto& layout = ctrl_->Layout();
         auto iNode = LookupOptimistic(layout, iBucket, blockId, offset);
@@ -203,34 +225,33 @@ public:
                 return Handle{this, iNode, owner};
             }
         }
-        layout.LockOf(iBucket)->Lock();
+        if (!layout.LockOf(iBucket)->TryLock()) { return Handle{}; }
         iNode = Lookup(layout, iBucket, blockId, offset);
         if (iNode != kInvalidIndex) {
             bool owner = false;
-            if (PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinSlow, owner)) {
+            if (PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner)) {
                 layout.LockOf(iBucket)->Unlock();
                 return Handle{this, iNode, owner};
             }
+            layout.LockOf(iBucket)->Unlock();
+            return Handle{};
         }
-        iNode = Alloc(layout, blockId, offset, iBucket, allowReserved);
+        iNode = Alloc(layout, blockId, offset, iBucket, allowReserved, attempts);
         layout.LockOf(iBucket)->Unlock();
         return Handle(this, iNode, true);
     }
 
     void Prealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false)
     {
-        if (myRank_ == kInvalidIndex) { return; }
-        auto iBucket = HashKey(blockId, nBuckets_);
-        auto& layout = ctrl_->Layout();
-        layout.LockOf(iBucket)->Lock();
-        auto iNode = Lookup(layout, iBucket, blockId, offset);
-        if (iNode != kInvalidIndex) {
-            layout.SlotMetaArr()[iNode].accessed.store(1, std::memory_order_relaxed);
-        } else {
-            auto n = Alloc(layout, blockId, offset, iBucket, allowReserved);
-            Release(n);
-        }
-        layout.LockOf(iBucket)->Unlock();
+        TryPrealloc(blockId, offset, allowReserved);
+    }
+
+    bool TryPrealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false)
+    {
+        auto h = TryGet(blockId, offset, allowReserved);
+        if (!h) { return false; }
+        h.owner_ = false;  // A metadata placeholder has no in-flight writer.
+        return true;
     }
 
     bool Exist(const Detail::BlockId& blockId, size_t offset)
@@ -242,14 +263,15 @@ public:
             /* Pin + re-validate so a hit is never reported for a slot that is being
              * reconfigured right now. */
             bool owner = false;
-            if (PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner)) {
+            if (PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner, false)) {
+                auto ready = Ready(iNode);
                 Release(iNode);
-                return true;
+                return ready;
             }
         }
         layout.LockOf(iBucket)->Lock();
         iNode = Lookup(layout, iBucket, blockId, offset);
-        bool found = (iNode != kInvalidIndex);
+        bool found = (iNode != kInvalidIndex && Ready(iNode));
         if (found) { layout.SlotMetaArr()[iNode].accessed.store(1, std::memory_order_relaxed); }
         layout.LockOf(iBucket)->Unlock();
         return found;
@@ -291,7 +313,7 @@ private:
      * slot cannot be reconfigured until Release. owner reports whether the caller must
      * load the block (first pin on a slot that is not Ready yet). */
     bool PinHit(CtrlLayout& layout, size_t iNode, size_t iBucket, const Detail::BlockId& blockId,
-                size_t offset, size_t spinBudget, bool& owner)
+                size_t offset, size_t spinBudget, bool& owner, bool takeOwnership = true)
     {
         auto* meta = &layout.SlotMetaArr()[iNode];
         for (size_t spin = 0; spin < spinBudget;) {
@@ -313,7 +335,7 @@ private:
                 return false;
             }
             auto st = meta->state.load(std::memory_order_acquire);
-            owner = (r == 0 && st != State::Ready);
+            owner = (takeOwnership && r == 0 && st != State::Ready);
             if (owner && st == State::Failed) {
                 meta->state.store(State::Loading, std::memory_order_release);
             }
@@ -354,15 +376,13 @@ private:
      * from its old bucket (TryLock, roll the claim back on failure), rewrite the key while
      * the slot is unreachable, then link it into the target bucket and publish with
      * reference.store(1, release).
-     *
-     * Design assumption: the number of slots per rank is far larger than the number of
-     * concurrently pinned slots, so this loop is not expected to starve. If it ever does
-     * (every slot pinned), the caller keeps spinning while holding the bucket lock. */
+     * Return after a bounded scan so Get can release the bucket lock before retrying. */
     size_t Alloc(CtrlLayout& layout, const Detail::BlockId& blockId, size_t offset, size_t iBucket,
-                 bool allowReserved)
+                 bool allowReserved, size_t attempts)
     {
-        for (;;) {
+        for (size_t scan = 0; scan < attempts; ++scan) {
             auto iNode = FetchNode(layout, allowReserved);
+            if (iNode == kInvalidIndex) { continue; }
             auto* meta = &layout.SlotMetaArr()[iNode];
             size_t r = 0;
             if (!meta->reference.compare_exchange_strong(r, kSlotClaimed,
@@ -374,15 +394,14 @@ private:
             auto oldBucket = meta->hash.load(std::memory_order_relaxed);
             if (oldBucket != iBucket) {
                 if (oldBucket != kInvalidIndex) {
-                    /* Same-stripe TryLock (prob. 1/kLockStripes when B > L) fails against
-                     * our own held stripe; the claim is rolled back and the next clock
-                     * victim is tried, so this backoff loop always makes progress. */
-                    if (!layout.LockOf(oldBucket)->TryLock()) {
+                    auto* oldLock = layout.LockOf(oldBucket);
+                    auto sameStripe = oldLock == layout.LockOf(iBucket);
+                    if (!sameStripe && !oldLock->TryLock()) {
                         meta->reference.store(0, std::memory_order_release);
                         continue;
                     }
                     Remove(layout, oldBucket, iNode);
-                    layout.LockOf(oldBucket)->Unlock();
+                    if (!sameStripe) { oldLock->Unlock(); }
                 }
                 StoreKey(*meta, blockId, offset);
                 meta->state.store(State::Loading, std::memory_order_relaxed);
@@ -397,24 +416,19 @@ private:
             meta->reference.store(1, std::memory_order_release);
             return iNode;
         }
+        return kInvalidIndex;
     }
 
     size_t FetchNode(CtrlLayout& layout, bool allowReserved)
     {
         auto total = nSlotsPerRank_ - (allowReserved ? 0 : reserved_);
-        for (size_t i = 0; i < 2 * total; ++i) {
-            auto cur =
-                layout.Hdr()->clockHands[myRank_].fetch_add(1, std::memory_order_relaxed) % total +
-                myRank_ * nSlotsPerRank_;
-            uint8_t expected = 1;
-            if (layout.SlotMetaArr()[cur].accessed.compare_exchange_strong(
-                    expected, 0, std::memory_order_relaxed, std::memory_order_relaxed)) {
-                continue;
-            }
-            return cur;
+        if (total == 0) { return kInvalidIndex; }
+        auto cur = layout.Hdr()->clockHands[myRank_].fetch_add(1, std::memory_order_relaxed) % total +
+                   myRank_ * nSlotsPerRank_;
+        if (layout.SlotMetaArr()[cur].accessed.exchange(0, std::memory_order_relaxed)) {
+            return kInvalidIndex;
         }
-        return layout.Hdr()->clockHands[myRank_].fetch_add(1, std::memory_order_relaxed) % total +
-               myRank_ * nSlotsPerRank_;
+        return cur;
     }
 
     /* Link iNode at the head of bucket iBucket. The slot must be claimed and the bucket
