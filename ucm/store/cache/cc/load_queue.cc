@@ -62,7 +62,7 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, Buffer* buf
 void LoadQueue::Submit(TaskPtr task, WaiterPtr waiter)
 {
     waiter->Up();
-    auto success = waiting_.TryPush({task, waiter});
+    auto success = waiting_.TryPush({task, waiter, buffer_->AcquireDemand()});
     if (success) { return; }
     UC_ERROR("Waiting queue full, submit load task({}) failed.", task->id);
     UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_queue_full_total"), 1.0);
@@ -116,6 +116,7 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     for (size_t i = 0; i < nShard; i++) {
         auto& shard = task->desc[indexes[i]];
         ShardTask shardTask;
+        shardTask.demand = pair.demand;
         shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true);
         if (!shardTask.bufferHandle) {
             task->Fail(Status::Retry());
@@ -220,6 +221,11 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
     do {
         auto tpBackendWait = NowTime::Now();
         s = WaitBackendTaskReady(task);
+        if (task.shard.index == 0) {
+            UC_DEBUG("Cache first-layer wait task={}, rank={}, owner={}, wait_ms={:.3f}, status={}",
+                     taskHandle, deviceId_, task.bufferHandle.Owner(),
+                     (NowTime::Now() - tpBackendWait) * 1e3, s);
+        }
         if (s.Failure()) [[unlikely]] {
             RecordShardResults(holder_, &task, false);
             break;

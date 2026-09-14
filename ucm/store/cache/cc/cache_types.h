@@ -56,7 +56,7 @@ inline constexpr size_t kPrefetchDepth = 4096;
 /* Bumped on every incompatible SlotMeta / layout change; all ranks sharing one cache
  * domain must run the same binary. */
 inline constexpr uint32_t kMagic =
-    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 6u;
+    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 7u;
 
 enum class State : uint8_t { Loading, Ready, Failed };
 
@@ -134,6 +134,7 @@ struct Header {
     size_t nBuckets{0};
     alignas(64) RankDataDesc rankDescs[kMaxRanks];
     alignas(64) std::atomic<size_t> clockHands[kMaxRanks];
+    alignas(64) std::atomic<size_t> demandLoads[kMaxRanks];
 };
 
 static_assert(std::atomic<uint32_t>::is_always_lock_free, "magic must be lock-free");

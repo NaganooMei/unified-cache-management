@@ -143,6 +143,8 @@ private:
         config.Get("store_backend", param.storeBackend);
         config.Get("unique_id", param.uniqueId);
         config.Get("cache_load_backend_only", param.cacheLoadBackendOnly);
+        config.Get("cache_prefetch_enable", param.cachePrefetchEnable);
+        config.GetNumber("cache_prefetch_batch_size", param.cachePrefetchBatchSize);
         config.GetNumber("device_id", param.deviceId);
         param.physicalDeviceId = param.deviceId;
         size_t tensorSize = 0;
@@ -197,6 +199,9 @@ private:
     Status CheckConfig(const Config& config)
     {
         if (!config.storeBackend) { return Status::InvalidParam("invalid store backend"); }
+        if (config.cachePrefetchBatchSize == 0 || config.cachePrefetchBatchSize > 64) {
+            return Status::InvalidParam("cache_prefetch_batch_size must be in [1,64]");
+        }
         if (config.deviceId < -1) {
             return Status::InvalidParam("invalid device({})", config.deviceId);
         }
@@ -252,6 +257,8 @@ private:
         UC_INFO("Set {}::StoreBackend to {}.", ns, config.storeBackend->Readme());
         UC_INFO("Set {}::UniqueId to {}.", ns, config.uniqueId);
         UC_INFO("Set {}::CacheLoadBackendOnly to {}.", ns, config.cacheLoadBackendOnly);
+        UC_INFO("Set {}::CachePrefetchEnable to {}.", ns, config.cachePrefetchEnable);
+        UC_INFO("Set {}::CachePrefetchBatchSize to {}.", ns, config.cachePrefetchBatchSize);
         UC_INFO("Set {}::DeviceId to {}.", ns, config.deviceId);
         const auto& v = config.tensorSizes;
         if (v.empty()) {

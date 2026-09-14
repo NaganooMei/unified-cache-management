@@ -179,6 +179,25 @@ public:
     /* This rank's index; kInvalidIndex for control-plane-only participants. */
     size_t MyRank() const { return myRank_; }
     size_t SlotSize() const { return slotSize_; }
+    std::shared_ptr<Buffer> AcquireDemand()
+    {
+        if (myRank_ == kInvalidIndex) { return {}; }
+        ctrl_->Layout().Hdr()->demandLoads[myRank_].fetch_add(1, std::memory_order_acq_rel);
+        return std::shared_ptr<Buffer>(this, [](Buffer* buffer) {
+            buffer->ctrl_->Layout().Hdr()->demandLoads[buffer->myRank_].fetch_sub(
+                1, std::memory_order_release);
+        });
+    }
+
+    bool HasDemand() const
+    {
+        for (size_t r = 0; r < ctrl_->Layout().Hdr()->maxRanks; ++r) {
+            if (ctrl_->Layout().Hdr()->demandLoads[r].load(std::memory_order_acquire) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
     /* Online = the rank completed Setup (sticky: ranks do not leave in this deployment). */
     bool RankReady(size_t rank) const
     {

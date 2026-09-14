@@ -62,6 +62,8 @@ struct Config {
     // Unset preserves the defaults: one SDMA Direct stream, four ordinary streams.
     std::optional<size_t> streamNumber{};
     bool cacheLoadBackendOnly{false};
+    bool cachePrefetchEnable{false};
+    size_t cachePrefetchBatchSize{32};
     std::vector<uintptr_t> gpuKvBufferAddrs{};
     std::vector<size_t> gpuKvBufferSizes{};
     bool useGdr{false};

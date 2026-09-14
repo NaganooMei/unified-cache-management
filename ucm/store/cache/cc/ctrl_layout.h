@@ -152,6 +152,7 @@ public:
         for (size_t i = 0; i < maxRanks_; i++) {
             h->rankDescs[i].ready.store(0, std::memory_order_relaxed);
             h->clockHands[i].store(0, std::memory_order_relaxed);
+            h->demandLoads[i].store(0, std::memory_order_relaxed);
         }
         auto* buckets = Buckets();
         for (size_t i = 0; i < nBuckets_; i++) {

@@ -37,6 +37,7 @@ class BufferManager {
     std::unique_ptr<Buffer> buffer_{nullptr};
     StoreV1* backend_{nullptr};
     bool loadBackendOnly_{false};
+    bool prefetchEnable_{false};
 
     template <auto LookupFunc>
     auto LookupThrough(const Detail::BlockId* blocks, size_t num)
@@ -55,6 +56,7 @@ public:
     {
         backend_ = config.storeBackend;
         loadBackendOnly_ = config.cacheLoadBackendOnly;
+        prefetchEnable_ = config.cachePrefetchEnable && config.shareBufferEnable && !loadBackendOnly_;
         if (config.deviceId == -1 && (!config.shareBufferEnable || loadBackendOnly_)) {
             return Status::OK();
         }
@@ -93,7 +95,7 @@ public:
 private:
     void PrefetchOnLookup(const Detail::BlockId* blocks, size_t num)
     {
-        if (num == 0) { return; }
+        if (!prefetchEnable_ || !buffer_ || num == 0) { return; }
         /* No affinity: deterministic round-robin over online workers, restarting from
          * the first block on every call so a given list position always maps to the
          * same rank (stable affinity across repeated prefetches of the same list). */
@@ -164,6 +166,9 @@ private:
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_lookup_backend_duration_ms"),
                                  sw.Elapsed().count() * 1e3);
         const auto& result = res.Value();
+        if (result < -1 || result >= static_cast<ssize_t>(missBlk.size())) {
+            return Status::Error("invalid backend prefix lookup index");
+        }
         PrefetchOnLookup(missBlk.data(), result + 1);
         if (static_cast<size_t>(result + 1) == missIdx.size()) {
             return static_cast<ssize_t>(num) - 1;

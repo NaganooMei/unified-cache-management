@@ -41,7 +41,11 @@ namespace UC::CacheStore {
 class LoadQueue {
     using TaskPtr = std::shared_ptr<TransTask>;
     using WaiterPtr = std::shared_ptr<Latch>;
-    using TaskPair = std::pair<TaskPtr, WaiterPtr>;
+    struct TaskPair {
+        TaskPtr first;
+        WaiterPtr second;
+        std::shared_ptr<Buffer> demand;
+    };
     using TaskIdSet = HashSet<Detail::TaskHandle>;
     struct ShardTask {
         TaskPtr task;
@@ -50,6 +54,7 @@ class LoadQueue {
         Detail::TaskHandle backendTaskHandle;
         WaiterPtr waiter;
         bool fromPosix{false};
+        std::shared_ptr<Buffer> demand;
     };
 
 private:
