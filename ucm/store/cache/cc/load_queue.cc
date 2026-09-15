@@ -115,8 +115,8 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     const auto nShard = task->desc.size();
     size_t backendSubmitCount = 0;
     size_t waitShardCount = 0;
-    const auto indexes = RearrangeIndex(nShard, bufferRank_,
-                                        stripeAcrossSegments_ ? segmentCount_ : 1);
+    const auto indexes =
+        RearrangeIndex(nShard, bufferRank_, stripeAcrossSegments_ ? segmentCount_ : 1);
     struct PreallocHint {
         Detail::BlockId block;
         size_t shard;

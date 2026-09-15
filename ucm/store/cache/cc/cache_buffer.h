@@ -143,8 +143,8 @@ public:
                 "loadExclusiveBufferNumber({}) must be divisible by segment count({})",
                 cfg.loadExclusiveBufferNumber, maxRanks_);
         }
-        reserved_ = shared_ ? cfg.loadExclusiveBufferNumber / maxRanks_
-                            : cfg.loadExclusiveBufferNumber;
+        reserved_ =
+            shared_ ? cfg.loadExclusiveBufferNumber / maxRanks_ : cfg.loadExclusiveBufferNumber;
         if (nSlotsPerRank_ == 0 || nBuckets_ == 0) {
             return Status::InvalidParam("ctrl header has zero slots per rank or buckets");
         }

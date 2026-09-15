@@ -24,10 +24,10 @@
 #ifndef UNIFIEDCACHE_CACHE_STORE_CC_BUFFER_MANAGER_H
 #define UNIFIEDCACHE_CACHE_STORE_CC_BUFFER_MANAGER_H
 
+#include "cache_buffer.h"
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "time/stopwatch.h"
-#include "cache_buffer.h"
 #include "ucmstore_v1.h"
 
 namespace UC::CacheStore {

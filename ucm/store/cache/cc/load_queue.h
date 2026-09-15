@@ -27,11 +27,11 @@
 #include <future>
 #include <thread>
 #include <vector>
+#include "cache_buffer.h"
 #include "copy_stream.h"
 #include "template/hashset.h"
 #include "template/spsc_ring_queue.h"
 #include "thread/latch.h"
-#include "cache_buffer.h"
 #include "trans_task.h"
 #include "ucmstore_v1.h"
 
