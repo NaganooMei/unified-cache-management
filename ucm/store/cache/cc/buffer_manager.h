@@ -90,20 +90,6 @@ public:
     }
 
 private:
-    void PrefetchOnLookup(const Detail::BlockId* blocks, size_t num)
-    {
-        if (num == 0) { return; }
-        /* No affinity: deterministic round-robin over online workers, restarting from
-         * the first block on every call so a given list position always maps to the
-         * same rank (stable affinity across repeated prefetches of the same list). */
-        size_t online[kMaxRanks];
-        size_t n = 0;
-        for (size_t r = 0; r < kMaxRanks; r++) {
-            if (buffer_->RankReady(r)) { online[n++] = r; }
-        }
-        if (n == 0) { return; }
-        for (size_t i = 0; i < num; i++) { buffer_->EnqueuePrefetch(online[i % n], &blocks[i], 1); }
-    }
     void Lookup(const Detail::BlockId* blocks, size_t num, std::vector<uint8_t>& results,
                 std::vector<Detail::BlockId>& missBlk, std::vector<size_t>& missIdx)
     {
@@ -163,7 +149,6 @@ private:
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_lookup_backend_duration_ms"),
                                  sw.Elapsed().count() * 1e3);
         const auto& result = res.Value();
-        PrefetchOnLookup(missBlk.data(), result + 1);
         if (static_cast<size_t>(result + 1) == missIdx.size()) {
             return static_cast<ssize_t>(num) - 1;
         }

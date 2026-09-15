@@ -26,7 +26,6 @@
 #include <numeric>
 #include "buffer_manager.h"
 #include "logger/logger.h"
-#include "prefetch_queue.h"
 #include "shm_numa.h"
 #include "trans/cuda/gdr/gdr_config.h"
 #include "trans_manager.h"
@@ -46,7 +45,6 @@ class CacheStore : public StoreV1 {
     bool transEnable_{false};
     TransManager transMgr_;
     std::unique_ptr<Trans::GdrKVBufferConfig> gpuKvBufferRegistrations_{nullptr};
-    PrefetchQueue prefetchQ_;
 
 public:
     Status Setup(const Detail::Dictionary& inConfig) override
@@ -74,8 +72,6 @@ public:
         transEnable_ = config.deviceId >= 0;
         if (transEnable_) {
             s = transMgr_.Setup(config, bufferMgr_.GetBuffer());
-            if (s.Failure()) [[unlikely]] { return s; }
-            s = prefetchQ_.Setup(config, bufferMgr_.GetBuffer());
             if (s.Failure()) [[unlikely]] { return s; }
         }
         ShowConfig(config);

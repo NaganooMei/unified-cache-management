@@ -32,10 +32,9 @@
 namespace UC::CacheStore {
 
 /* Shared control-plane layout:
- * [Header][nBuckets bucket heads][kLockStripes striped locks][slot metadata]
- * [maxRanks prefetch rings]. There are no slot locks: per-slot coordination is the
- * lock-free pin
- * protocol on SlotMeta::reference (see Buffer).
+ * [Header][nBuckets bucket heads][kLockStripes striped locks][slot metadata].
+ * There are no slot locks: per-slot coordination is the lock-free pin protocol on
+ * SlotMeta::reference (see Buffer).
  *
  * Slot metadata is initialized lazily per rank (InitSlotRange): a rank's slots are only
  * reachable from buckets after that rank links them in, which happens strictly after its
@@ -58,10 +57,9 @@ public:
         return AlignUp(LocksOffset(nBuckets) + sizeof(BucketLock) * kLockStripes,
                        alignof(SlotMeta));
     }
-    static size_t TotalSize(size_t nBuckets, size_t totalSlots, size_t maxRanks)
+    static size_t TotalSize(size_t nBuckets, size_t totalSlots)
     {
-        return SlotMetaOffset(nBuckets) + sizeof(SlotMeta) * totalSlots +
-               sizeof(PrefetchRing) * maxRanks;
+        return SlotMetaOffset(nBuckets) + sizeof(SlotMeta) * totalSlots;
     }
 
     void Bind(void* base, size_t maxRanks, size_t nSlotsPerRank, size_t nBuckets)
@@ -96,52 +94,6 @@ public:
         return reinterpret_cast<SlotMeta*>(static_cast<std::byte*>(base_) +
                                            SlotMetaOffset(nBuckets_));
     }
-    PrefetchRing* RingOf(size_t rank) const
-    {
-        auto* rings = reinterpret_cast<PrefetchRing*>(static_cast<std::byte*>(base_) +
-                                                      SlotMetaOffset(nBuckets_) +
-                                                      sizeof(SlotMeta) * totalSlots_);
-        return rings + rank;
-    }
-
-    // Multiple producers, one consumer per rank. Lookup must not wait on a producer.
-    void RingPush(size_t rank, const Detail::BlockId* blocks, size_t num)
-    {
-        if (rank >= maxRanks_ || num == 0 || blocks == nullptr) { return; }
-        auto* ring = RingOf(rank);
-        if (!ring->producers.TryLock()) {
-            ring->dropped.fetch_add(num, std::memory_order_relaxed);
-            return;
-        }
-        auto h = ring->head.load(std::memory_order_relaxed);
-        auto t = ring->tail.load(std::memory_order_acquire);
-        auto free = kPrefetchDepth - static_cast<size_t>(h - t);
-        auto n = num < free ? num : free;
-        for (size_t i = 0; i < n; i++) { ring->entries[(h + i) % kPrefetchDepth] = blocks[i]; }
-        ring->head.store(h + n, std::memory_order_release);
-        if (n < num) { ring->dropped.fetch_add(num - n, std::memory_order_relaxed); }
-        ring->producers.Unlock();
-    }
-
-    size_t RingDrain(size_t rank, Detail::BlockId* out, size_t max)
-    {
-        if (rank >= maxRanks_ || max == 0 || out == nullptr) { return 0; }
-        auto* ring = RingOf(rank);
-        auto t = ring->tail.load(std::memory_order_relaxed);
-        auto h = ring->head.load(std::memory_order_acquire);
-        auto avail = static_cast<size_t>(h - t);
-        auto n = max < avail ? max : avail;
-        for (size_t i = 0; i < n; i++) { out[i] = ring->entries[(t + i) % kPrefetchDepth]; }
-        ring->tail.store(t + n, std::memory_order_release);
-        return n;
-    }
-
-    uint64_t RingDropped(size_t rank) const
-    {
-        if (rank >= maxRanks_) { return 0; }
-        return RingOf(rank)->dropped.load(std::memory_order_relaxed);
-    }
-
     /* Initializes everything except slot metadata (see InitSlotRange). */
     void InitHeader(size_t slotSize, const std::vector<size_t>& numaNodes)
     {
@@ -164,14 +116,6 @@ public:
         auto* stripes =
             reinterpret_cast<BucketLock*>(static_cast<std::byte*>(base_) + LocksOffset(nBuckets_));
         for (size_t i = 0; i < kLockStripes; i++) { stripes[i].Init(); }
-        /* Ring counters only; entries stay untouched until first use. */
-        for (size_t r = 0; r < maxRanks_; r++) {
-            auto* ring = RingOf(r);
-            ring->producers.Init();
-            ring->head.store(0, std::memory_order_relaxed);
-            ring->tail.store(0, std::memory_order_relaxed);
-            ring->dropped.store(0, std::memory_order_relaxed);
-        }
     }
 
     /* Lazily initialize one rank's slot range. Only legal while that rank's

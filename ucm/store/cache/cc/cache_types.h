@@ -51,12 +51,10 @@ inline constexpr size_t kLockStripes = 1ULL << 16;
 inline constexpr size_t kBucketSizingRanks = 16;
 inline constexpr size_t kMinBuckets = 1ULL << 14;
 inline constexpr size_t kMaxBuckets = 1ULL << 24;
-/* Depth of each per-rank prefetch command ring (see PrefetchRing). */
-inline constexpr size_t kPrefetchDepth = 4096;
 /* Bumped on every incompatible SlotMeta / layout change; all ranks sharing one cache
  * domain must run the same binary. */
 inline constexpr uint32_t kMagic =
-    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 9u;
+    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 10u;
 
 enum class State : uint8_t { Loading, Ready, Failed };
 
@@ -115,16 +113,6 @@ struct SlotMeta {
     }
 };
 
-/* Per-rank command ring: try-lock serialization supports concurrent producers.
- * One worker consumes each ring. Hints may be dropped on contention or overflow. */
-struct PrefetchRing {
-    alignas(64) BucketLock producers;
-    alignas(64) std::atomic<uint64_t> head{0};
-    alignas(64) std::atomic<uint64_t> tail{0};
-    alignas(64) std::atomic<uint64_t> dropped{0};
-    Detail::BlockId entries[kPrefetchDepth];
-};
-
 struct Header {
     std::atomic<uint32_t> magic{0};
     size_t maxRanks{0};
@@ -143,7 +131,6 @@ static_assert(std::atomic<uint8_t>::is_always_lock_free, "accessed/ready must be
 static_assert(std::atomic<size_t>::is_always_lock_free,
               "size_t atomics (indices, reference, key words) must be lock-free");
 static_assert(std::atomic<State>::is_always_lock_free, "state must be lock-free");
-static_assert(std::atomic<uint64_t>::is_always_lock_free, "ring counters must be lock-free");
 
 inline size_t AlignUp(size_t value, size_t align) { return (value + align - 1) & ~(align - 1); }
 
