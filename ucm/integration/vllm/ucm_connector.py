@@ -1149,12 +1149,11 @@ class UCMDirectConnector(KVConnectorBase_V1):
         self.launch_config = ucm_config.get_config()
         self.connector_configs = self.launch_config.get("ucm_connectors", [])
         assert len(self.connector_configs) > 0, "no storage connector name in config."
-        configured_share_buffer = (
+        share_buffer_enable = bool(
             self.connector_configs[0]
             .get("ucm_connector_config", {})
             .get("share_buffer_enable", self.is_mla)
         )
-        share_buffer_enable = bool(configured_share_buffer)
         if share_buffer_enable:
             if role == KVConnectorRole.WORKER:
                 self.unique_id = _worker_generate_unique_id()
