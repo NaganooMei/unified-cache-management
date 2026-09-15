@@ -64,8 +64,10 @@ private:
     bool useGdr_{false};
     bool cacheIOAggregation_{false};
     bool cacheSdmaDirect_{false};
+    bool rankStriped_{false};
     std::vector<ssize_t> cpuAffinityCores_{};
     size_t localRankSize_{};
+    size_t bufferRank_{0};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;
     std::thread dispatcher_;

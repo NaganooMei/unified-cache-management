@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -74,6 +75,8 @@ public:
         }
         explicit operator bool() const { return Valid(); }
         bool Owner() const { return owner_; }
+        size_t GlobalSlot() const { return Valid() ? slotIdx_ : kInvalidIndex; }
+        size_t Segment() const { return Valid() ? buf_->SegmentAt(slotIdx_) : kInvalidIndex; }
         void* Data() { return Valid() ? buf_->DataAt(slotIdx_) : nullptr; }
         void* DeviceData() { return Valid() ? buf_->DeviceDataAt(slotIdx_) : nullptr; }
         bool Ready() const { return Valid() && buf_->Ready(slotIdx_); }
@@ -106,6 +109,9 @@ private:
     size_t slotSize_{0};
     size_t reserved_{0};
     size_t timeoutMs_{30000};
+    size_t maxRanks_{0};
+    bool rankStriped_{false};
+    bool ownsRankData_{false};
 
     /* Optimistic pin attempts before falling back to the bucket-lock path. */
     static constexpr size_t kPinSpinFast = 64;
@@ -116,28 +122,35 @@ public:
     Buffer& operator=(const Buffer&) = delete;
     ~Buffer()
     {
-        if (data_ && myRank_ != kInvalidIndex) {
+        if (data_ && ownsRankData_ && !rankStriped_ && myRank_ != kInvalidIndex) {
             ctrl_->Layout().Hdr()->rankDescs[myRank_].ready.store(3, std::memory_order_release);
         }
     }
 
     Status Setup(const Config& cfg)
     {
-        reserved_ = cfg.loadExclusiveBufferNumber;
         timeoutMs_ = cfg.timeoutMs;
         ctrl_ = MakeCtrlStrategy();
         if (auto s = ctrl_->Setup(cfg); s.Failure()) { return s; }
-        slotSize_ = ctrl_->Layout().Hdr()->slotSize;
-        nSlotsPerRank_ = ctrl_->Layout().Hdr()->nSlotsPerRank;
-        nBuckets_ = ctrl_->Layout().Hdr()->nBuckets;
+        auto* header = ctrl_->Layout().Hdr();
+        slotSize_ = header->slotSize;
+        nSlotsPerRank_ = header->nSlotsPerRank;
+        nBuckets_ = header->nBuckets;
+        maxRanks_ = header->maxRanks;
+        rankStriped_ = header->rankStriped != 0;
+        if (rankStriped_ && cfg.loadExclusiveBufferNumber % maxRanks_ != 0) {
+            return Status::InvalidParam(
+                "loadExclusiveBufferNumber({}) must be divisible by segment count({})",
+                cfg.loadExclusiveBufferNumber, maxRanks_);
+        }
+        reserved_ = rankStriped_ ? cfg.loadExclusiveBufferNumber / maxRanks_
+                                 : cfg.loadExclusiveBufferNumber;
         if (nSlotsPerRank_ == 0 || nBuckets_ == 0) {
             return Status::InvalidParam("ctrl header has zero slots per rank or buckets");
         }
         if (cfg.deviceId >= 0) {
-            if (cfg.physicalDeviceId < 0 ||
-                cfg.physicalDeviceId >= static_cast<int32_t>(kMaxRanks)) {
-                return Status::InvalidParam("physicalDeviceId({}) must be in [0, {})",
-                                            cfg.physicalDeviceId, kMaxRanks);
+            if (cfg.physicalDeviceId < 0) {
+                return Status::InvalidParam("invalid physicalDeviceId({})", cfg.physicalDeviceId);
             }
             /* reserved_ comes from the local config while nSlotsPerRank_ comes from the
              * creator's header; reject mismatched configurations instead of underflowing
@@ -148,25 +161,41 @@ public:
                     "rank({})",
                     reserved_, nSlotsPerRank_);
             }
-            myRank_ = static_cast<size_t>(cfg.physicalDeviceId);
+            myRank_ = rankStriped_ ? cfg.EffectiveBufferRank()
+                                   : static_cast<size_t>(cfg.physicalDeviceId);
+            if (myRank_ >= maxRanks_) {
+                return Status::InvalidParam("cache rank({}) must be in [0, {})", myRank_,
+                                            maxRanks_);
+            }
             // 0 = unused, 2 = initializing, 1 = ready, 3 = stopped/failed.
-            // A stopped rank must not silently replace payload referenced by peers.
+            // Rank-striped mode permits multiple DP participants to attach to the same
+            // logical segment; exactly one of them creates and publishes its data.
             auto& ready = ctrl_->Layout().Hdr()->rankDescs[myRank_].ready;
             uint8_t expected = 0;
-            if (!ready.compare_exchange_strong(expected, 2, std::memory_order_acq_rel)) {
-                return Status::DuplicateKey();
+            ownsRankData_ = ready.compare_exchange_strong(expected, 2, std::memory_order_acq_rel);
+            if (!ownsRankData_ && !rankStriped_) { return Status::DuplicateKey(); }
+            if (!ownsRankData_ && expected == 3) {
+                return Status::Error("cache rank segment is unavailable");
             }
-            ctrl_->Layout().InitSlotRange(myRank_);
+            if (ownsRankData_) { ctrl_->Layout().InitSlotRange(myRank_); }
             data_ = std::make_unique<DataStrategy>();
-            if (auto s =
-                    data_->Setup(ctrl_->Layout(), cfg.deviceId, myRank_, slotSize_, nSlotsPerRank_, cfg);
-                s.Failure()) {
+            auto s = data_->Setup(ctrl_->Layout(), cfg.deviceId, myRank_, slotSize_, nSlotsPerRank_,
+                                  ownsRankData_, cfg);
+            if (s.Failure()) {
+                if (ownsRankData_) { ready.store(3, std::memory_order_release); }
                 return s;
             }
-            RankDataDesc desc;
-            desc.ready.store(1, std::memory_order_relaxed);
-            if (auto s = ctrl_->Layout().SetRankDesc(cfg.physicalDeviceId, desc); s.Failure()) {
-                return s;
+            if (ownsRankData_) {
+                RankDataDesc desc;
+                desc.ready.store(1, std::memory_order_relaxed);
+                if (auto publish = ctrl_->Layout().SetRankDesc(myRank_, desc); publish.Failure()) {
+                    ready.store(3, std::memory_order_release);
+                    return publish;
+                }
+            }
+            if (rankStriped_) {
+                s = data_->MapAllSegments(timeoutMs_);
+                if (s.Failure()) { return s; }
             }
         }
         /* else: control-plane-only participant; myRank_ stays kInvalidIndex and the
@@ -179,10 +208,12 @@ public:
     /* This rank's index; kInvalidIndex for control-plane-only participants. */
     size_t MyRank() const { return myRank_; }
     size_t SlotSize() const { return slotSize_; }
+    size_t NumRanks() const { return maxRanks_; }
+    size_t NumSlotsPerRank() const { return nSlotsPerRank_; }
     /* Online = the rank completed Setup (sticky: ranks do not leave in this deployment). */
     bool RankReady(size_t rank) const
     {
-        if (rank >= kMaxRanks) { return false; }
+        if (rank >= maxRanks_) { return false; }
         return ctrl_->Layout().Hdr()->rankDescs[rank].ready.load(std::memory_order_acquire) == 1;
     }
 
@@ -199,12 +230,19 @@ public:
 
     uint64_t PrefetchDropped(size_t rank) const { return ctrl_->Layout().RingDropped(rank); }
 
-    Handle Get(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false)
+    Handle Get(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
+               size_t preferredSegment = kInvalidIndex)
     {
         if (myRank_ == kInvalidIndex) { return Handle{}; }
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs_);
+        auto attempts = nSlotsPerRank_ > std::numeric_limits<size_t>::max() / 2
+                            ? std::numeric_limits<size_t>::max()
+                            : 2 * nSlotsPerRank_;
+        if (rankStriped_ && attempts <= std::numeric_limits<size_t>::max() / maxRanks_) {
+            attempts *= maxRanks_;
+        }
         do {
-            auto h = TryGet(blockId, offset, allowReserved, 2 * nSlotsPerRank_);
+            auto h = TryGet(blockId, offset, allowReserved, attempts, preferredSegment);
             if (h) { return h; }
             std::this_thread::yield();
         } while (timeoutMs_ == 0 || std::chrono::steady_clock::now() < deadline);
@@ -213,7 +251,7 @@ public:
 
     // Speculative callers neither wait for a bucket lock nor scan without a bound.
     Handle TryGet(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
-                  size_t attempts = 128)
+                  size_t attempts = 128, size_t preferredSegment = kInvalidIndex)
     {
         if (myRank_ == kInvalidIndex || attempts == 0) { return Handle{}; }
         auto iBucket = HashKey(blockId, nBuckets_);
@@ -236,19 +274,21 @@ public:
             layout.LockOf(iBucket)->Unlock();
             return Handle{};
         }
-        iNode = Alloc(layout, blockId, offset, iBucket, allowReserved, attempts);
+        iNode = Alloc(layout, blockId, offset, iBucket, allowReserved, attempts, preferredSegment);
         layout.LockOf(iBucket)->Unlock();
         return Handle(this, iNode, true);
     }
 
-    void Prealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false)
+    void Prealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
+                  size_t preferredSegment = kInvalidIndex)
     {
-        TryPrealloc(blockId, offset, allowReserved);
+        TryPrealloc(blockId, offset, allowReserved, preferredSegment);
     }
 
-    bool TryPrealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false)
+    bool TryPrealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
+                     size_t preferredSegment = kInvalidIndex)
     {
-        auto h = TryGet(blockId, offset, allowReserved);
+        auto h = TryGet(blockId, offset, allowReserved, 128, preferredSegment);
         if (!h) { return false; }
         h.owner_ = false;  // A metadata placeholder has no in-flight writer.
         return true;
@@ -305,6 +345,12 @@ public:
     void* DataAt(size_t slotIdx) { return data_ ? data_->DataAt(slotIdx) : nullptr; }
 
     void* DeviceDataAt(size_t slotIdx) { return data_ ? data_->DeviceDataAt(slotIdx) : nullptr; }
+
+    size_t SegmentAt(size_t slotIdx) const
+    {
+        return slotIdx == kInvalidIndex || nSlotsPerRank_ == 0 ? kInvalidIndex
+                                                               : slotIdx / nSlotsPerRank_;
+    }
 
 private:
     /* Lock-free reader pin: filter by key, CAS the pin, re-validate. Returns false when
@@ -378,10 +424,10 @@ private:
      * reference.store(1, release).
      * Return after a bounded scan so Get can release the bucket lock before retrying. */
     size_t Alloc(CtrlLayout& layout, const Detail::BlockId& blockId, size_t offset, size_t iBucket,
-                 bool allowReserved, size_t attempts)
+                 bool allowReserved, size_t attempts, size_t preferredSegment)
     {
         for (size_t scan = 0; scan < attempts; ++scan) {
-            auto iNode = FetchNode(layout, allowReserved);
+            auto iNode = FetchNode(layout, allowReserved, preferredSegment, scan);
             if (iNode == kInvalidIndex) { continue; }
             auto* meta = &layout.SlotMetaArr()[iNode];
             size_t r = 0;
@@ -419,12 +465,23 @@ private:
         return kInvalidIndex;
     }
 
-    size_t FetchNode(CtrlLayout& layout, bool allowReserved)
+    size_t FetchNode(CtrlLayout& layout, bool allowReserved, size_t preferredSegment,
+                     size_t attempt)
     {
         auto total = nSlotsPerRank_ - (allowReserved ? 0 : reserved_);
         if (total == 0) { return kInvalidIndex; }
-        auto cur = layout.Hdr()->clockHands[myRank_].fetch_add(1, std::memory_order_relaxed) % total +
-                   myRank_ * nSlotsPerRank_;
+        size_t segment = myRank_;
+        if (rankStriped_) {
+            const auto first = preferredSegment < maxRanks_ ? preferredSegment : myRank_;
+            const auto window = total > std::numeric_limits<size_t>::max() / 2 ? total : 2 * total;
+            const auto fallback = window == 0 ? 0 : attempt / window;
+            if (fallback >= maxRanks_) { return kInvalidIndex; }
+            segment = (first + fallback) % maxRanks_;
+            if (!RankReady(segment)) { return kInvalidIndex; }
+        }
+        auto cur =
+            layout.Hdr()->clockHands[segment].fetch_add(1, std::memory_order_relaxed) % total +
+            segment * nSlotsPerRank_;
         if (layout.SlotMetaArr()[cur].accessed.exchange(0, std::memory_order_relaxed)) {
             return kInvalidIndex;
         }

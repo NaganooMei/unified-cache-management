@@ -56,6 +56,11 @@ struct Config {
     size_t bufferCapacity{256ULL << 30};
     size_t loadExclusiveBufferNumber{1024};
     bool shareBufferEnable{true};
+    bool shareBufferRankStriped{false};
+    // Empty detects allowed online memory nodes; ignored for ordinary shared buffers.
+    std::vector<size_t> shareBufferNumaNodes{};
+    // Rank within the shared-buffer group, independent of the device ordinal.
+    std::optional<size_t> shareBufferRank{};
     size_t waitingQueueDepth{8192};
     size_t runningQueueDepth{524288};
     size_t timeoutMs{30000};
@@ -70,7 +75,13 @@ struct Config {
     size_t localRankSize{8};
 
     size_t EffectiveStreamNumber() const noexcept
-    { return streamNumber.value_or(cacheSdmaDirect ? 1 : 4); }
+    {
+        return streamNumber.value_or(cacheSdmaDirect ? 1 : 4);
+    }
+    size_t EffectiveBufferRank() const noexcept
+    {
+        return shareBufferRank.value_or(static_cast<size_t>(physicalDeviceId));
+    }
 };
 
 }  // namespace UC::CacheStore

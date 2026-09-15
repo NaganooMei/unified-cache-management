@@ -26,14 +26,16 @@
 #include <chrono>
 #include <cstddef>
 #include <thread>
+#include <vector>
 #include "cache_types.h"
 
 namespace UC::CacheStore {
 
 /* Shared control-plane layout:
  * [Header][nBuckets bucket heads][kLockStripes striped locks][slot metadata]
- * [kMaxRanks prefetch rings]. There are no slot locks: per-slot coordination is the
- * lock-free pin protocol on SlotMeta::reference (see Buffer).
+ * [maxRanks prefetch rings]. There are no slot locks: per-slot coordination is the
+ * lock-free pin
+ * protocol on SlotMeta::reference (see Buffer).
  *
  * Slot metadata is initialized lazily per rank (InitSlotRange): a rank's slots are only
  * reachable from buckets after that rank links them in, which happens strictly after its
@@ -56,10 +58,10 @@ public:
         return AlignUp(LocksOffset(nBuckets) + sizeof(BucketLock) * kLockStripes,
                        alignof(SlotMeta));
     }
-    static size_t TotalSize(size_t nBuckets, size_t totalSlots)
+    static size_t TotalSize(size_t nBuckets, size_t totalSlots, size_t maxRanks)
     {
         return SlotMetaOffset(nBuckets) + sizeof(SlotMeta) * totalSlots +
-               sizeof(PrefetchRing) * kMaxRanks;
+               sizeof(PrefetchRing) * maxRanks;
     }
 
     void Bind(void* base, size_t maxRanks, size_t nSlotsPerRank, size_t nBuckets)
@@ -141,7 +143,7 @@ public:
     }
 
     /* Initializes everything except slot metadata (see InitSlotRange). */
-    void InitHeader(size_t slotSize)
+    void InitHeader(size_t slotSize, bool rankStriped, const std::vector<size_t>& numaNodes)
     {
         auto h = Hdr();
         h->magic.store(0, std::memory_order_relaxed);
@@ -149,6 +151,9 @@ public:
         h->nSlotsPerRank = nSlotsPerRank_;
         h->slotSize = slotSize;
         h->nBuckets = nBuckets_;
+        h->rankStriped = rankStriped ? 1 : 0;
+        h->numaNodeCount = numaNodes.size();
+        for (size_t i = 0; i < numaNodes.size(); ++i) { h->numaNodes[i] = numaNodes[i]; }
         for (size_t i = 0; i < maxRanks_; i++) {
             h->rankDescs[i].ready.store(0, std::memory_order_relaxed);
             h->clockHands[i].store(0, std::memory_order_relaxed);

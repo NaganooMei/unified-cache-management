@@ -27,6 +27,7 @@
 #include "buffer_manager.h"
 #include "logger/logger.h"
 #include "prefetch_queue.h"
+#include "shm_numa.h"
 #include "trans/cuda/gdr/gdr_config.h"
 #include "trans_manager.h"
 
@@ -157,6 +158,15 @@ private:
         config.Get("cpu_affinity_cores", param.cpuAffinityCores);
         if (param.shardSize > 0) { param.waitingQueueDepth *= (param.blockSize / param.shardSize); }
         config.Get("share_buffer_enable", param.shareBufferEnable);
+        config.Get("share_buffer_rank_striped", param.shareBufferRankStriped);
+        if (param.shareBufferRankStriped) {
+            config.GetNumbers("share_buffer_numa_nodes", param.shareBufferNumaNodes);
+            if (config.Contains("share_buffer_rank")) {
+                size_t rank = kInvalidIndex;
+                config.GetNumber("share_buffer_rank", rank);
+                param.shareBufferRank = rank;
+            }
+        }
         if (!param.shareBufferEnable) { param.bufferCapacity /= 8; }
         config.Get("io_direct", param.ioDirect);
         size_t bufferCapacityGb = 0;
@@ -194,13 +204,37 @@ private:
         }
         return Status::OK();
     }
-    Status CheckConfig(const Config& config)
+    Status CheckConfig(Config& config)
     {
         if (!config.storeBackend) { return Status::InvalidParam("invalid store backend"); }
         if (config.deviceId < -1) {
             return Status::InvalidParam("invalid device({})", config.deviceId);
         }
         if (config.uniqueId.empty()) { return Status::InvalidParam("invalid unique id"); }
+        if (config.shareBufferRankStriped && !config.shareBufferEnable) {
+            return Status::InvalidParam(
+                "rank-striped shared buffer requires share_buffer_enable=true");
+        }
+        if (config.localRankSize == 0 || config.localRankSize > kMaxRanks) {
+            return Status::InvalidParam("invalid local rank size({})", config.localRankSize);
+        }
+        if (config.shareBufferRankStriped) {
+            try {
+                if (config.shareBufferNumaNodes.empty()) {
+                    config.shareBufferNumaNodes = ShmNuma::DefaultNodes();
+                }
+                if (config.shareBufferNumaNodes.size() > kMaxRanks) {
+                    return Status::InvalidParam("too many NUMA nodes({})",
+                                                config.shareBufferNumaNodes.size());
+                }
+                ShmNuma::ValidateNodes(config.shareBufferNumaNodes);
+                if (config.deviceId >= 0) {
+                    ShmNuma::SegmentNodes(config.shareBufferNumaNodes, config.localRankSize, 0);
+                }
+            } catch (const std::exception& error) {
+                return Status::InvalidParam(std::string(error.what()));
+            }
+        }
         auto s =
             Trans::GdrKVBufferConfig::Validate(config.gpuKvBufferAddrs, config.gpuKvBufferSizes);
         if (s.Failure()) { return s; }
@@ -238,8 +272,16 @@ private:
         if (streamNumber < 1 || streamNumber > 32) {
             return Status::InvalidParam("invalid stream number({})", streamNumber);
         }
-        if (config.localRankSize == 0) {
-            return Status::InvalidParam("invalid local rank size({})", config.localRankSize);
+        if (config.shareBufferRankStriped) {
+            if (config.EffectiveBufferRank() >= config.localRankSize) {
+                return Status::InvalidParam("shared buffer rank({}) must be smaller than {}",
+                                            config.EffectiveBufferRank(), config.localRankSize);
+            }
+            if (config.loadExclusiveBufferNumber % config.localRankSize != 0) {
+                return Status::InvalidParam(
+                    "exclusive buffer number({}) must be divisible by local rank size({})",
+                    config.loadExclusiveBufferNumber, config.localRankSize);
+            }
         }
         return Status::OK();
     }
@@ -267,6 +309,13 @@ private:
         UC_INFO("Set {}::CpuAffinityCores to {}.", ns, config.cpuAffinityCores);
         UC_INFO("Set {}::BufferCapacity to {}GB.", ns, config.bufferCapacity >> 30);
         UC_INFO("Set {}::ShareBufferEnable to {}.", ns, config.shareBufferEnable);
+        UC_INFO("Set {}::ShareBufferRankStriped to {}.", ns, config.shareBufferRankStriped);
+        if (config.shareBufferRankStriped) {
+            if (config.deviceId >= 0) {
+                UC_INFO("Set {}::ShareBufferRank to {}.", ns, config.EffectiveBufferRank());
+            }
+            UC_INFO("Set {}::ShareBufferNumaNodes to {}.", ns, config.shareBufferNumaNodes);
+        }
         UC_INFO("Set {}::CacheIOAggregation to {}.", ns, config.cacheIOAggregation);
         if (config.cacheIOAggregation) {
             UC_INFO("Set {}::AggregationObject to CacheStoreShard.", ns);

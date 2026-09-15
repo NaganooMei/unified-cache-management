@@ -47,8 +47,11 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, Buffer* buf
     useGdr_ = config.useGdr;
     cacheIOAggregation_ = config.cacheIOAggregation;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
+    rankStriped_ = config.shareBufferRankStriped;
     cpuAffinityCores_ = config.cpuAffinityCores;
     localRankSize_ = config.localRankSize;
+    bufferRank_ =
+        rankStriped_ ? config.EffectiveBufferRank() : static_cast<size_t>(config.deviceId);
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
     holder_.reserve(1024);
@@ -112,11 +115,20 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     const auto nShard = task->desc.size();
     size_t backendSubmitCount = 0;
     size_t waitShardCount = 0;
-    const auto indexes = RearrangeIndex(nShard, deviceId_, localRankSize_);
+    const auto indexes = RearrangeIndex(nShard, bufferRank_, localRankSize_);
+    struct PreallocHint {
+        Detail::BlockId block;
+        size_t shard;
+        size_t segment;
+    };
+    std::vector<PreallocHint> preallocHints;
+    preallocHints.reserve(nShard);
     for (size_t i = 0; i < nShard; i++) {
-        auto& shard = task->desc[indexes[i]];
+        const auto originalIndex = indexes[i];
+        auto& shard = task->desc[originalIndex];
         ShardTask shardTask;
-        shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true);
+        const auto preferredSegment = rankStriped_ ? originalIndex % localRankSize_ : kInvalidIndex;
+        shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true, preferredSegment);
         if (!shardTask.bufferHandle) {
             task->Fail(Status::Retry());
             failureSet_->Insert(task->id);
@@ -154,17 +166,18 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
             shardTask.backendTaskHandle = res.Value();
             backendSubmitCount++;
         }
+        if (shard.index + 1 != nShardPerBlock_) {
+            preallocHints.push_back(
+                {shard.owner, shard.index + 1, shardTask.bufferHandle.Segment()});
+        }
         shardTask.task = task;
         shardTask.shard = std::move(shard);
         shardTask.waiter = (i + 1 < nShard) ? nullptr : waiter;
         running_.Push(std::move(shardTask));
     }
     auto tpDispatch = NowTime::Now();
-    for (size_t i = 0; i < nShard; i++) {
-        auto& shard = task->desc[indexes[i]];
-        if (shard.index + 1 != nShardPerBlock_) {
-            buffer_->Prealloc(shard.owner, shard.index + 1, true);
-        }
+    for (const auto& hint : preallocHints) {
+        buffer_->Prealloc(hint.block, hint.shard, true, hint.segment);
     }
     UC_DEBUG("Cache task({}) dispatch shards({}), wait={:.3f}ms, cost={:.3f}ms.", task->id, nShard,
              (tpWait - tp) * 1e3, (tpDispatch - tpWait) * 1e3);

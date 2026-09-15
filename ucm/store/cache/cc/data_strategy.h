@@ -23,6 +23,7 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -31,12 +32,13 @@
 #include <sys/mman.h>
 #include <thread>
 #include <unistd.h>
-#include "cache_types.h"
 #include "cache_domain.h"
+#include "cache_types.h"
 #include "ctrl_layout.h"
 #include "global_config.h"
 #include "ipc/fd_socket.h"
 #include "ipc/mem_fd.h"
+#include "shm_numa.h"
 #include "trans/buffer.h"
 
 namespace UC::CacheStore {
@@ -58,6 +60,8 @@ class DataStrategy {
     CtrlLayout* ctrl_{nullptr};
     size_t myRank_{kInvalidIndex};
     size_t nSlotsPerRank_{0};
+    size_t rankCount_{0};
+    bool ownsLocalData_{false};
     std::string domainName_;
     /* Guards lazy init / teardown of remoteCache_ entries; remoteCache_ is process-local. */
     std::mutex remoteMtx_;
@@ -87,23 +91,32 @@ public:
     }
 
     Status Setup(CtrlLayout& ctrl, int32_t deviceId, size_t rank, size_t slotSize,
-                 size_t nSlotsPerRank, const Config& config)
+                 size_t nSlotsPerRank, bool ownsLocalData, const Config& config)
     {
         ctrl_ = &ctrl;
         myRank_ = rank;
         nSlotsPerRank_ = nSlotsPerRank;
+        rankCount_ = ctrl.Hdr()->maxRanks;
         slotSize_ = slotSize;
-        auto size = nSlotsPerRank * slotSize;
+        ownsLocalData_ = ownsLocalData;
         domainName_ = CacheDomainName(config.uniqueId);
+        if (!ownsLocalData_) { return Status::OK(); }
+        auto size = nSlotsPerRank * slotSize;
         std::string name = domainName_ + "_data_" + std::to_string(rank);
         auto s = data_.Create(name, size, true);
         if (s.Failure()) { return s; }
-        constexpr size_t kFirstTouchChunk = 256 * 1024 * 1024;
-        auto* p = static_cast<std::byte*>(data_.Addr());
-        for (size_t off = 0; off < size;) {
-            size_t n = (size - off > kFirstTouchChunk) ? kFirstTouchChunk : (size - off);
-            std::memset(p + off, 0, n);
-            off += n;
+        if (config.shareBufferRankStriped) {
+            auto nodes = ShmNuma::SegmentNodes(config.shareBufferNumaNodes, rankCount_, rank);
+            s = ShmNuma::Initialize(data_.Addr(), size, nodes, name);
+            if (s.Failure()) { return s; }
+        } else {
+            constexpr size_t kFirstTouchChunk = 256 * 1024 * 1024;
+            auto* p = static_cast<std::byte*>(data_.Addr());
+            for (size_t off = 0; off < size;) {
+                size_t n = (size - off > kFirstTouchChunk) ? kFirstTouchChunk : (size - off);
+                std::memset(p + off, 0, n);
+                off += n;
+            }
         }
         s = Trans::Buffer::RegisterHostBuffer(data_.Addr(), size, &devicePtr_);
         if (s.Failure()) { return s; }
@@ -118,12 +131,35 @@ public:
         return Status::OK();
     }
 
+    Status MapAllSegments(size_t timeoutMs)
+    {
+        if (rankCount_ == 0 || (rankCount_ == 1 && ownsLocalData_)) { return Status::OK(); }
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        for (size_t rank = 0; rank < rankCount_; ++rank) {
+            if (ownsLocalData_ && rank == myRank_) { continue; }
+            for (;;) {
+                const auto state =
+                    ctrl_->Hdr()->rankDescs[rank].ready.load(std::memory_order_acquire);
+                if (state == 3) {
+                    return Status::Error("cache rank segment initialization failed");
+                }
+                if (state == 1 && MapRemoteData(rank, 0) != nullptr) { break; }
+                if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) {
+                    return Status::Retry();
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        return Status::OK();
+    }
+
     void* DataAt(size_t slotIdx)
     {
         if (slotIdx == kInvalidIndex || nSlotsPerRank_ == 0) { return nullptr; }
         auto rank = slotIdx / nSlotsPerRank_;
         auto localIdx = slotIdx % nSlotsPerRank_;
-        if (rank == myRank_) { return LocalDataAddr(localIdx); }
+        if (rank == myRank_ && ownsLocalData_) { return LocalDataAddr(localIdx); }
         if (rank >= ctrl_->Hdr()->maxRanks) { return nullptr; }
         auto& entry = remoteCache_[rank];
         void* cur = entry.addr.load(std::memory_order_acquire);
@@ -136,7 +172,7 @@ public:
         if (slotIdx == kInvalidIndex || nSlotsPerRank_ == 0) { return nullptr; }
         auto rank = slotIdx / nSlotsPerRank_;
         auto localIdx = slotIdx % nSlotsPerRank_;
-        if (rank == myRank_) { return LocalDeviceDataAddr(localIdx); }
+        if (rank == myRank_ && ownsLocalData_) { return LocalDeviceDataAddr(localIdx); }
         if (rank >= ctrl_->Hdr()->maxRanks) { return nullptr; }
         auto& entry = remoteCache_[rank];
         void* cur = entry.deviceAddr.load(std::memory_order_acquire);

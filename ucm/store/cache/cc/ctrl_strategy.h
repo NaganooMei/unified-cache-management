@@ -23,13 +23,15 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
-#include "ctrl_layout.h"
 #include "cache_domain.h"
+#include "ctrl_layout.h"
 #include "global_config.h"
 #include "ipc/fd_socket.h"
 #include "ipc/mem_fd.h"
@@ -55,6 +57,9 @@ public:
     {
         socketName_ = CacheDomainName(cfg.uniqueId) + "_ctrl";
         if (!cfg.shareBufferEnable) { return SetupCreator(cfg); }
+        // A scheduler/control-only participant normally has no shard layout yet. Let a
+        // worker create the control region, then attach to the published header.
+        if (cfg.deviceId < 0 && cfg.shardSize == 0) { return SetupJoiner(cfg); }
         auto s = socket_.Listen(socketName_);
         if (s.Success()) {
             auto r = SetupCreator(cfg);
@@ -78,19 +83,36 @@ private:
         if (slotSize == 0 || cfg.bufferCapacity < slotSize) {
             return Status::InvalidParam("ctrl creator requires valid shardSize and capacity");
         }
-        auto m = cfg.bufferCapacity / slotSize;
-        if (m > (std::numeric_limits<size_t>::max() / sizeof(SlotMeta) - kMaxBuckets) / kMaxRanks) {
+        const auto maxRanks = cfg.shareBufferRankStriped ? cfg.localRankSize : kMaxRanks;
+        if (maxRanks == 0 || maxRanks > kMaxRanks) {
+            return Status::InvalidParam("invalid cache segment count({})", maxRanks);
+        }
+        const auto totalConfiguredSlots = cfg.bufferCapacity / slotSize;
+        const auto m =
+            cfg.shareBufferRankStriped ? totalConfiguredSlots / maxRanks : totalConfiguredSlots;
+        if (m == 0 || m > std::numeric_limits<size_t>::max() / maxRanks) {
             return Status::InvalidParam("cache control layout too large");
         }
         auto nBuckets = CalcBucketCount(m);
-        auto totalSize = CtrlLayout::TotalSize(nBuckets, kMaxRanks * m);
+        const auto totalSlots = maxRanks * m;
+        const auto prefixSize = CtrlLayout::SlotMetaOffset(nBuckets);
+        if (totalSlots > (std::numeric_limits<size_t>::max() - prefixSize) / sizeof(SlotMeta)) {
+            return Status::InvalidParam("cache control layout too large");
+        }
+        const auto metaEnd = prefixSize + sizeof(SlotMeta) * totalSlots;
+        if (maxRanks > (std::numeric_limits<size_t>::max() - metaEnd) / sizeof(PrefetchRing)) {
+            return Status::InvalidParam("cache control layout too large");
+        }
+        auto totalSize = CtrlLayout::TotalSize(nBuckets, totalSlots, maxRanks);
         auto s = ctrlMem_.Create("ucm_v2_ctrl", totalSize, true);
         if (s.Failure()) { return s; }
         ctrlFd_ = ctrlMem_.Fd();
-        layout_.Bind(ctrlMem_.Addr(), kMaxRanks, m, nBuckets);
-        layout_.InitHeader(slotSize);
+        layout_.Bind(ctrlMem_.Addr(), maxRanks, m, nBuckets);
+        layout_.InitHeader(slotSize, cfg.shareBufferRankStriped, cfg.shareBufferNumaNodes);
         layout_.SetMagic();
-        if (cfg.shareBufferEnable) { acceptThread_ = std::thread([this] { AcceptLoop(); }); }
+        if (cfg.shareBufferEnable) {
+            acceptThread_ = std::thread([this] { AcceptLoop(); });
+        }
         return Status::OK();
     }
 
@@ -114,19 +136,47 @@ private:
         if (s.Failure()) { return s; }
         layout_.Bind(ctrlMem_.Addr(), kMaxRanks, 0, 0);
         if (!layout_.WaitReady(cfg.timeoutMs)) { return Status::Retry(); }
-        auto m = layout_.Hdr()->nSlotsPerRank;
-        auto nBuckets = layout_.Hdr()->nBuckets;
-        if (m == 0 || nBuckets == 0 || nBuckets > kMaxBuckets ||
-            (nBuckets & (nBuckets - 1)) != 0 || layout_.Hdr()->maxRanks != kMaxRanks ||
-            m > (std::numeric_limits<size_t>::max() / sizeof(SlotMeta) - kMaxBuckets) / kMaxRanks) {
+        auto* header = layout_.Hdr();
+        const auto m = header->nSlotsPerRank;
+        const auto nBuckets = header->nBuckets;
+        const auto maxRanks = header->maxRanks;
+        if (m == 0 || maxRanks == 0 || maxRanks > kMaxRanks || nBuckets == 0 ||
+            nBuckets > kMaxBuckets || (nBuckets & (nBuckets - 1)) != 0 ||
+            m > std::numeric_limits<size_t>::max() / maxRanks ||
+            header->numaNodeCount > kMaxRanks) {
             return Status::InvalidParam("ctrl header invalid");
         }
-        if (cfg.shardSize != 0 && AlignUp(cfg.shardSize, cfg.alignSize) != layout_.Hdr()->slotSize) {
-            return Status::InvalidParam("cache participants disagree on slot size");
+        const auto rankStriped = header->rankStriped != 0;
+        if (rankStriped != cfg.shareBufferRankStriped ||
+            maxRanks != (rankStriped ? cfg.localRankSize : kMaxRanks)) {
+            return Status::InvalidParam("cache participants disagree on rank layout");
         }
-        s = ctrlMem_.Remap(CtrlLayout::TotalSize(nBuckets, kMaxRanks * m));
+        if (rankStriped) {
+            if (header->numaNodeCount != cfg.shareBufferNumaNodes.size() ||
+                !std::equal(cfg.shareBufferNumaNodes.begin(), cfg.shareBufferNumaNodes.end(),
+                            header->numaNodes)) {
+                return Status::InvalidParam("cache participants disagree on NUMA node layout");
+            }
+        }
+        if (cfg.shardSize != 0) {
+            if (cfg.alignSize == 0 || (cfg.alignSize & (cfg.alignSize - 1)) != 0 ||
+                cfg.shardSize > std::numeric_limits<size_t>::max() - (cfg.alignSize - 1) ||
+                AlignUp(cfg.shardSize, cfg.alignSize) != header->slotSize) {
+                return Status::InvalidParam("cache participants disagree on slot size");
+            }
+        }
+        const auto totalSlots = maxRanks * m;
+        const auto prefixSize = CtrlLayout::SlotMetaOffset(nBuckets);
+        if (totalSlots > (std::numeric_limits<size_t>::max() - prefixSize) / sizeof(SlotMeta)) {
+            return Status::InvalidParam("ctrl header invalid");
+        }
+        const auto metaEnd = prefixSize + sizeof(SlotMeta) * totalSlots;
+        if (maxRanks > (std::numeric_limits<size_t>::max() - metaEnd) / sizeof(PrefetchRing)) {
+            return Status::InvalidParam("ctrl header invalid");
+        }
+        s = ctrlMem_.Remap(CtrlLayout::TotalSize(nBuckets, totalSlots, maxRanks));
         if (s.Failure()) { return s; }
-        layout_.Bind(ctrlMem_.Addr(), kMaxRanks, m, nBuckets);
+        layout_.Bind(ctrlMem_.Addr(), maxRanks, m, nBuckets);
         return Status::OK();
     }
 

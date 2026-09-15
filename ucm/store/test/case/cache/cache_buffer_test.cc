@@ -619,3 +619,36 @@ TEST(UcmV2CacheBufferTest, ConcurrentPrefetchProducersDoNotOverwriteCommands)
     EXPECT_EQ(unique.size(), n);
     EXPECT_EQ(n + buf.PrefetchDropped(0), producers * count);
 }
+
+TEST(UcmV2CacheBufferTest, RankStripedControlUsesOneTotalCapacityBudget)
+{
+    auto cfg = MakeConfig(-1, 65);
+    cfg.uniqueId = "rank-striped-control";
+    cfg.shareBufferRankStriped = true;
+    cfg.localRankSize = 4;
+    cfg.shareBufferNumaNodes = {0};
+    UC::CacheStore::Buffer buf;
+    ASSERT_TRUE(buf.Setup(cfg).Success());
+    EXPECT_EQ(buf.NumRanks(), 4u);
+    EXPECT_EQ(buf.NumSlotsPerRank(), 16u);
+}
+
+TEST(UcmV2CacheBufferTest, RankStripedJoinerRejectsDifferentTopology)
+{
+    auto cfg = MakeConfig(-1, 64);
+    cfg.uniqueId = "rank-striped-mismatch";
+    cfg.shareBufferRankStriped = true;
+    cfg.localRankSize = 4;
+    cfg.shareBufferNumaNodes = {0, 1};
+    UC::CacheStore::Buffer creator;
+    ASSERT_TRUE(creator.Setup(cfg).Success());
+
+    cfg.localRankSize = 2;
+    UC::CacheStore::Buffer wrongRanks;
+    EXPECT_TRUE(wrongRanks.Setup(cfg).Failure());
+
+    cfg.localRankSize = 4;
+    cfg.shareBufferNumaNodes = {0};
+    UC::CacheStore::Buffer wrongNodes;
+    EXPECT_TRUE(wrongNodes.Setup(cfg).Failure());
+}

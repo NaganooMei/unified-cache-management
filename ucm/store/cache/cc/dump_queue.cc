@@ -49,6 +49,8 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, Buffer* buf
     useGdr_ = config.useGdr;
     cacheIOAggregation_ = config.cacheIOAggregation;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
+    rankStriped_ = config.shareBufferRankStriped;
+    localRankSize_ = config.localRankSize;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -137,7 +139,8 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     size_t copiedShards = 0;
     for (size_t i = 0; i < nShard; i++) {
         auto& shard = task->desc[i];
-        auto handle = buffer_->Get(shard.owner, shard.index);
+        const auto preferredSegment = rankStriped_ ? i % localRankSize_ : kInvalidIndex;
+        auto handle = buffer_->Get(shard.owner, shard.index, false, preferredSegment);
         if (!handle) {
             stream.Synchronize();
             return Status::Retry();

@@ -56,7 +56,7 @@ inline constexpr size_t kPrefetchDepth = 4096;
 /* Bumped on every incompatible SlotMeta / layout change; all ranks sharing one cache
  * domain must run the same binary. */
 inline constexpr uint32_t kMagic =
-    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 6u;
+    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 8u;
 
 enum class State : uint8_t { Loading, Ready, Failed };
 
@@ -132,6 +132,9 @@ struct Header {
     size_t slotSize{0};
     /* Power-of-two bucket count; joiners derive all layout offsets from it. */
     size_t nBuckets{0};
+    uint8_t rankStriped{0};
+    size_t numaNodeCount{0};
+    size_t numaNodes[kMaxRanks]{};
     alignas(64) RankDataDesc rankDescs[kMaxRanks];
     alignas(64) std::atomic<size_t> clockHands[kMaxRanks];
 };
