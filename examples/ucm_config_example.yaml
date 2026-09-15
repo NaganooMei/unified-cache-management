@@ -13,10 +13,6 @@ ucm_connectors:
   - ucm_connector_name: "UcmPipelineStore"
     ucm_connector_config:
       store_pipeline: "Cache|Posix"
-      # MLA automatically uses a rank-partitioned shared Buffer when all TP ranks
-      # share one host. cache_buffer_capacity_gb remains the total capacity budget.
-      # Optional NUMA node override; omitted means allowed memory nodes are detected.
-      # share_buffer_numa_nodes: [0, 1, 2, 3]
       # Device streams per rank and per direction (1-32). SDMA Direct defaults to 1;
       # ordinary copies default to 4. Uncomment to compare 16 SDMA streams.
       # cache_stream_number: 16
