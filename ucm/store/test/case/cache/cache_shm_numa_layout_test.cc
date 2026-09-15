@@ -53,6 +53,24 @@ TEST(UCCacheShmNumaLayoutTest, MapsSegmentsEvenlyAcrossNodes)
     EXPECT_EQ(Numa::SegmentNodes({2, 4, 6}, 2, 1), (std::vector<size_t>{2, 4, 6}));
 }
 
+TEST(UCCacheShmNumaLayoutTest, PrefersDetectedDeviceNodeForSharedAndPrivateData)
+{
+    EXPECT_EQ(Numa::DataNodes(3, {0, 1}, 8, 5, true), (std::vector<size_t>{3}));
+    EXPECT_EQ(Numa::DataNodes(3, {}, 1, 0, false), (std::vector<size_t>{3}));
+    EXPECT_EQ(Numa::DataNodes(std::nullopt, {0, 1}, 8, 5, true),
+              (std::vector<size_t>{1}));
+    EXPECT_TRUE(Numa::DataNodes(std::nullopt, {}, 1, 0, false).empty());
+}
+
+TEST(UCCacheShmNumaLayoutTest, SpreadsFallbackRanksAcrossAvailableNodes)
+{
+    const std::vector<size_t> nodes{0, 2, 4, 6};
+    EXPECT_EQ(Numa::RankNode(nodes, 0), (std::vector<size_t>{0}));
+    EXPECT_EQ(Numa::RankNode(nodes, 3), (std::vector<size_t>{6}));
+    EXPECT_EQ(Numa::RankNode(nodes, 4), (std::vector<size_t>{0}));
+    EXPECT_TRUE(Numa::RankNode({}, 7).empty());
+}
+
 TEST(UCCacheShmNumaLayoutTest, BuildsKernelNodeMask)
 {
     constexpr size_t bits = sizeof(unsigned long) * 8;

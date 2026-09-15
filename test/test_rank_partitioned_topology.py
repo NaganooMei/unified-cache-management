@@ -9,16 +9,24 @@ from unittest.mock import Mock, patch
 SOURCE = Path(__file__).resolve().parents[1] / "ucm/integration/vllm/ucm_connector.py"
 ROLE = types.SimpleNamespace(WORKER="worker", SCHEDULER="scheduler")
 tree = ast.parse(SOURCE.read_text(encoding="utf-8-sig"))
-method = next(
-    node
+methods = {
+    node.name: node
     for node in ast.walk(tree)
-    if isinstance(node, ast.FunctionDef) and node.name == "_configure_partitioned_store"
-)
-namespace = {"Any": object, "KVConnectorRole": ROLE}
+    if isinstance(node, ast.FunctionDef)
+    and node.name in {"_configure_partitioned_store", "_configure_numa_placement"}
+}
+current_platform = types.SimpleNamespace(device_type="npu")
+namespace = {
+    "Any": object,
+    "KVConnectorRole": ROLE,
+    "current_platform": current_platform,
+}
 exec(
-    compile(ast.Module(body=[method], type_ignores=[]), str(SOURCE), "exec"), namespace
+    compile(ast.Module(body=list(methods.values()), type_ignores=[]), str(SOURCE), "exec"),
+    namespace,
 )
-configure = namespace[method.name]
+configure = namespace["_configure_partitioned_store"]
+configure_numa = namespace["_configure_numa_placement"]
 
 
 class PartitionedBufferTopologyTest(unittest.TestCase):
@@ -137,6 +145,39 @@ class PartitionedBufferTopologyTest(unittest.TestCase):
         self.assertEqual(config["share_buffer_segment_count"], 8)
         self.assertEqual(config["share_buffer_rank"], 5)
         self.assertEqual(config["local_rank_size"], 1)
+
+    def test_gqa_without_topology_falls_back_to_tp_rank(self):
+        worker = self.worker(rank=13)
+        worker.is_mla = False
+        worker.tp_rank = 13
+        worker.device_id = 5
+        worker.device = Mock()
+        worker.device.get_numa_node.return_value = None
+        config = {}
+        configure_numa(worker, config)
+        self.assertEqual(config["cache_fallback_numa_rank"], 5)
+
+    def test_detected_topology_takes_priority_for_gqa_and_mla(self):
+        for is_mla in (False, True):
+            worker = self.worker()
+            worker.is_mla = is_mla
+            worker.tp_rank = 7
+            worker.device_id = 7
+            worker.device = Mock()
+            worker.device.get_numa_node.return_value = 3
+            config = {}
+            configure_numa(worker, config)
+            self.assertEqual(config["cache_detected_numa_node"], 3)
+            self.assertNotIn("cache_fallback_numa_rank", config)
+
+    def test_scheduler_does_not_probe_numa_topology(self):
+        scheduler = self.worker()
+        scheduler._role = ROLE.SCHEDULER
+        scheduler.device = Mock()
+        config = {}
+        configure_numa(scheduler, config)
+        scheduler.device.get_numa_node.assert_not_called()
+        self.assertEqual(config, {})
 
 
 if __name__ == "__main__":

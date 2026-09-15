@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -131,6 +132,22 @@ inline std::vector<size_t> SegmentNodes(const std::vector<size_t>& nodes, size_t
     const auto perGroup = nodes.size() / groups;
     const auto first = (segment % groups) * perGroup;
     return {nodes.begin() + first, nodes.begin() + first + perGroup};
+}
+
+inline std::vector<size_t> DataNodes(const std::optional<size_t>& detectedNode,
+                                     const std::vector<size_t>& sharedNodes, size_t segments,
+                                     size_t segment, bool shared)
+{
+    if (detectedNode.has_value()) { return {*detectedNode}; }
+    if (!shared || segments <= 1 || sharedNodes.empty()) { return {}; }
+    return SegmentNodes(sharedNodes, segments, segment);
+}
+
+inline std::vector<size_t> RankNode(const std::vector<size_t>& nodes, size_t rank)
+{
+    if (nodes.empty()) { return {}; }
+    ValidateNodes(nodes);
+    return {nodes[rank % nodes.size()]};
 }
 
 }  // namespace UC::CacheStore::ShmNuma

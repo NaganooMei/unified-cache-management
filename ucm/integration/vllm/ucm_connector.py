@@ -1324,6 +1324,20 @@ class UCMDirectConnector(KVConnectorBase_V1):
             )
         config["share_buffer_rank"] = topology[0]
 
+    def _configure_numa_placement(self, config: dict[str, Any]) -> None:
+        if self._role != KVConnectorRole.WORKER:
+            return
+        numa_node = self.device.get_numa_node(self.device_id)
+        if numa_node is not None:
+            # Connector-internal hint derived from the physical NPU topology.
+            # It applies to both a GQA private Buffer and this MLA rank's segment.
+            config["cache_detected_numa_node"] = numa_node
+            return
+        if current_platform.device_type == "npu" and not self.is_mla:
+            # A3 exposes no useful device affinity. Spread GQA private Buffers over
+            # the available NUMA nodes by TP rank instead of relying on first-touch.
+            config["cache_fallback_numa_rank"] = self.tp_rank % self.tp_size
+
     def _create_store(
         self,
         kv_cache_layout: Optional[KVCacheLayout],
@@ -1345,6 +1359,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
         config["unique_id"] = f"{self.unique_id}"
         self._configure_partitioned_store(config)
         self._set_default_shm_buffer_capacity(config)
+        self._configure_numa_placement(config)
         if self._role == KVConnectorRole.WORKER:
             config["device_id"] = self.device_id
             tensor_size_list = kv_cache_layout.tensor_size_list * self.blocks_per_chunk

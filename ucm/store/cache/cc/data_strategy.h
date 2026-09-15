@@ -105,8 +105,18 @@ public:
         std::string name = domainName_ + "_data_" + std::to_string(rank);
         auto s = data_.Create(name, size, true);
         if (s.Failure()) { return s; }
-        if (config.shareBufferEnable && rankCount_ > 1 && !config.shareBufferNumaNodes.empty()) {
-            auto nodes = ShmNuma::SegmentNodes(config.shareBufferNumaNodes, rankCount_, rank);
+        auto nodes = ShmNuma::DataNodes(config.detectedNumaNode, config.shareBufferNumaNodes,
+                                        rankCount_, rank, config.shareBufferEnable);
+        if (nodes.empty() && !config.shareBufferEnable && config.fallbackNumaRank.has_value()) {
+            try {
+                nodes = ShmNuma::RankNode(ShmNuma::DefaultNodes(), *config.fallbackNumaRank);
+            } catch (const std::exception& error) {
+                UC_WARN("Cannot distribute private Buffer by TP rank: {}. Fall back to "
+                        "first-touch.",
+                        error.what());
+            }
+        }
+        if (!nodes.empty()) {
             s = ShmNuma::Initialize(data_.Addr(), size, nodes, name);
             if (s.Failure()) { return s; }
         } else {

@@ -154,6 +154,16 @@ private:
         config.Get("cpu_affinity_cores", param.cpuAffinityCores);
         if (param.shardSize > 0) { param.waitingQueueDepth *= (param.blockSize / param.shardSize); }
         config.Get("share_buffer_enable", param.shareBufferEnable);
+        if (config.Contains("cache_detected_numa_node")) {
+            size_t node = 0;
+            config.GetNumber("cache_detected_numa_node", node);
+            param.detectedNumaNode = node;
+        }
+        if (config.Contains("cache_fallback_numa_rank")) {
+            size_t rank = 0;
+            config.GetNumber("cache_fallback_numa_rank", rank);
+            param.fallbackNumaRank = rank;
+        }
         if (param.shareBufferEnable) {
             if (config.Contains("share_buffer_segment_count")) {
                 size_t count = 0;
@@ -311,6 +321,12 @@ private:
         UC_INFO("Set {}::CpuAffinityCores to {}.", ns, config.cpuAffinityCores);
         UC_INFO("Set {}::BufferCapacity to {}GB.", ns, config.bufferCapacity >> 30);
         UC_INFO("Set {}::ShareBufferEnable to {}.", ns, config.shareBufferEnable);
+        if (config.detectedNumaNode.has_value()) {
+            UC_INFO("Set {}::DetectedNumaNode to {}.", ns, *config.detectedNumaNode);
+        }
+        if (config.fallbackNumaRank.has_value()) {
+            UC_INFO("Set {}::FallbackNumaRank to {}.", ns, *config.fallbackNumaRank);
+        }
         if (config.shareBufferEnable) {
             UC_INFO("Set {}::ShareBufferSegmentCount to {}.", ns,
                     config.EffectiveBufferSegmentCount());

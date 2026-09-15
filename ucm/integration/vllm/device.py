@@ -23,6 +23,64 @@ from ucm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _expand_cpu_list(cpu_list: str) -> List[int]:
+    cpus: List[int] = []
+    for part in cpu_list.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            first, last = map(int, part.split("-", 1))
+            if first > last:
+                first, last = last, first
+            cpus.extend(range(first, last + 1))
+        else:
+            cpus.append(int(part))
+    return cpus
+
+
+def _parse_npu_topo_affinity(output: str) -> Dict[int, List[int]]:
+    """Parse the CPU Affinity column from ``npu-smi info -t topo``."""
+    affinity: Dict[int, List[int]] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        match = re.fullmatch(r"NPU(\d+)", parts[0])
+        if (
+            match is None
+            or re.fullmatch(r"\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*", parts[-1])
+            is None
+        ):
+            continue
+        affinity[int(match.group(1))] = _expand_cpu_list(parts[-1])
+    return affinity
+
+
+def _parse_cpu_numa_map(output: str) -> Dict[int, int]:
+    """Parse ``lscpu -e=cpu,node`` into a CPU-to-NUMA map."""
+    cpu_numa: Dict[int, int] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            continue
+        cpu_numa[int(parts[0])] = int(parts[1])
+    return cpu_numa
+
+
+def _resolve_npu_numa_node(
+    topo_output: str, cpu_output: str, device_id: int
+) -> Optional[int]:
+    affinity = _parse_npu_topo_affinity(topo_output).get(device_id)
+    if not affinity:
+        return None
+    cpu_numa = _parse_cpu_numa_map(cpu_output)
+    if any(cpu not in cpu_numa for cpu in affinity):
+        return None
+    nodes = {cpu_numa[cpu] for cpu in affinity}
+    return next(iter(nodes)) if len(nodes) == 1 else None
+
+
 class Device(ABC):
     def __init__(self):
         self.events = {}
@@ -53,6 +111,10 @@ class Device(ABC):
     @abstractmethod
     def destroy_event_handle(self, event_handle: int):
         pass
+
+    def get_numa_node(self, device_ordinal: int) -> Optional[int]:
+        """Return a real device-affine NUMA node, or None when unavailable."""
+        return None
 
     @abstractmethod
     def get_cpu_affinity(self, local_rank: int) -> Optional[str]:
@@ -243,6 +305,7 @@ class NpuDevice(Device):
 
     def __init__(self):
         super().__init__()
+        self._numa_node_cache: Dict[int, Optional[int]] = {}
 
     def get_event_handle(self) -> int:
         import acl
@@ -349,6 +412,39 @@ class NpuDevice(Device):
             return sorted(list(self._get_device_map_info().keys()))
         except Exception:
             return list(range(torch.npu.device_count()))
+
+    def get_numa_node(self, device_ordinal: int) -> Optional[int]:
+        if device_ordinal in self._numa_node_cache:
+            return self._numa_node_cache[device_ordinal]
+
+        device_id = self._get_device_id(device_ordinal)
+        numa_node: Optional[int] = None
+        try:
+            topo_output = self._execute_command(["npu-smi", "info", "-t", "topo"])
+            if device_id in _parse_npu_topo_affinity(topo_output):
+                cpu_output = self._execute_command(["lscpu", "-e=cpu,node"])
+                numa_node = _resolve_npu_numa_node(topo_output, cpu_output, device_id)
+        except Exception as error:
+            logger.warning(
+                "[Cache NUMA] failed to query topology for NPU device %s: %s",
+                device_id,
+                error,
+            )
+
+        if numa_node is None:
+            logger.info(
+                "[Cache NUMA] no unambiguous topology affinity for NPU device %s; "
+                "keep the default memory placement.",
+                device_id,
+            )
+        else:
+            logger.info(
+                "[Cache NUMA] NPU device=%s uses topology-affine NUMA node=%s.",
+                device_id,
+                numa_node,
+            )
+        self._numa_node_cache[device_ordinal] = numa_node
+        return numa_node
 
     def _get_device_map_info(self) -> Dict[int, "NpuDevice.NpuDeviceInfo"]:
         device_map_info: Dict[int, NpuDevice.NpuDeviceInfo] = {}
