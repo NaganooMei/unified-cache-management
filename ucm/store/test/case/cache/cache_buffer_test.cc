@@ -116,10 +116,34 @@ TEST(UcmV2CacheBufferTest, ClockEviction)
 
 TEST(UcmV2CacheBufferTest, ForkTwoProcessesCtrlShared)
 {
+    int startPipe[2];
+    ASSERT_EQ(pipe(startPipe), 0);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        close(startPipe[1]);
+        auto cfg1 = MakeConfig(1);
+        cfg1.localRankSize = 2;
+        cfg1.uniqueId = "fork-ctrl-shared";
+        UC::CacheStore::Buffer buf1;
+        if (buf1.Setup(cfg1).Failure()) { _exit(2); }
+        char signal = 0;
+        if (read(startPipe[0], &signal, sizeof(signal)) != sizeof(signal)) { _exit(3); }
+        close(startPipe[0]);
+        auto blk = MakeBlockId('x');
+        _exit(buf1.Exist(blk, 0) ? 0 : 1);
+    }
+    close(startPipe[0]);
     auto cfg0 = MakeConfig(0);
     cfg0.localRankSize = 2;
+    cfg0.uniqueId = "fork-ctrl-shared";
     UC::CacheStore::Buffer buf0;
-    ASSERT_TRUE(buf0.Setup(cfg0).Success());
+    auto setup = buf0.Setup(cfg0);
+    if (setup.Failure()) {
+        close(startPipe[1]);
+        waitpid(pid, nullptr, 0);
+        FAIL() << "rank 0 setup failed";
+    }
 
     auto blk = MakeBlockId('x');
     {
@@ -127,18 +151,9 @@ TEST(UcmV2CacheBufferTest, ForkTwoProcessesCtrlShared)
         h.MarkReady();
     }
     ASSERT_TRUE(buf0.Exist(blk, 0));
-
-    pid_t pid = fork();
-    ASSERT_GE(pid, 0);
-    if (pid == 0) {
-        auto cfg1 = MakeConfig(1);
-        cfg1.localRankSize = 2;
-        UC::CacheStore::Buffer buf1;
-        auto s = buf1.Setup(cfg1);
-        if (s.Failure()) { _exit(2); }
-        bool exist = buf1.Exist(blk, 0);
-        _exit(exist ? 0 : 1);
-    }
+    char signal = 1;
+    ASSERT_EQ(write(startPipe[1], &signal, sizeof(signal)), sizeof(signal));
+    close(startPipe[1]);
     int status = 0;
     waitpid(pid, &status, 0);
     ASSERT_TRUE(WIFEXITED(status)) << "child crashed";
@@ -147,29 +162,46 @@ TEST(UcmV2CacheBufferTest, ForkTwoProcessesCtrlShared)
 
 TEST(UcmV2CacheBufferTest, CrossRankDataFetch)
 {
+    int startPipe[2];
+    ASSERT_EQ(pipe(startPipe), 0);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        close(startPipe[1]);
+        auto cfg1 = MakeConfig(1);
+        cfg1.localRankSize = 2;
+        cfg1.uniqueId = "cross-rank-data";
+        UC::CacheStore::Buffer buf1;
+        if (buf1.Setup(cfg1).Failure()) { _exit(2); }
+        char signal = 0;
+        if (read(startPipe[0], &signal, sizeof(signal)) != sizeof(signal)) { _exit(5); }
+        close(startPipe[0]);
+        auto blk = MakeBlockId('p');
+        auto h = buf1.Get(blk, 0);
+        if (!h) { _exit(3); }
+        void* d = h.Data();
+        _exit(d != nullptr ? 0 : 4);
+    }
+    close(startPipe[0]);
     auto cfg0 = MakeConfig(0);
     cfg0.localRankSize = 2;
+    cfg0.uniqueId = "cross-rank-data";
     UC::CacheStore::Buffer buf0;
-    ASSERT_TRUE(buf0.Setup(cfg0).Success());
+    auto setup = buf0.Setup(cfg0);
+    if (setup.Failure()) {
+        close(startPipe[1]);
+        waitpid(pid, nullptr, 0);
+        FAIL() << "rank 0 setup failed";
+    }
 
     auto blk = MakeBlockId('p');
     {
         auto h = buf0.Get(blk, 0);
         h.MarkReady();
     }
-
-    pid_t pid = fork();
-    ASSERT_GE(pid, 0);
-    if (pid == 0) {
-        auto cfg1 = MakeConfig(1);
-        cfg1.localRankSize = 2;
-        UC::CacheStore::Buffer buf1;
-        if (buf1.Setup(cfg1).Failure()) { _exit(2); }
-        auto h = buf1.Get(blk, 0);
-        if (!h) { _exit(3); }
-        void* d = h.Data();
-        _exit(d != nullptr ? 0 : 4);
-    }
+    char signal = 1;
+    ASSERT_EQ(write(startPipe[1], &signal, sizeof(signal)), sizeof(signal));
+    close(startPipe[1]);
     int status = 0;
     waitpid(pid, &status, 0);
     ASSERT_TRUE(WIFEXITED(status)) << "child crashed";
@@ -181,37 +213,55 @@ TEST(UcmV2CacheBufferTest, CrossRankDataFetchNonMultipleCapacity)
     /* capacity is not a multiple of slotSize: the remote mapping must use the exact
      * per-rank data window (m * slotSize), never the raw capacity. */
     constexpr size_t M = 8;
-    auto cfg0 = MakeConfig(0, M);
-    cfg0.localRankSize = 2;
-    cfg0.bufferCapacity = 4096 * M + 2048;
-    UC::CacheStore::Buffer buf0;
-    ASSERT_TRUE(buf0.Setup(cfg0).Success());
-
-    auto blk = MakeBlockId('n');
-    {
-        auto h = buf0.Get(blk, 0);
-        h.MarkReady();
-    }
-
+    int startPipe[2];
+    ASSERT_EQ(pipe(startPipe), 0);
     pid_t pid = fork();
     ASSERT_GE(pid, 0);
     if (pid == 0) {
+        close(startPipe[1]);
         auto cfg1 = MakeConfig(1, M);
         cfg1.localRankSize = 2;
         cfg1.bufferCapacity = 4096 * M + 2048;
+        cfg1.uniqueId = "cross-rank-non-multiple";
         UC::CacheStore::Buffer buf1;
         if (buf1.Setup(cfg1).Failure()) { _exit(2); }
+        char signal = 0;
+        if (read(startPipe[0], &signal, sizeof(signal)) != sizeof(signal)) { _exit(5); }
+        close(startPipe[0]);
+        auto blk = MakeBlockId('n');
         auto h = buf1.Get(blk, 0);
         if (!h) { _exit(3); }
         void* d = h.Data();
         if (d == nullptr) { _exit(4); }
         /* Touch the last slot of the window to prove the mapping covers the whole
+         *
          * per-rank data block. */
         auto* p = static_cast<std::byte*>(d);
         volatile std::byte last = p[4095];
         (void)last;
         _exit(0);
     }
+    close(startPipe[0]);
+    auto cfg0 = MakeConfig(0, M);
+    cfg0.localRankSize = 2;
+    cfg0.bufferCapacity = 4096 * M + 2048;
+    cfg0.uniqueId = "cross-rank-non-multiple";
+    UC::CacheStore::Buffer buf0;
+    auto setup = buf0.Setup(cfg0);
+    if (setup.Failure()) {
+        close(startPipe[1]);
+        waitpid(pid, nullptr, 0);
+        FAIL() << "rank 0 setup failed";
+    }
+
+    auto blk = MakeBlockId('n');
+    {
+        auto h = buf0.Get(blk, 0);
+        h.MarkReady();
+    }
+    char signal = 1;
+    ASSERT_EQ(write(startPipe[1], &signal, sizeof(signal)), sizeof(signal));
+    close(startPipe[1]);
     int status = 0;
     waitpid(pid, &status, 0);
     ASSERT_TRUE(WIFEXITED(status)) << "child crashed";
