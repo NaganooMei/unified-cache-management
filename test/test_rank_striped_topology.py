@@ -75,7 +75,9 @@ class RankStripedTopologyTest(unittest.TestCase):
     def test_group_size_mismatch_fails(self):
         module = self.group([True] * 8, world_size=4)
         with patch.dict("sys.modules", {module.__name__: module}):
-            with self.assertRaisesRegex(ValueError, "does not match configured TP size"):
+            with self.assertRaisesRegex(
+                ValueError, "does not match configured TP size"
+            ):
                 configure(self.worker(), self.config())
 
     def test_probe_once_for_multiple_stores(self):
