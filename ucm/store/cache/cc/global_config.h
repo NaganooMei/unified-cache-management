@@ -66,7 +66,7 @@ struct Config {
     size_t waitingQueueDepth{8192};
     size_t runningQueueDepth{524288};
     size_t timeoutMs{30000};
-    // Unset preserves the defaults: one SDMA Direct stream, four ordinary streams.
+    // Unset preserves the defaults: sixteen SDMA Direct streams, four ordinary streams.
     std::optional<size_t> streamNumber{};
     bool cacheLoadBackendOnly{false};
     std::vector<uintptr_t> gpuKvBufferAddrs{};
@@ -78,7 +78,7 @@ struct Config {
 
     size_t EffectiveStreamNumber() const noexcept
     {
-        return streamNumber.value_or(cacheSdmaDirect ? 1 : 4);
+        return streamNumber.value_or(cacheSdmaDirect ? 16 : 4);
     }
     size_t EffectiveBufferRank() const noexcept
     {

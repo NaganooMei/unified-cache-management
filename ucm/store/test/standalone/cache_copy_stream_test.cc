@@ -77,7 +77,7 @@ void CheckDefaults()
     config.cacheSdmaDirect = false;
     Require(config.EffectiveStreamNumber() == 4, "ordinary default changed");
     config.cacheSdmaDirect = true;
-    Require(config.EffectiveStreamNumber() == 1, "SDMA default changed");
+    Require(config.EffectiveStreamNumber() == 16, "SDMA default changed");
     for (const size_t number : {1, 4, 16, 32}) {
         config.streamNumber = number;
         Require(config.EffectiveStreamNumber() == number, "SDMA stream override ignored");
