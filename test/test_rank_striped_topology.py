@@ -17,7 +17,9 @@ method = next(
     and node.name == "_configure_rank_striped_store"
 )
 namespace = {"Any": object, "KVConnectorRole": ROLE}
-exec(compile(ast.Module(body=[method], type_ignores=[]), str(SOURCE), "exec"), namespace)
+exec(
+    compile(ast.Module(body=[method], type_ignores=[]), str(SOURCE), "exec"), namespace
+)
 configure = namespace[method.name]
 
 
