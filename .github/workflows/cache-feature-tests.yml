@@ -18,6 +18,6 @@ jobs:
       - name: Configure simulated runtime
         run: cmake -S . -B build-cache -DCMAKE_BUILD_TYPE=Debug -DBUILD_UNIT_TESTS=ON -DRUNTIME_ENVIRONMENT=simu
       - name: Build store tests
-        run: cmake --build build-cache --target ucmstore.test -j4
+        run: cmake --build build-cache --target ucmstore.test cache_copy_stream.test -j4
       - name: Run Cache tests
         run: ctest --test-dir build-cache -R '[Cc]ache' --output-on-failure --timeout 60

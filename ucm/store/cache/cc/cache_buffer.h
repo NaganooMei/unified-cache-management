@@ -304,14 +304,13 @@ public:
              * reconfigured right now. */
             bool owner = false;
             if (PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner, false)) {
-                auto ready = Ready(iNode);
                 Release(iNode);
-                return ready;
+                return true;
             }
         }
         layout.LockOf(iBucket)->Lock();
         iNode = Lookup(layout, iBucket, blockId, offset);
-        bool found = (iNode != kInvalidIndex && Ready(iNode));
+        bool found = (iNode != kInvalidIndex);
         if (found) { layout.SlotMetaArr()[iNode].accessed.store(1, std::memory_order_relaxed); }
         layout.LockOf(iBucket)->Unlock();
         return found;
