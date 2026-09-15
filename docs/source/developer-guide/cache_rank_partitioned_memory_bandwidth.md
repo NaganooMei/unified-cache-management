@@ -120,7 +120,7 @@ localSlot = globalSlot % slotsPerSegment
 
 ### 4.3 预取时序图
 
-```{mermaid}
+```mermaid
 sequenceDiagram
     autonumber
     participant E as 推理引擎
@@ -185,7 +185,7 @@ sequenceDiagram
 
 下图按职责简化接口。`RankDataSegment` 是概念上的共享数据段；每个进程通过 `DataStrategy` 保存自己的本地映射。NUMA 拓扑探测、控制区命令分发、预取和正式 Load 最终都汇聚到同一个 Buffer/Handle 状态机。
 
-```{mermaid}
+```mermaid
 classDiagram
     class UCMDirectConnector {
         -_configure_partitioned_store(config)
