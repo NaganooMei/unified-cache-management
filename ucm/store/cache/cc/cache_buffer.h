@@ -158,8 +158,8 @@ public:
             }
             ctrl_->Layout().InitSlotRange(myRank_);
             data_ = std::make_unique<DataStrategy>();
-            if (auto s =
-                    data_->Setup(ctrl_->Layout(), cfg.deviceId, myRank_, slotSize_, nSlotsPerRank_, cfg);
+            if (auto s = data_->Setup(ctrl_->Layout(), cfg.deviceId, myRank_, slotSize_,
+                                      nSlotsPerRank_, cfg);
                 s.Failure()) {
                 return s;
             }
@@ -442,8 +442,9 @@ private:
     {
         auto total = nSlotsPerRank_ - (allowReserved ? 0 : reserved_);
         if (total == 0) { return kInvalidIndex; }
-        auto cur = layout.Hdr()->clockHands[myRank_].fetch_add(1, std::memory_order_relaxed) % total +
-                   myRank_ * nSlotsPerRank_;
+        auto cur =
+            layout.Hdr()->clockHands[myRank_].fetch_add(1, std::memory_order_relaxed) % total +
+            myRank_ * nSlotsPerRank_;
         if (layout.SlotMetaArr()[cur].accessed.exchange(0, std::memory_order_relaxed)) {
             return kInvalidIndex;
         }

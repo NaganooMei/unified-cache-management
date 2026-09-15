@@ -72,7 +72,9 @@ struct Config {
     size_t localRankSize{8};
 
     size_t EffectiveStreamNumber() const noexcept
-    { return streamNumber.value_or(cacheSdmaDirect ? 1 : 4); }
+    {
+        return streamNumber.value_or(cacheSdmaDirect ? 1 : 4);
+    }
 };
 
 }  // namespace UC::CacheStore

@@ -55,13 +55,17 @@ public:
             return Status::InvalidParam("invalid cache prefetch backend or batch size");
         }
         batchSize_ = config.cachePrefetchBatchSize;
-        if (startWorker) { prefetchThread_ = std::thread([this] { PrefetchLoop(); }); }
+        if (startWorker) {
+            prefetchThread_ = std::thread([this] { PrefetchLoop(); });
+        }
         return Status::OK();
     }
 
     size_t PollOnce()
     {
-        if (!enabled_ || stop_.load(std::memory_order_relaxed) || buffer_->HasDemand()) { return 0; }
+        if (!enabled_ || stop_.load(std::memory_order_relaxed) || buffer_->HasDemand()) {
+            return 0;
+        }
         std::array<Detail::BlockId, 64> batch;
         auto n = buffer_->DrainPrefetch(buffer_->MyRank(), batch.data(), batchSize_);
         if (n != 0) { PrefetchBatch(batch.data(), n); }
@@ -108,7 +112,9 @@ private:
         }
         // Admission is best-effort. A batch already submitted below must be drained,
         // even if demand arrives or shutdown begins, before its Handles can be released.
-        if (task.empty() || buffer_->HasDemand() || stop_.load(std::memory_order_relaxed)) { return; }
+        if (task.empty() || buffer_->HasDemand() || stop_.load(std::memory_order_relaxed)) {
+            return;
+        }
         auto r = backend_->Load(std::move(task));
         auto ok = r.HasValue() && backend_->Wait(r.Value()).Success();
         for (auto& h : handles) {

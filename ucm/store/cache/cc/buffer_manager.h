@@ -56,7 +56,8 @@ public:
     {
         backend_ = config.storeBackend;
         loadBackendOnly_ = config.cacheLoadBackendOnly;
-        prefetchEnable_ = config.cachePrefetchEnable && config.shareBufferEnable && !loadBackendOnly_;
+        prefetchEnable_ =
+            config.cachePrefetchEnable && config.shareBufferEnable && !loadBackendOnly_;
         if (config.deviceId == -1 && (!config.shareBufferEnable || loadBackendOnly_)) {
             return Status::OK();
         }

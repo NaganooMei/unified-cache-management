@@ -21,7 +21,7 @@ Detail::BlockId Key(unsigned char value)
 
 class CachePrefetchTest : public testing::Test {
 protected:
-    testing::StrictMock<Test::Detail::MockStore> backend;
+    testing::StrictMock<UC::Test::Detail::MockStore> backend;
     Config config;
     void SetUp() override
     {
@@ -84,14 +84,14 @@ TEST_F(CachePrefetchTest, PrefetchLoadsOnlyFirstShardAndDeduplicates)
     ASSERT_TRUE(queue.Setup(config, &buffer, false).Success());
     Detail::BlockId keys[]{Key(1), Key(1)};
     buffer.EnqueuePrefetch(0, keys, 2);
-    EXPECT_CALL(backend, Load(_)).WillOnce(Invoke([&](Detail::TaskDesc task)
-                                                   -> Expected<Detail::TaskHandle> {
-        EXPECT_EQ(task.size(), 1u);
-        EXPECT_EQ(task[0].owner, keys[0]);
-        EXPECT_EQ(task[0].index, 0u);
-        *static_cast<unsigned char*>(task[0].addrs[0]) = 42;
-        return Detail::TaskHandle{1};
-    }));
+    EXPECT_CALL(backend, Load(_))
+        .WillOnce(Invoke([&](Detail::TaskDesc task) -> Expected<Detail::TaskHandle> {
+            EXPECT_EQ(task.size(), 1u);
+            EXPECT_EQ(task[0].owner, keys[0]);
+            EXPECT_EQ(task[0].index, 0u);
+            *static_cast<unsigned char*>(task[0].addrs[0]) = 42;
+            return Detail::TaskHandle{1};
+        }));
     EXPECT_CALL(backend, Wait(1)).WillOnce(Return(Status::OK()));
     EXPECT_EQ(queue.PollOnce(), 2u);
     auto hit = buffer.Get(keys[0], 0);
