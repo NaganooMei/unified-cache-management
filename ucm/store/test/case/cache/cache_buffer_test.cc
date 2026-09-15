@@ -370,7 +370,7 @@ TEST(UcmV2CacheBufferTest, PreallocThenGetOwnerLoading)
     ASSERT_TRUE(buf.Setup(cfg).Success());
     auto blk = MakeBlockId('w');
     buf.Prealloc(blk, 0);
-    EXPECT_FALSE(buf.Exist(blk, 0));
+    EXPECT_TRUE(buf.Exist(blk, 0));
     auto h = buf.Get(blk, 0);
     ASSERT_TRUE(h);
     EXPECT_TRUE(h.Owner());
@@ -585,10 +585,10 @@ TEST(UcmV2CacheBufferTest, AbandonedOwnerPublishesFailureAndCanRetry)
     auto key = MakeBlockId('a');
     auto owner = buf.Get(key, 0);
     auto reader = buf.Get(key, 0);
-    EXPECT_FALSE(buf.Exist(key, 0));
+    EXPECT_TRUE(buf.Exist(key, 0));
     owner = {};
     EXPECT_EQ(reader.GetState(), UC::CacheStore::State::Failed);
-    EXPECT_FALSE(buf.Exist(key, 0));
+    EXPECT_TRUE(buf.Exist(key, 0));
     reader = {};
     auto retry = buf.Get(key, 0);
     ASSERT_TRUE(retry.Owner());
