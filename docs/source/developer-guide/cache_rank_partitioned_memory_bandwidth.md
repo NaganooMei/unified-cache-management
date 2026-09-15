@@ -1,59 +1,65 @@
-# Cache 内存按 Rank 划分，突破单 DDR 控制器带宽瓶颈
+# Cache 内存按 Rank 划分，突破单 NUMA 节点带宽瓶颈
 
 ## 1. 背景
 
-多 rank 并发从 Host Cache 加载 KV 时，若物理页集中在同一 NUMA 节点，读流量将集中到该节点的内存控制器。内存带宽饱和后，继续增加 rank 或拷贝 stream 难以提升总吞吐，单层 Cache Load 时延随竞争加剧而上升。
+H2D KV Cache 传输时延是影响 UCM 性能的重要因素。我们先后探索了 A2 循环提交小 I/O PCIe 拷贝、A2 I/O 聚合和 A3 SDMA Direct。通过聚合小 I/O 并使用 SDMA，以 GLM-5.1 为例，单卡加载一层 KV Cache 的带宽已从约 4 GB/s 提升到约 30 GB/s。
 
-MLA 模型中，多个 TP rank 复用同一份 KV，容易形成集中读取。当加载耗时无法被层间计算掩盖时，推理需等待 KV 到位，增加首 token 时延（TTFT）。将 Cache 数据按 rank 分段，并结合 NUMA 绑定和均衡放置，可利用多个内存控制器并行供数，降低单层加载时延。
+但在实际业务中，多卡需要同时从一块共享内存读取同一份 KV Cache。早期版本的单机聚合带宽只有约 100 GB/s，平均单卡约 7 GB/s。继续增加拷贝 stream 不仅没有提升带宽，有时还会出现异常劣化，说明瓶颈已经从拷贝接口转移到 Host 内存侧。
+
+加入 `MAP_POPULATE` 后，多进程并发预取共享页面，使部分物理页无意中分散到不同 NUMA 节点，性能有所提升。但这种分布受进程调度和页面预取时序影响，随机且不均匀，导致带宽波动，也无法稳定达到预期的 350 GB/s 以上。结合内存控制器监控，我们确认多卡流量仍集中在少数 NUMA 节点，并触及单个 NUMA 节点约 100 GB/s 的带宽上限。
+
+因此，本方案将共享内存数据区分段，并把不同数据段均匀、精确且可验证地放置到不同 NUMA 节点，首先突破单个内存控制器的带宽瓶颈。在此基础上，再增加拷贝 stream，使多个 stream 并行读取不同 NUMA 节点上的数据，进一步发挥多 NUMA 聚合带宽和 SDMA 并行传输能力。
 
 ## 2. 实现
 
 ### 2.1 内存布局
 
-各 rank 共享控制区中的 block 索引、slot 状态和数据段状态。KV 数据按本机实际 rank 数划分，由各 rank 分别创建、初始化和注册。各进程通过统一索引访问数据，对外保持一个逻辑 Cache。
+对外仍然提供一个逻辑 Cache，内部由一个共享控制区和多个 rank 数据段组成。控制区不是独立的控制进程，而是所有参与进程共同映射的一块共享元数据区。它不存放 KV 数据，主要负责维护 Cache 的全局目录并协调多进程并发访问：将 `(blockId, shardIndex)` 映射到 `globalSlot`；维护每个 slot 的 `Loading / Ready / Failed` 状态、引用计数和访问标记，用于确定数据由谁填充、其他进程是等待还是复用，以及 slot 何时可以安全回收；同时记录各数据段的初始化状态，避免访问尚未就绪的数据段。控制区还保存 slot 大小、数据段数量和 NUMA 节点列表等布局信息，用于保证所有进程使用一致的 Cache 布局。
 
-以下为数据段分布在不同 NUMA 节点的示意，实际绑定关系由硬件拓扑确定：
+KV 数据则按本机参与共享的 rank 数切分到多个独立数据段。简单来说，控制区回答“数据在哪里、现在能不能用、谁正在使用”，数据区才真正保存 KV payload。
+
+每个 rank 负责创建、初始化并注册对应的数据段，再将就绪状态发布到共享控制区。数据段根据配置和硬件拓扑放置到指定 NUMA 节点或节点组；rank、数据段与 NUMA 节点不要求一一对应。
 
 ~~~text
 逻辑 Cache
-  ├─ 共享控制区
-  ├─ Rank 0 数据段 -> NUMA/DDR 0
-  ├─ Rank 1 数据段 -> NUMA/DDR 1
-  ├─ Rank 2 数据段 -> NUMA/DDR 2
-  └─ Rank N 数据段 -> NUMA/DDR N
+  ├─ 共享控制区：全局索引、slot 生命周期和多进程并发协调
+  ├─ Rank 0 数据段：KV payload -> 指定 NUMA 节点或节点组
+  ├─ Rank 1 数据段：KV payload -> 指定 NUMA 节点或节点组
+  ├─ Rank 2 数据段：KV payload -> 指定 NUMA 节点或节点组
+  └─ Rank N 数据段：KV payload -> 指定 NUMA 节点或节点组
 ~~~
 
-Cache 容量按共享域总量配置，按实际 rank 数划分完整 slot，对齐余量不计入可用容量。
-
-全局 slot 编号可稳定解析为数据段和段内位置：
+全局 slot 编号覆盖所有数据段，并可稳定解析为实际数据段和段内位置：
 
 ~~~text
-segment = globalSlot / slotsPerRank
-localSlot = globalSlot % slotsPerRank
+segment = globalSlot / slotsPerSegment
+localSlot = globalSlot % slotsPerSegment
 ~~~
 
-控制区以 `(blockId, shardIndex)` 为键保存全局 slot 编号。各 worker 在启动阶段完成数据段映射和设备注册，访问时将 slot 编号解析为进程本地地址。
+共享控制区以 `(blockId, shardIndex)` 为键保存 `globalSlot`，不保存进程相关的虚拟地址。各 worker 在启动阶段映射并注册所有数据段；访问 KV 数据时，再将 `globalSlot` 解析为当前进程中的 Host 地址或 Device 可访问地址。因此，各进程可以使用不同的虚拟地址访问同一个物理数据段，同时对外保持统一的 Cache 索引和状态。
 
 ### 2.2 NUMA 绑定
 
-各 rank 在目标 NUMA 节点的 CPU 亲和性下初始化数据段，利用 first-touch 机制分配物理页。部署时需核对 rank、CPU、内存与设备的亲和关系，确保数据页分布覆盖多个内存控制器。
+每个 rank 创建自己的数据段后，根据 `share_buffer_numa_nodes` 和数据段数量，确定该数据段对应的 NUMA 节点或节点组。程序在首次写入前通过 `mbind` 为不同地址范围设置 NUMA 内存策略，再通过 `memset` 触发物理页分配。初始化完成后，使用 `move_pages` 查询并验证物理页的实际位置；只有页面全部位于预期 NUMA 节点，才将该数据段标记为就绪，供其他 rank 映射和访问。
 
 ### 2.3 KV 放置策略
 
 - MLA：由 worker 0 执行 Dump 时，按任务中分片的原始位置 `originalIndex % segmentCount` 选择优先数据段。同一层不同 block 的 KV 分散存放，避免全部写入 rank 0。
-- GQA：KV 与 rank 相关，默认优先放在产生该 KV 的本地 rank 数据段。
 - 已缓存的 `(blockId, shardIndex)` 使用当前实际位置，不因后续请求来自不同 rank 而迁移。
-- 目标数据段暂时没有空闲 slot 时，可以按规则回退到其他数据段，但必须记录实际位置。
-
-数据段的生命周期由所属 rank 管理，数据放置由分配策略决定，支持跨 rank 写入与读取。
 
 ### 2.4 并行加载
 
-各 rank 根据自身编号错开任务处理顺序，并从 Handle 返回的实际数据段读取。重排只改变加载顺序，不改变数据位置。MLA 的各 rank 最终均加载所需的完整 KV。
+`LoadQueue` 在处理任务前调用 `RearrangeIndex`，根据当前 rank 对任务中的分片顺序进行重排。对于 `segmentCount` 个数据段，rank 0 优先处理序号为 `0, segmentCount, 2 * segmentCount...` 的分片，rank 1 优先处理序号为 `1, segmentCount + 1...` 的分片，以此类推。
 
-例如，同一层 block A、B 分别位于数据段 0、1：rank 0 先读取 A，rank 1 先读取 B，再交换读取其余 block。结合异步传输与多 stream，可使多个内存控制器同时供数。这里的分片序号是任务内位置，不是层号。
+在数据按照 `originalIndex % segmentCount` 分布的情况下，这种重排使不同 rank 从不同数据段开始加载，从而错开对 NUMA 节点的访问。例如，同一任务中的分片 A、B 分别位于数据段 0、1，rank 0 先读取 A，rank 1 先读取 B，再继续读取其余分片。结合异步传输与多 stream，可以使多个 NUMA 节点同时供数。
 
-### 2.5 类图
+### 2.5 分段 CLOCK 淘汰
+
+Cache 分块后，每个数据段维护独立的 CLOCK 指针，淘汰操作不再从整个 Cache 的所有 slot 中统一选择。分配新 slot 时，优先在指定数据段内扫描：近期访问过的 slot 获得一次保留机会，仍被 Handle 引用的 slot 不允许淘汰。
+
+如果目标数据段经过两轮扫描仍找不到可回收 slot，则按数据段顺序继续扫描其他已就绪的数据段。最终分配位置以 `globalSlot` 记录。因此，该策略优先在目标 NUMA 数据段内完成淘汰和复用，同时在局部容量不足时允许跨数据段回退，避免单个数据段耗尽导致 Cache 分配失败。
+
+### 2.6 类图
 
 类图表示需求设计中的职责关系，接口按职责简化。PlacementPolicy 表示放置策略，RankDataSegment 表示共享数据段；各进程分别维护数据段的本地映射。
 
@@ -64,13 +70,14 @@ classDiagram
         +Get(key, preferredSegment)
     }
     class CtrlStrategy {
-        <<共享控制区生命周期>>
-        +CreateOrJoin()
+        <<创建或连接共享控制区>>
+        +Setup(config)
     }
     class CtrlLayout {
-        <<全局索引与状态>>
-        +BlockShardIndex
-        +SlotMeta
+        <<共享控制区内存布局>>
+        +Hdr()
+        +Buckets()
+        +SlotMetaArr()
     }
     class PlacementPolicy {
         <<新 slot 放置策略>>
@@ -116,56 +123,30 @@ classDiagram
     Handle --> Buffer : 析构时释放引用
 ~~~
 
-### 2.6 时序图
+### 2.7 错峰加载示例
 
-以同一层的两个 block、两个 rank 为例。各数据段已完成 NUMA 初始化、映射和注册。
+以下以 4 个 rank、4 个数据段和 16 个分片为例，展示分片放置与 `RearrangeIndex` 重排后的加载顺序。图中的阶段表示各 rank 的逻辑处理顺序，不表示 rank 之间存在同步屏障。
 
-~~~mermaid
-sequenceDiagram
-    autonumber
-    participant W0 as Worker 0 DumpQueue
-    participant C as Buffer（共享索引）
-    participant S0 as Rank 0 数据段
-    participant S1 as Rank 1 数据段
-    participant R0 as Rank 0 LoadQueue
-    participant R1 as Rank 1 LoadQueue
-
-    Note over W0,S1: 同一层 A、B 首次写入，分别优先选择段 0、1
-    W0->>C: Get(A, layer L, preferred 0)
-    C-->>W0: owner Handle，实际段 0
-    W0->>S0: 从设备 D2H 写入 A 的第 L 层 KV
-    W0->>C: Get(B, layer L, preferred 1)
-    C-->>W0: owner Handle，实际段 1
-    W0->>S1: 从设备 D2H 写入 B 的第 L 层 KV
-    W0->>W0: 等待 D2H 完成
-    W0->>C: 发布 A、B 的 slot 为 Ready
-
-    Note over C,R1: Load 同一层，两个 rank 均需要 A 和 B
-    R0->>C: Get(A, L) 与 Get(B, L)
-    C-->>R0: 返回实际段 0、1 的 Handle
-    R1->>C: Get(B, L) 与 Get(A, L)
-    C-->>R1: 返回实际段 1、0 的 Handle
-
-    par Rank 0 先读取 A
-        R0->>S0: 提交 A 到 device 0 的 H2D
-    and Rank 1 先读取 B
-        R1->>S1: 提交 B 到 device 1 的 H2D
-    end
-    par Rank 0 继续读取 B
-        R0->>S1: 提交 B 到 device 0 的 H2D
-    and Rank 1 继续读取 A
-        R1->>S0: 提交 A 到 device 1 的 H2D
-    end
-    Note over R0,R1: 各自等待传输完成后释放 Handle；两个设备均持有本层完整 KV
-~~~
+![Rank 分段存放与错峰加载](../_static/images/cache_rank_partitioned_staggered_load.svg)
 
 ## 3. 测试方法
 
-使用多 NUMA 节点服务器部署 MLA 模型，构造较长缓存前缀、较少未命中 token 的请求，使 KV 加载量较大、剩余计算较少，Cache 加载耗时无法被计算掩盖。测试数据预置于 Host Cache，确保请求实际走 Host Cache 到设备的加载路径。
+### 3.1 历史自测数据
 
-固定模型、输入、总 Cache 容量、rank 数、并发及 stream 数，完成预热后，对比内存分段前后的两个指标：
+历史自测使用 GLM-5.1、64K 输入、并发 1 和 100% 命中，TTFT 如下。该数据用于记录自测用例和历史量级，不作为本方案的验收结果。
 
-- TTFT：观察首 token 时延变化。
-- `ucm:cache_load_duration_ms`：在按层提交 Load 的条件下，观察单层 Cache Load 耗时变化。
+| 版本 | HBM PC 命中 | Cache 命中 | Posix 命中 |
+|---|---:|---:|---:|
+| 历史优化前 | 591.44 ms | 1045.37 ms | 1369.95 ms |
+| 历史优化后 | 583.94 ms | 943.27 ms | 1540.56 ms |
 
-重复执行相同负载，比较两项指标的均值及 P99。预期分段后单层 Cache Load 耗时下降，并在上述场景下体现为 TTFT 降低。
+### 3.2 验收方法
+
+建议在 A3 多 NUMA 服务器上部署 MLA 模型，使用 64K、并发 1、100% 命中的用例，并控制输出长度。较长的缓存前缀带来足够大的 KV 加载量，低并发和短输出减少额外计算，使逐层 Cache Load 无法被完全掩盖。
+
+分别测试 HBM PC 命中、Cache 命中和 Posix 命中。Cache 命中时预先将数据加载到 Host Cache，并确认没有回源 Posix；Posix 命中时确保 Host Cache 未命中、数据从 Posix 回填。固定模型、输入、并行配置、Cache 容量和 stream 数，完成预热后重复执行相同请求，观察：
+
+- TTFT：比较三种命中路径的端到端首 token 时延。
+- `ucm:cache_load_duration_ms`：比较 Cache 命中和 Posix 命中时的单层 Cache Load 耗时。
+
+与单块共享内存版本相比，预期 Cache 命中的 `ucm:cache_load_duration_ms` 降低 20% 以上，并体现为 TTFT 下降；Posix 命中的 TTFT 和 `ucm:cache_load_duration_ms` 不出现稳定劣化。
