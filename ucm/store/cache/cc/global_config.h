@@ -56,8 +56,10 @@ struct Config {
     size_t bufferCapacity{256ULL << 30};
     size_t loadExclusiveBufferNumber{1024};
     bool shareBufferEnable{true};
-    bool shareBufferRankStriped{false};
-    // Empty detects allowed online memory nodes; ignored for ordinary shared buffers.
+    // Connector-derived physical segment count. Unset clients use localRankSize.
+    // This is separate because GQA can use rank-local placement in a shared domain.
+    std::optional<size_t> shareBufferSegmentCount{};
+    // Empty detects allowed online memory nodes; ignored for process-local buffers.
     std::vector<size_t> shareBufferNumaNodes{};
     // Rank within the shared-buffer group, independent of the device ordinal.
     std::optional<size_t> shareBufferRank{};
@@ -72,7 +74,7 @@ struct Config {
     bool useGdr{false};
     bool cacheIOAggregation{false};
     bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
-    size_t localRankSize{8};
+    size_t localRankSize{1};
 
     size_t EffectiveStreamNumber() const noexcept
     {
@@ -81,6 +83,10 @@ struct Config {
     size_t EffectiveBufferRank() const noexcept
     {
         return shareBufferRank.value_or(static_cast<size_t>(physicalDeviceId));
+    }
+    size_t EffectiveBufferSegmentCount() const noexcept
+    {
+        return shareBufferSegmentCount.value_or(localRankSize);
     }
 };
 

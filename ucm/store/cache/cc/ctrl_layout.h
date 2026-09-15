@@ -143,7 +143,7 @@ public:
     }
 
     /* Initializes everything except slot metadata (see InitSlotRange). */
-    void InitHeader(size_t slotSize, bool rankStriped, const std::vector<size_t>& numaNodes)
+    void InitHeader(size_t slotSize, const std::vector<size_t>& numaNodes)
     {
         auto h = Hdr();
         h->magic.store(0, std::memory_order_relaxed);
@@ -151,7 +151,6 @@ public:
         h->nSlotsPerRank = nSlotsPerRank_;
         h->slotSize = slotSize;
         h->nBuckets = nBuckets_;
-        h->rankStriped = rankStriped ? 1 : 0;
         h->numaNodeCount = numaNodes.size();
         for (size_t i = 0; i < numaNodes.size(); ++i) { h->numaNodes[i] = numaNodes[i]; }
         for (size_t i = 0; i < maxRanks_; i++) {

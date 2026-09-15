@@ -1,7 +1,6 @@
-"""Run rank-striped topology configuration without importing vLLM or torch."""
+"""Run partitioned Buffer topology configuration without importing vLLM or torch."""
 
 import ast
-import copy
 import types
 import unittest
 from pathlib import Path
@@ -13,8 +12,7 @@ tree = ast.parse(SOURCE.read_text(encoding="utf-8-sig"))
 method = next(
     node
     for node in ast.walk(tree)
-    if isinstance(node, ast.FunctionDef)
-    and node.name == "_configure_rank_striped_store"
+    if isinstance(node, ast.FunctionDef) and node.name == "_configure_partitioned_store"
 )
 namespace = {"Any": object, "KVConnectorRole": ROLE}
 exec(
@@ -23,7 +21,7 @@ exec(
 configure = namespace[method.name]
 
 
-class RankStripedTopologyTest(unittest.TestCase):
+class PartitionedBufferTopologyTest(unittest.TestCase):
     def worker(self, dp=0, rank=0, pp=1):
         parallel = types.SimpleNamespace(
             tensor_parallel_size=8,
@@ -40,7 +38,6 @@ class RankStripedTopologyTest(unittest.TestCase):
 
     def config(self):
         return dict(
-            share_buffer_rank_striped=True,
             share_buffer_enable=True,
             unique_id="instance",
             device_id=15,
@@ -65,7 +62,7 @@ class RankStripedTopologyTest(unittest.TestCase):
         self.assertEqual(first["unique_id"], "instance")
         self.assertEqual(second["unique_id"], first["unique_id"])
         self.assertEqual(second["share_buffer_rank"], 7)
-        self.assertEqual(second["local_rank_size"], 8)
+        self.assertEqual(second["share_buffer_segment_count"], 8)
         self.assertEqual(second["device_id"], 15)
 
     def test_cross_node_fails_before_store_creation(self):
@@ -96,28 +93,46 @@ class RankStripedTopologyTest(unittest.TestCase):
         config = self.config()
         configure(scheduler, config)
         self.assertEqual(config["unique_id"], "instance")
-        self.assertEqual(config["local_rank_size"], 8)
+        self.assertEqual(config["share_buffer_segment_count"], 8)
         self.assertNotIn("share_buffer_rank", config)
 
     def test_pipeline_groups_do_not_share_metadata(self):
         worker = self.worker(rank=8, pp=2)
-        worker._rank_striped_topology = (0, 8)
+        worker._partitioned_buffer_topology = (0, 8)
         config = self.config()
         configure(worker, config)
         self.assertEqual(config["unique_id"], "instance_pp1")
 
-    def test_disabled_leaves_config_unchanged(self):
+    def test_mla_forces_partitioned_shared_buffer(self):
         config = self.config()
+        config["share_buffer_enable"] = False
         config["share_buffer_rank_striped"] = False
-        before = copy.deepcopy(config)
-        configure(self.worker(), config)
-        self.assertEqual(config, before)
+        worker = self.worker()
+        worker._partitioned_buffer_topology = (3, 8)
+        configure(worker, config)
+        self.assertTrue(config["share_buffer_enable"])
+        self.assertEqual(config["share_buffer_segment_count"], 8)
+        self.assertEqual(config["share_buffer_rank"], 3)
+        self.assertNotIn("share_buffer_rank_striped", config)
 
-    def test_non_mla_fails_explicitly(self):
+    def test_gqa_uses_process_local_buffer_by_default(self):
         worker = self.worker()
         worker.is_mla = False
-        with self.assertRaisesRegex(ValueError, "requires MLA"):
-            configure(worker, self.config())
+        config = {"unique_id": "instance"}
+        configure(worker, config)
+        self.assertFalse(config["share_buffer_enable"])
+        self.assertNotIn("share_buffer_rank", config)
+
+    def test_gqa_shared_buffer_is_also_partitioned(self):
+        worker = self.worker()
+        worker.is_mla = False
+        worker._partitioned_buffer_topology = (5, 8)
+        config = self.config()
+        configure(worker, config)
+        self.assertTrue(config["share_buffer_enable"])
+        self.assertEqual(config["share_buffer_segment_count"], 8)
+        self.assertEqual(config["share_buffer_rank"], 5)
+        self.assertEqual(config["local_rank_size"], 1)
 
 
 if __name__ == "__main__":

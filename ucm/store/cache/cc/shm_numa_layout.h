@@ -125,7 +125,7 @@ inline std::vector<size_t> SegmentNodes(const std::vector<size_t>& nodes, size_t
     if (nodes.empty()) { return {}; }
     ValidateNodes(nodes);
     if (segments == 0 || segment >= segments) {
-        throw std::invalid_argument("invalid rank-striped segment count or index");
+        throw std::invalid_argument("invalid shared buffer segment count or index");
     }
     const auto groups = std::gcd(segments, nodes.size());
     const auto perGroup = nodes.size() / groups;

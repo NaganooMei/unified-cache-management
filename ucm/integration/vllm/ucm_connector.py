@@ -5,7 +5,6 @@ import math
 import os
 import pickle
 import re
-import shutil
 import time
 import uuid
 from collections import defaultdict
@@ -143,35 +142,6 @@ def _get_store_gc_block_size(
     if object_size <= 0:
         raise ValueError("tensor_size_list is required for YuanRong|Posix")
     return object_size * shard_count
-
-
-_SHM_DIR = "/dev/shm"
-
-
-def _check_shm_capacity(cache_buffer_capacity_gb: int) -> None:
-    """Early-validate that /dev/shm can hold the shared-buffer store.
-
-    With ``share_buffer_enable=True`` the cache buffer is backed by ``shm_open``
-    in ``/dev/shm`` (a tmpfs with a fixed size limit). If the configured buffer
-    capacity exceeds what ``/dev/shm`` can hold, allocation fails deep inside
-    the C++ store; raise here instead with an actionable message.
-    """
-    if cache_buffer_capacity_gb <= 0:
-        return
-    try:
-        shm_total = shutil.disk_usage(_SHM_DIR).total
-    except OSError:
-        # /dev/shm unavailable (e.g. non-Linux dev host); defer to the store.
-        logger.debug("Skip /dev/shm capacity check: %s unavailable.", _SHM_DIR)
-        return
-    needed_bytes = cache_buffer_capacity_gb * (1 << 30)
-    if shm_total < needed_bytes:
-        raise RuntimeError(
-            f"Shared-buffer cache requires {cache_buffer_capacity_gb}GB in {_SHM_DIR}, "
-            f"but {_SHM_DIR} has only {shm_total >> 30}GB. "
-            f"Either increase the size of {_SHM_DIR} (e.g. remount tmpfs with a "
-            f"larger size= option) or decrease cache_buffer_capacity_gb."
-        )
 
 
 def _drop_null_vllm_blocks(
@@ -1179,11 +1149,14 @@ class UCMDirectConnector(KVConnectorBase_V1):
         self.launch_config = ucm_config.get_config()
         self.connector_configs = self.launch_config.get("ucm_connectors", [])
         assert len(self.connector_configs) > 0, "no storage connector name in config."
-        share_buffer_enable = (
+        configured_share_buffer = (
             self.connector_configs[0]
             .get("ucm_connector_config", {})
             .get("share_buffer_enable", self.is_mla)
         )
+        # MLA ranks always share one partitioned host-cache domain. An explicit
+        # false from an older config must not select the retired shared-buffer path.
+        share_buffer_enable = self.is_mla or bool(configured_share_buffer)
         if share_buffer_enable:
             if role == KVConnectorRole.WORKER:
                 self.unique_id = _worker_generate_unique_id()
@@ -1310,17 +1283,17 @@ class UCMDirectConnector(KVConnectorBase_V1):
             logger.info(
                 "Set cache_buffer_capacity_gb to 128GB for shared-buffer store."
             )
-        # The shared buffer is allocated via shm_open in /dev/shm; fail early
-        # (before store creation) if the tmpfs cannot hold it.
-        _check_shm_capacity(int(config["cache_buffer_capacity_gb"]))
 
-    def _configure_rank_striped_store(self, config: dict[str, Any]) -> None:
-        if not config.get("share_buffer_rank_striped", False):
+    def _configure_partitioned_store(self, config: dict[str, Any]) -> None:
+        # Rank partitioning is an implementation detail of every shared Buffer,
+        # not a user-selectable mode. MLA always uses the shared Buffer; GQA keeps
+        # its existing default of a process-local Buffer unless sharing is enabled.
+        config.pop("share_buffer_rank_striped", None)
+        config.setdefault("share_buffer_enable", self.is_mla)
+        if self.is_mla:
+            config["share_buffer_enable"] = True
+        if not config.get("share_buffer_enable", False):
             return
-        if not self.is_mla or not config.get("share_buffer_enable", False):
-            raise ValueError(
-                "rank-striped SHM requires MLA and share_buffer_enable=true"
-            )
         parallel = self._vllm_config.parallel_config
         pp_rank = (
             parallel.rank // parallel.tensor_parallel_size
@@ -1329,10 +1302,11 @@ class UCMDirectConnector(KVConnectorBase_V1):
             config["unique_id"] += f"_pp{pp_rank}"
         # The control-plane process may create the shared layout before workers, so it
         # must use the same segment count even though it does not own a data segment.
-        config["local_rank_size"] = self.tp_size
+        config["share_buffer_segment_count"] = self.tp_size
+        config["local_rank_size"] = self.tp_size if self.is_mla else 1
         if self._role != KVConnectorRole.WORKER:
             return
-        topology = getattr(self, "_rank_striped_topology", None)
+        topology = getattr(self, "_partitioned_buffer_topology", None)
         if topology is None:
             from vllm.distributed.parallel_state import (
                 get_tp_group,
@@ -1343,19 +1317,19 @@ class UCMDirectConnector(KVConnectorBase_V1):
             same_node = in_the_same_node_as(tp_group.cpu_group, source_rank=0)
             if len(same_node) != self.tp_size or not all(same_node):
                 raise ValueError(
-                    "rank-striped SHM requires the entire TP group to share one "
-                    f"host /dev/shm (TP={self.tp_size}, same-node ranks={same_node}); "
-                    "cross-node TP is unsupported. Set share_buffer_rank_striped=false."
+                    "partitioned shared Buffer requires the entire TP group to share "
+                    f"one host (TP={self.tp_size}, same-node ranks={same_node}); "
+                    "cross-node TP is unsupported."
                 )
             topology = (tp_group.rank_in_group, tp_group.world_size)
-            self._rank_striped_topology = topology
+            self._partitioned_buffer_topology = topology
         if topology[1] != self.tp_size:
             raise ValueError(
-                f"rank-striped SHM TP group size {topology[1]} does not match "
+                f"partitioned shared Buffer TP group size {topology[1]} does not match "
                 f"configured TP size {self.tp_size}"
             )
         config["share_buffer_rank"] = topology[0]
-        config["local_rank_size"] = topology[1]
+        config["share_buffer_segment_count"] = topology[1]
 
     def _create_store(
         self,
@@ -1373,12 +1347,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
         module_path = self.connector_configs[0].get("ucm_connector_module_path", None)
         config = copy.deepcopy(self.connector_configs[0]["ucm_connector_config"])
         config.setdefault("share_buffer_enable", self.is_mla)
-        self._set_default_shm_buffer_capacity(config)
         if "storage_backends" in config:
             backends = [path for path in config["storage_backends"].split(":")]
             config["storage_backends"] = backends
         config["unique_id"] = f"{self.unique_id}"
-        self._configure_rank_striped_store(config)
+        self._configure_partitioned_store(config)
+        self._set_default_shm_buffer_capacity(config)
         if self._role == KVConnectorRole.WORKER:
             config["device_id"] = self.device_id
             tensor_size_list = kv_cache_layout.tensor_size_list * self.blocks_per_chunk

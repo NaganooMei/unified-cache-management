@@ -120,10 +120,10 @@ TEST_F(UCCacheBufferManagerTest, BackendOnlyLookupBypassesCache)
 
     auto block = UC::Test::Detail::TypesHelper::MakeBlockIdRandomly();
     {
-        auto handle = bufferMgr.GetTransBuffer()->Get(block, 0);
+        auto handle = bufferMgr.GetBuffer()->Get(block, 0);
         ASSERT_TRUE(handle);
         handle.MarkReady();
-        ASSERT_TRUE(bufferMgr.GetTransBuffer()->Exist(block, 0));
+        ASSERT_TRUE(bufferMgr.GetBuffer()->Exist(block, 0));
     }
 
     EXPECT_CALL(backend, Lookup).WillOnce(testing::Invoke(AllMiss));

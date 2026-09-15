@@ -110,7 +110,7 @@ private:
     size_t reserved_{0};
     size_t timeoutMs_{30000};
     size_t maxRanks_{0};
-    bool rankStriped_{false};
+    bool shared_{false};
     bool ownsRankData_{false};
 
     /* Optimistic pin attempts before falling back to the bucket-lock path. */
@@ -122,7 +122,7 @@ public:
     Buffer& operator=(const Buffer&) = delete;
     ~Buffer()
     {
-        if (data_ && ownsRankData_ && !rankStriped_ && myRank_ != kInvalidIndex) {
+        if (data_ && ownsRankData_ && !shared_ && myRank_ != kInvalidIndex) {
             ctrl_->Layout().Hdr()->rankDescs[myRank_].ready.store(3, std::memory_order_release);
         }
     }
@@ -137,14 +137,14 @@ public:
         nSlotsPerRank_ = header->nSlotsPerRank;
         nBuckets_ = header->nBuckets;
         maxRanks_ = header->maxRanks;
-        rankStriped_ = header->rankStriped != 0;
-        if (rankStriped_ && cfg.loadExclusiveBufferNumber % maxRanks_ != 0) {
+        shared_ = cfg.shareBufferEnable;
+        if (shared_ && cfg.loadExclusiveBufferNumber % maxRanks_ != 0) {
             return Status::InvalidParam(
                 "loadExclusiveBufferNumber({}) must be divisible by segment count({})",
                 cfg.loadExclusiveBufferNumber, maxRanks_);
         }
-        reserved_ = rankStriped_ ? cfg.loadExclusiveBufferNumber / maxRanks_
-                                 : cfg.loadExclusiveBufferNumber;
+        reserved_ = shared_ ? cfg.loadExclusiveBufferNumber / maxRanks_
+                            : cfg.loadExclusiveBufferNumber;
         if (nSlotsPerRank_ == 0 || nBuckets_ == 0) {
             return Status::InvalidParam("ctrl header has zero slots per rank or buckets");
         }
@@ -161,19 +161,18 @@ public:
                     "rank({})",
                     reserved_, nSlotsPerRank_);
             }
-            myRank_ = rankStriped_ ? cfg.EffectiveBufferRank()
-                                   : static_cast<size_t>(cfg.physicalDeviceId);
+            myRank_ = shared_ ? cfg.EffectiveBufferRank() : 0;
             if (myRank_ >= maxRanks_) {
                 return Status::InvalidParam("cache rank({}) must be in [0, {})", myRank_,
                                             maxRanks_);
             }
             // 0 = unused, 2 = initializing, 1 = ready, 3 = stopped/failed.
-            // Rank-striped mode permits multiple DP participants to attach to the same
-            // logical segment; exactly one of them creates and publishes its data.
+            // A shared domain permits multiple DP participants to attach to the same
+            // logical rank segment; exactly one creates and publishes its data.
             auto& ready = ctrl_->Layout().Hdr()->rankDescs[myRank_].ready;
             uint8_t expected = 0;
             ownsRankData_ = ready.compare_exchange_strong(expected, 2, std::memory_order_acq_rel);
-            if (!ownsRankData_ && !rankStriped_) { return Status::DuplicateKey(); }
+            if (!ownsRankData_ && !shared_) { return Status::DuplicateKey(); }
             if (!ownsRankData_ && expected == 3) {
                 return Status::Error("cache rank segment is unavailable");
             }
@@ -193,7 +192,7 @@ public:
                     return publish;
                 }
             }
-            if (rankStriped_) {
+            if (shared_) {
                 s = data_->MapAllSegments(timeoutMs_);
                 if (s.Failure()) { return s; }
             }
@@ -238,7 +237,7 @@ public:
         auto attempts = nSlotsPerRank_ > std::numeric_limits<size_t>::max() / 2
                             ? std::numeric_limits<size_t>::max()
                             : 2 * nSlotsPerRank_;
-        if (rankStriped_ && attempts <= std::numeric_limits<size_t>::max() / maxRanks_) {
+        if (shared_ && attempts <= std::numeric_limits<size_t>::max() / maxRanks_) {
             attempts *= maxRanks_;
         }
         do {
@@ -470,7 +469,7 @@ private:
         auto total = nSlotsPerRank_ - (allowReserved ? 0 : reserved_);
         if (total == 0) { return kInvalidIndex; }
         size_t segment = myRank_;
-        if (rankStriped_) {
+        if (shared_) {
             const auto first = preferredSegment < maxRanks_ ? preferredSegment : myRank_;
             const auto window = total > std::numeric_limits<size_t>::max() / 2 ? total : 2 * total;
             const auto fallback = window == 0 ? 0 : attempt / window;

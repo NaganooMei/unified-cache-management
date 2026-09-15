@@ -27,7 +27,6 @@
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "time/stopwatch.h"
-// #include "trans_buffer.h"
 #include "cache_buffer.h"
 #include "ucmstore_v1.h"
 
@@ -65,7 +64,7 @@ public:
         }
         return buffer_->Setup(config);
     }
-    Buffer* GetTransBuffer() { return buffer_ ? buffer_.get() : nullptr; }
+    Buffer* GetBuffer() { return buffer_ ? buffer_.get() : nullptr; }
     Expected<std::vector<uint8_t>> Lookup(const Detail::BlockId* blocks, size_t num)
     {
         if (!buffer_ || loadBackendOnly_) { return LookupThrough<&StoreV1::Lookup>(blocks, num); }

@@ -83,13 +83,12 @@ private:
         if (slotSize == 0 || cfg.bufferCapacity < slotSize) {
             return Status::InvalidParam("ctrl creator requires valid shardSize and capacity");
         }
-        const auto maxRanks = cfg.shareBufferRankStriped ? cfg.localRankSize : kMaxRanks;
+        const auto maxRanks = cfg.shareBufferEnable ? cfg.EffectiveBufferSegmentCount() : 1;
         if (maxRanks == 0 || maxRanks > kMaxRanks) {
             return Status::InvalidParam("invalid cache segment count({})", maxRanks);
         }
         const auto totalConfiguredSlots = cfg.bufferCapacity / slotSize;
-        const auto m =
-            cfg.shareBufferRankStriped ? totalConfiguredSlots / maxRanks : totalConfiguredSlots;
+        const auto m = totalConfiguredSlots / maxRanks;
         if (m == 0 || m > std::numeric_limits<size_t>::max() / maxRanks) {
             return Status::InvalidParam("cache control layout too large");
         }
@@ -108,7 +107,7 @@ private:
         if (s.Failure()) { return s; }
         ctrlFd_ = ctrlMem_.Fd();
         layout_.Bind(ctrlMem_.Addr(), maxRanks, m, nBuckets);
-        layout_.InitHeader(slotSize, cfg.shareBufferRankStriped, cfg.shareBufferNumaNodes);
+        layout_.InitHeader(slotSize, cfg.shareBufferNumaNodes);
         layout_.SetMagic();
         if (cfg.shareBufferEnable) {
             acceptThread_ = std::thread([this] { AcceptLoop(); });
@@ -146,17 +145,13 @@ private:
             header->numaNodeCount > kMaxRanks) {
             return Status::InvalidParam("ctrl header invalid");
         }
-        const auto rankStriped = header->rankStriped != 0;
-        if (rankStriped != cfg.shareBufferRankStriped ||
-            maxRanks != (rankStriped ? cfg.localRankSize : kMaxRanks)) {
+        if (maxRanks != cfg.EffectiveBufferSegmentCount()) {
             return Status::InvalidParam("cache participants disagree on rank layout");
         }
-        if (rankStriped) {
-            if (header->numaNodeCount != cfg.shareBufferNumaNodes.size() ||
-                !std::equal(cfg.shareBufferNumaNodes.begin(), cfg.shareBufferNumaNodes.end(),
-                            header->numaNodes)) {
-                return Status::InvalidParam("cache participants disagree on NUMA node layout");
-            }
+        if (header->numaNodeCount != cfg.shareBufferNumaNodes.size() ||
+            !std::equal(cfg.shareBufferNumaNodes.begin(), cfg.shareBufferNumaNodes.end(),
+                        header->numaNodes)) {
+            return Status::InvalidParam("cache participants disagree on NUMA node layout");
         }
         if (cfg.shardSize != 0) {
             if (cfg.alignSize == 0 || (cfg.alignSize & (cfg.alignSize - 1)) != 0 ||

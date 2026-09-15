@@ -259,6 +259,10 @@ class ConfigParser:
             **uc_config,
             "device_id": device_id,
             "share_buffer_enable": share_buffer_enable,
+            "local_rank_size": parallel_config["tp_size"] if share_buffer_enable else 1,
+            "share_buffer_segment_count": (
+                parallel_config["tp_size"] if share_buffer_enable else 1
+            ),
             "unique_id": get_dual_consensus_uids(),
             "tensor_size_list": tensor_sizes,
             "shard_size": shard_size,

@@ -47,11 +47,11 @@ Status LoadQueue::Setup(const Config& config, TaskIdSet* failureSet, Buffer* buf
     useGdr_ = config.useGdr;
     cacheIOAggregation_ = config.cacheIOAggregation;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
-    rankStriped_ = config.shareBufferRankStriped;
+    shared_ = config.shareBufferEnable;
     cpuAffinityCores_ = config.cpuAffinityCores;
-    localRankSize_ = config.localRankSize;
-    bufferRank_ =
-        rankStriped_ ? config.EffectiveBufferRank() : static_cast<size_t>(config.deviceId);
+    segmentCount_ = buffer_->NumRanks();
+    bufferRank_ = shared_ ? config.EffectiveBufferRank() : 0;
+    stripeAcrossSegments_ = shared_ && config.localRankSize > 1;
     waiting_.Setup(config.waitingQueueDepth);
     running_.Setup(config.runningQueueDepth);
     holder_.reserve(1024);
@@ -115,7 +115,8 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
     const auto nShard = task->desc.size();
     size_t backendSubmitCount = 0;
     size_t waitShardCount = 0;
-    const auto indexes = RearrangeIndex(nShard, bufferRank_, localRankSize_);
+    const auto indexes = RearrangeIndex(nShard, bufferRank_,
+                                        stripeAcrossSegments_ ? segmentCount_ : 1);
     struct PreallocHint {
         Detail::BlockId block;
         size_t shard;
@@ -127,7 +128,9 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
         const auto originalIndex = indexes[i];
         auto& shard = task->desc[originalIndex];
         ShardTask shardTask;
-        const auto preferredSegment = rankStriped_ ? originalIndex % localRankSize_ : kInvalidIndex;
+        const auto preferredSegment =
+            shared_ ? (stripeAcrossSegments_ ? originalIndex % segmentCount_ : bufferRank_)
+                    : kInvalidIndex;
         shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true, preferredSegment);
         if (!shardTask.bufferHandle) {
             task->Fail(Status::Retry());

@@ -17,7 +17,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from ucm.integration.vllm.device import create_device
 from ucm.integration.vllm.ucm_connector import (
     UCMDirectConnector,
-    _check_shm_capacity,
     _use_ucm_connector_cpu_affinity,
 )
 from ucm.logger import init_logger
@@ -647,7 +646,7 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                 path for path in config["storage_backends"].split(":")
             ]
         config["unique_id"] = f"{self.unique_id}_fawa_{store_suffix}"
-        self._configure_rank_striped_store(config)
+        self._configure_partitioned_store(config)
         self._namespace_storage_backends(config, store_suffix)
         dp_rank = self._vllm_config.parallel_config.data_parallel_rank
         config["posix_gc_enable"] = (
@@ -673,9 +672,6 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
             f"{config['cache_buffer_capacity_gb']}GB by splitting the "
             f"{capacity}GB shared-buffer capacity across FA/WA stores."
         )
-        # The shared buffer is allocated via shm_open in /dev/shm; fail early
-        # (before store creation) if the tmpfs cannot hold the FA+WA total.
-        _check_shm_capacity(capacity)
 
     @staticmethod
     def _namespace_storage_backends(

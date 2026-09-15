@@ -73,9 +73,9 @@ public:
         }
         transEnable_ = config.deviceId >= 0;
         if (transEnable_) {
-            s = transMgr_.Setup(config, bufferMgr_.GetTransBuffer());
+            s = transMgr_.Setup(config, bufferMgr_.GetBuffer());
             if (s.Failure()) [[unlikely]] { return s; }
-            s = prefetchQ_.Setup(config, bufferMgr_.GetTransBuffer());
+            s = prefetchQ_.Setup(config, bufferMgr_.GetBuffer());
             if (s.Failure()) [[unlikely]] { return s; }
         }
         ShowConfig(config);
@@ -158,8 +158,12 @@ private:
         config.Get("cpu_affinity_cores", param.cpuAffinityCores);
         if (param.shardSize > 0) { param.waitingQueueDepth *= (param.blockSize / param.shardSize); }
         config.Get("share_buffer_enable", param.shareBufferEnable);
-        config.Get("share_buffer_rank_striped", param.shareBufferRankStriped);
-        if (param.shareBufferRankStriped) {
+        if (param.shareBufferEnable) {
+            if (config.Contains("share_buffer_segment_count")) {
+                size_t count = 0;
+                config.GetNumber("share_buffer_segment_count", count);
+                param.shareBufferSegmentCount = count;
+            }
             config.GetNumbers("share_buffer_numa_nodes", param.shareBufferNumaNodes);
             if (config.Contains("share_buffer_rank")) {
                 size_t rank = kInvalidIndex;
@@ -211,14 +215,15 @@ private:
             return Status::InvalidParam("invalid device({})", config.deviceId);
         }
         if (config.uniqueId.empty()) { return Status::InvalidParam("invalid unique id"); }
-        if (config.shareBufferRankStriped && !config.shareBufferEnable) {
-            return Status::InvalidParam(
-                "rank-striped shared buffer requires share_buffer_enable=true");
-        }
         if (config.localRankSize == 0 || config.localRankSize > kMaxRanks) {
             return Status::InvalidParam("invalid local rank size({})", config.localRankSize);
         }
-        if (config.shareBufferRankStriped) {
+        if (config.shareBufferEnable) {
+            const auto segmentCount = config.EffectiveBufferSegmentCount();
+            if (segmentCount == 0 || segmentCount > kMaxRanks) {
+                return Status::InvalidParam("invalid shared buffer segment count({})",
+                                            segmentCount);
+            }
             try {
                 if (config.shareBufferNumaNodes.empty()) {
                     config.shareBufferNumaNodes = ShmNuma::DefaultNodes();
@@ -229,7 +234,7 @@ private:
                 }
                 ShmNuma::ValidateNodes(config.shareBufferNumaNodes);
                 if (config.deviceId >= 0) {
-                    ShmNuma::SegmentNodes(config.shareBufferNumaNodes, config.localRankSize, 0);
+                    ShmNuma::SegmentNodes(config.shareBufferNumaNodes, segmentCount, 0);
                 }
             } catch (const std::exception& error) {
                 return Status::InvalidParam(std::string(error.what()));
@@ -272,15 +277,16 @@ private:
         if (streamNumber < 1 || streamNumber > 32) {
             return Status::InvalidParam("invalid stream number({})", streamNumber);
         }
-        if (config.shareBufferRankStriped) {
-            if (config.EffectiveBufferRank() >= config.localRankSize) {
+        if (config.shareBufferEnable) {
+            const auto segmentCount = config.EffectiveBufferSegmentCount();
+            if (config.EffectiveBufferRank() >= segmentCount) {
                 return Status::InvalidParam("shared buffer rank({}) must be smaller than {}",
-                                            config.EffectiveBufferRank(), config.localRankSize);
+                                            config.EffectiveBufferRank(), segmentCount);
             }
-            if (config.loadExclusiveBufferNumber % config.localRankSize != 0) {
+            if (config.loadExclusiveBufferNumber % segmentCount != 0) {
                 return Status::InvalidParam(
-                    "exclusive buffer number({}) must be divisible by local rank size({})",
-                    config.loadExclusiveBufferNumber, config.localRankSize);
+                    "exclusive buffer number({}) must be divisible by segment count({})",
+                    config.loadExclusiveBufferNumber, segmentCount);
             }
         }
         return Status::OK();
@@ -309,8 +315,9 @@ private:
         UC_INFO("Set {}::CpuAffinityCores to {}.", ns, config.cpuAffinityCores);
         UC_INFO("Set {}::BufferCapacity to {}GB.", ns, config.bufferCapacity >> 30);
         UC_INFO("Set {}::ShareBufferEnable to {}.", ns, config.shareBufferEnable);
-        UC_INFO("Set {}::ShareBufferRankStriped to {}.", ns, config.shareBufferRankStriped);
-        if (config.shareBufferRankStriped) {
+        if (config.shareBufferEnable) {
+            UC_INFO("Set {}::ShareBufferSegmentCount to {}.", ns,
+                    config.EffectiveBufferSegmentCount());
             if (config.deviceId >= 0) {
                 UC_INFO("Set {}::ShareBufferRank to {}.", ns, config.EffectiveBufferRank());
             }

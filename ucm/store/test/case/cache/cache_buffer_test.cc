@@ -117,6 +117,7 @@ TEST(UcmV2CacheBufferTest, ClockEviction)
 TEST(UcmV2CacheBufferTest, ForkTwoProcessesCtrlShared)
 {
     auto cfg0 = MakeConfig(0);
+    cfg0.localRankSize = 2;
     UC::CacheStore::Buffer buf0;
     ASSERT_TRUE(buf0.Setup(cfg0).Success());
 
@@ -131,6 +132,7 @@ TEST(UcmV2CacheBufferTest, ForkTwoProcessesCtrlShared)
     ASSERT_GE(pid, 0);
     if (pid == 0) {
         auto cfg1 = MakeConfig(1);
+        cfg1.localRankSize = 2;
         UC::CacheStore::Buffer buf1;
         auto s = buf1.Setup(cfg1);
         if (s.Failure()) { _exit(2); }
@@ -146,6 +148,7 @@ TEST(UcmV2CacheBufferTest, ForkTwoProcessesCtrlShared)
 TEST(UcmV2CacheBufferTest, CrossRankDataFetch)
 {
     auto cfg0 = MakeConfig(0);
+    cfg0.localRankSize = 2;
     UC::CacheStore::Buffer buf0;
     ASSERT_TRUE(buf0.Setup(cfg0).Success());
 
@@ -159,6 +162,7 @@ TEST(UcmV2CacheBufferTest, CrossRankDataFetch)
     ASSERT_GE(pid, 0);
     if (pid == 0) {
         auto cfg1 = MakeConfig(1);
+        cfg1.localRankSize = 2;
         UC::CacheStore::Buffer buf1;
         if (buf1.Setup(cfg1).Failure()) { _exit(2); }
         auto h = buf1.Get(blk, 0);
@@ -178,6 +182,7 @@ TEST(UcmV2CacheBufferTest, CrossRankDataFetchNonMultipleCapacity)
      * per-rank data window (m * slotSize), never the raw capacity. */
     constexpr size_t M = 8;
     auto cfg0 = MakeConfig(0, M);
+    cfg0.localRankSize = 2;
     cfg0.bufferCapacity = 4096 * M + 2048;
     UC::CacheStore::Buffer buf0;
     ASSERT_TRUE(buf0.Setup(cfg0).Success());
@@ -192,6 +197,7 @@ TEST(UcmV2CacheBufferTest, CrossRankDataFetchNonMultipleCapacity)
     ASSERT_GE(pid, 0);
     if (pid == 0) {
         auto cfg1 = MakeConfig(1, M);
+        cfg1.localRankSize = 2;
         cfg1.bufferCapacity = 4096 * M + 2048;
         UC::CacheStore::Buffer buf1;
         if (buf1.Setup(cfg1).Failure()) { _exit(2); }
@@ -507,6 +513,7 @@ TEST(UcmV2CacheBufferTest, PrefetchRingFifoOverflowDropReuse)
 {
     namespace C = UC::CacheStore;
     auto cfg = MakeConfig(-1); /* control-plane-only creator: no data plane */
+    cfg.localRankSize = 4;
     C::Buffer buf;
     ASSERT_TRUE(buf.Setup(cfg).Success());
 
@@ -620,12 +627,12 @@ TEST(UcmV2CacheBufferTest, ConcurrentPrefetchProducersDoNotOverwriteCommands)
     EXPECT_EQ(n + buf.PrefetchDropped(0), producers * count);
 }
 
-TEST(UcmV2CacheBufferTest, RankStripedControlUsesOneTotalCapacityBudget)
+TEST(UcmV2CacheBufferTest, PartitionedControlUsesOneTotalCapacityBudget)
 {
     auto cfg = MakeConfig(-1, 65);
-    cfg.uniqueId = "rank-striped-control";
-    cfg.shareBufferRankStriped = true;
-    cfg.localRankSize = 4;
+    cfg.uniqueId = "partitioned-control";
+    cfg.localRankSize = 1;
+    cfg.shareBufferSegmentCount = 4;
     cfg.shareBufferNumaNodes = {0};
     UC::CacheStore::Buffer buf;
     ASSERT_TRUE(buf.Setup(cfg).Success());
@@ -633,21 +640,21 @@ TEST(UcmV2CacheBufferTest, RankStripedControlUsesOneTotalCapacityBudget)
     EXPECT_EQ(buf.NumSlotsPerRank(), 16u);
 }
 
-TEST(UcmV2CacheBufferTest, RankStripedJoinerRejectsDifferentTopology)
+TEST(UcmV2CacheBufferTest, PartitionedJoinerRejectsDifferentTopology)
 {
     auto cfg = MakeConfig(-1, 64);
-    cfg.uniqueId = "rank-striped-mismatch";
-    cfg.shareBufferRankStriped = true;
-    cfg.localRankSize = 4;
+    cfg.uniqueId = "partitioned-mismatch";
+    cfg.localRankSize = 1;
+    cfg.shareBufferSegmentCount = 4;
     cfg.shareBufferNumaNodes = {0, 1};
     UC::CacheStore::Buffer creator;
     ASSERT_TRUE(creator.Setup(cfg).Success());
 
-    cfg.localRankSize = 2;
+    cfg.shareBufferSegmentCount = 2;
     UC::CacheStore::Buffer wrongRanks;
     EXPECT_TRUE(wrongRanks.Setup(cfg).Failure());
 
-    cfg.localRankSize = 4;
+    cfg.shareBufferSegmentCount = 4;
     cfg.shareBufferNumaNodes = {0};
     UC::CacheStore::Buffer wrongNodes;
     EXPECT_TRUE(wrongNodes.Setup(cfg).Failure());

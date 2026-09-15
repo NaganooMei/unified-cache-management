@@ -31,7 +31,6 @@
 #include "template/hashset.h"
 #include "template/spsc_ring_queue.h"
 #include "thread/latch.h"
-// #include "trans_buffer.h"
 #include "cache_buffer.h"
 #include "trans_task.h"
 #include "ucmstore_v1.h"
@@ -64,9 +63,10 @@ private:
     bool useGdr_{false};
     bool cacheIOAggregation_{false};
     bool cacheSdmaDirect_{false};
-    bool rankStriped_{false};
+    bool shared_{false};
+    bool stripeAcrossSegments_{false};
     std::vector<ssize_t> cpuAffinityCores_{};
-    size_t localRankSize_{};
+    size_t segmentCount_{1};
     size_t bufferRank_{0};
     SpscRingQueue<TaskPair> waiting_;
     SpscRingQueue<ShardTask> running_;
