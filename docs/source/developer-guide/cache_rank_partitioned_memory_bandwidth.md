@@ -99,141 +99,131 @@ localSlot = globalSlot % slotsPerSegment
 
 ## 4. Lookup 首层预取
 
-### 4.1 触发范围与命令分发
+### 4.1 哪个 Connector 调用 Lookup
 
-这里的“第一层”是一个 block 的首个 shard，即 `shardIndex = 0`。预取只完成“下层存储到 Host Cache”，不提前执行 H2D，也不改变 Lookup 的返回结果。
+Lookup 由 vLLM scheduler 侧发起。新请求进入调度时，scheduler 先查询本地 HBM 命中，再调用外层 `UCMConnector.get_num_new_matched_tokens`；外层 Connector 只负责选择并转发给实际的内部 Connector。
 
-`BufferManager::LookupOnPrefixFast` 先查询 Host Cache，再把未命中的 block 交给下层存储执行前缀查询。对下层确认命中的连续前缀，`PrefetchOnLookup` 按稳定的 round-robin 方式分发给当前 Ready 的 worker rank；每次调用都从列表第一个 block 开始分配，因此相同列表位置会稳定落到相同 rank。
+普通 KV Cache 场景由 `use_layerwise` 选择内部 Connector：
 
-每个 rank 在共享控制区中拥有一个深度为 4096 的有界预取命令环。`PrefetchQueue` 的后台线程每次最多取 64 个 block，队列为空时休眠 1 ms。没有在线 worker 或命令环已满时允许跳过命令；环满造成的丢弃会累计到 dropped 计数。预取是性能提示，这些情况不能影响正式 Lookup 和 Load 的正确性。
+| 配置 | 内部 Connector | Lookup 实现 |
+|---|---|---|
+| `use_layerwise: false` | `UCMDirectConnector` | `UCMDirectConnector.get_num_new_matched_tokens` |
+| `use_layerwise: true` | `UCMLayerWiseConnector` | 继承 `UCMDirectConnector.get_num_new_matched_tokens`，没有单独覆盖 |
 
-### 4.2 去重、状态复用与失败恢复
+因此，整块存取和 LayerWise 都会走 `RankConsistencyManager.lookup_on_prefix -> store.lookup_on_prefix`。只要该调用最终进入 `CacheStore::LookupOnPrefix`，就会由 `BufferManager::LookupOnPrefixFast` 检查 Host Cache、查询下层存储，并对“Host Cache 未命中但下层前缀命中”的 block 触发预取。已经在 Host Cache 中、下层也未命中或没有 Ready worker 时，不会产生有效预取任务。
 
-后台线程对每个命令执行 `Buffer::Get(block, 0, false)`：
+这里的 lookup 预取与显式 `store.prefetch()` 不是同一机制：前者把数据从下层存储提前读入 Host Cache；后者是下层存储的独立提示接口。
 
-- `allowReserved = false` 保留 Load 专用 slot，不让推测性预取耗尽正式加载资源；
-- 只有取得 owner 的 Handle 才负责下层读取；如果 slot 已 Ready，或另一个预取/正式 Load 正在填充，同一 block 不会重复读取；
-- 一个批次只提交一次下层 `Load` 和 `Wait`。成功时所有 owner Handle 发布 Ready，失败时整批发布 Failed；
-- Handle 在存活期间增加引用计数，防止 slot 被 CLOCK 淘汰。失败 Handle 释放后，下一次取得 owner 的预取或正式 Load 会把状态恢复为 Loading 并重新读取。
+### 4.2 整块存取与 LayerWise 的预取含义
 
-正式 `LoadQueue` 获取同一 `(block, shard 0)` 时有三种情况：已经 Ready 则直接从 Host Cache 提交 H2D；仍在 Loading 则等待同一 slot 的结果；处于可恢复的 Failed 状态并取得 owner 时，由正式 Load 重新从下层存储读取。因而预取完成得越早，第一层等待下层存储的时间越短；预取未完成或失败只会退化为原有按需加载路径。
+两种模式都会触发 lookup 预取，但 `shardIndex = 0` 表示的数据不同：
 
-### 4.3 预取时序图
+| 模式 | Store 中的布局 | lookup 预取的实际内容 |
+|---|---|---|
+| 整块存取（Direct） | 一个 UCM block 只有一个 shard，所有本地层的 KV 被展平到 `shard 0` | 预取整个 KV block，而不是只预取模型第 0 层 |
+| LayerWise | 每个模型层分别作为一个 shard，正式按层访问使用实际 `layer_id` | 当前实现固定预取 `shard 0`，通常对应模型第 0 层 |
+
+LayerWise 之所以优先预取第一层，是因为第一层开始计算前没有上一层计算可用于掩盖后端读取；后续层可以在前一层计算期间提前准备。vLLM 的 LayerWise Connector 在模型 forward 前提交本地第一层，进入每个 attention layer 时等待当前层并启动下一层，因此 lookup 阶段只需要抢先填充最难隐藏的第一层。
+
+需要注意一个当前实现边界：`PrefetchQueue` 固定调用 `Buffer::Get(block, 0, false)`，而 `UCMLayerWiseConnector` 的正式按层访问使用 `first_layer_id` 和后续实际 `layer_id`。在常见的非流水线并行场景中 `first_layer_id = 0`，预取能够命中本地第一层；在 pipeline parallel 的非首 stage 中，本地 `first_layer_id` 可能大于 0，此时 `shard 0` 不是该 stage 的本地第一层，当前预取不能覆盖它。若目标语义是“每个 PP stage 的本地第一层”，预取命令还需要携带对应的 `first_layer_id`，不能把 shard 固定为 0。
+
+### 4.3 命令分发、去重与失败恢复
+
+`PrefetchOnLookup` 把下层确认命中的连续前缀按 round-robin 分发给当前 Ready 的 worker rank。每个 rank 在共享控制区中拥有一个深度为 4096 的有界命令环；`PrefetchQueue` 后台线程每批最多取 64 个 block，队列为空时休眠 1 ms。
+
+后台线程执行 `Buffer::Get(block, 0, false)`。`allowReserved = false` 会保留正式访问专用 slot；只有取得 owner 的 Handle 才读取下层存储，已经 Ready 或正在由其他任务填充的 block 不会重复读取。批量 `Load` 和 `Wait` 成功后发布 Ready，失败则发布 Failed；失败 Handle 释放后，后续请求仍可重新取得 owner 并重试。
+
+预取是 best-effort 性能提示：没有在线 worker、命令环已满或下层读取失败都不能改变 Lookup 结果，也不能影响后续按需访问的正确性。环满造成的丢弃会累计到 dropped 计数。
+
+### 4.4 预取时序图
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant E as 推理引擎
-    participant M as BufferManager
-    participant C as Buffer / CtrlLayout
+    participant S as vLLM Scheduler
+    participant U as UCMConnector
+    participant I as Direct / LayerWise Connector
+    participant R as RankConsistencyManager
+    participant M as CacheStore / BufferManager
     participant B as 下层存储
-    participant P as Rank PrefetchQueue
-    participant H as Rank Host 数据段
-    participant L as LoadQueue
-    participant D as NPU/GPU
+    participant Q as 共享预取命令环
+    participant P as Worker PrefetchQueue
+    participant H as Buffer / Host Cache
 
-    E->>M: LookupOnPrefix(blocks)
-    M->>C: Exist(block, shard 0)
-    C-->>M: Host Cache 命中与未命中集合
-    M->>B: LookupOnPrefix(未命中 blocks)
-    B-->>M: 下层存储命中的连续前缀
-    loop 对前缀 block 按 Ready rank 轮转
-        M->>C: EnqueuePrefetch(rank, block)
+    S->>U: get_num_new_matched_tokens(request)
+    U->>I: 转发给内部 Connector
+    Note over I: LayerWise 继承 Direct 的 lookup 实现
+    I->>R: lookup_on_prefix(block_ids)
+    R->>M: store.lookup_on_prefix(block_ids)
+    M->>M: 检查 Host Cache
+    M->>B: LookupOnPrefix(Host 未命中 blocks)
+    B-->>M: 返回下层命中的连续前缀
+    loop 按 Ready worker rank 轮转
+        M->>Q: EnqueuePrefetch(rank, block)
     end
-    M-->>E: 返回 Lookup 结果
+    M-->>R: 返回命中 block 数
+    R-->>I: 返回连续前缀长度
+    I-->>U: 返回匹配 token 数
+    U-->>S: 返回匹配 token 数
 
-    par 后台预取
-        P->>C: DrainPrefetch(本 rank，最多 64 个)
-        P->>C: Get(block, shard 0, allowReserved=false)
-        C-->>P: Handle 与 owner 状态
-        alt 取得 owner
-            P->>B: Load(batch, Handle.Data)
-            B->>H: 写入 Host Cache
-            P->>B: Wait(task)
-            B-->>P: 成功或失败
-            alt 成功
-                P->>C: MarkReady()
-            else 失败
-                P->>C: MarkFailed()
-            end
-        else 已 Ready 或已有填充者
-            P->>P: 跳过重复读取
-        end
-        P->>C: 释放 Handle 引用
-    and 正式第一层 Load
-        E->>L: Load(block, shard 0)
-        L->>C: Get(block, shard 0)
-        C-->>L: Handle 与 slot 状态
-        alt 已 Ready
-            L->>H: 取得 Host 地址
-        else 预取仍在 Loading
-            L->>C: 等待同一 slot Ready / Failed
-        else 正式 Load 取得 owner
-            L->>B: 按需 Load 并 Wait
-            B->>H: 写入 Host Cache
-            L->>C: 发布 Ready / Failed
-        end
-        opt slot Ready
-            L->>D: H2D
-            D-->>E: 第一层 KV 就绪
-        end
-        L->>C: 释放 Handle 引用
+    P->>Q: DrainPrefetch(最多 64 个)
+    P->>H: Get(block, shard 0, allowReserved=false)
+    alt 取得 owner
+        P->>B: Load(batch, Host 地址)
+        P->>B: Wait(task)
+        B-->>P: 成功或失败
+        P->>H: MarkReady() / MarkFailed()
+    else 已 Ready 或已有填充者
+        P->>P: 跳过重复读取
     end
+    Note over P,H: Direct: shard 0 是整块 KV<br/>LayerWise: shard 0 通常是模型第 0 层
 ```
 
-## 5. 类图
+## 5. 预取类图
 
-下图按职责简化接口。`RankDataSegment` 是概念上的共享数据段；每个进程通过 `DataStrategy` 保存自己的本地映射。NUMA 拓扑探测、控制区命令分发、预取和正式 Load 最终都汇聚到同一个 Buffer/Handle 状态机。
+下图只展示从 vLLM scheduler lookup 到后台预取的相关类。LayerWise Connector 继承 Direct Connector 的 lookup 实现，所以两种模式的触发入口相同；布局差异只改变 `shard 0` 所代表的数据。
 
 ```mermaid
 classDiagram
-    class UCMDirectConnector {
-        -_configure_partitioned_store(config)
-        -_configure_numa_placement(config)
+    class Scheduler {
+        +schedule()
     }
-    class Device {
-        +get_numa_node(deviceOrdinal)
+    class UCMConnector {
+        -connector
+        +get_num_new_matched_tokens(request)
+    }
+    class UCMDirectConnector {
+        -store
+        -rank_consistency
+        +get_num_new_matched_tokens(request)
+    }
+    class UCMLayerWiseConnector {
+        <<LayerWise>>
+    }
+    class RankConsistencyManager {
+        +lookup_on_prefix(store, block_ids)
+    }
+    class UcmKVStoreBaseV1 {
+        +lookup_on_prefix(block_ids)
     }
     class CacheStore {
         +LookupOnPrefix(blocks)
-        +Load(task)
     }
     class BufferManager {
-        +LookupOnPrefix(blocks)
+        +LookupOnPrefixFast(blocks)
         -PrefetchOnLookup(blocks)
+    }
+    class Buffer {
+        +Exist(block, shard)
+        +EnqueuePrefetch(rank, blocks)
+        +DrainPrefetch(rank)
+        +Get(block, shard, allowReserved)
     }
     class PrefetchQueue {
         -PrefetchLoop()
         -PrefetchBatch(blocks)
     }
-    class TransManager
-    class LoadQueue {
-        +Submit(task)
-    }
-    class DumpQueue {
-        +Submit(task)
-    }
-    class Buffer {
-        +Exist(block, shard)
-        +Get(block, shard, allowReserved, preferredSegment)
-        +EnqueuePrefetch(rank, blocks)
-        +DrainPrefetch(rank)
-    }
-    class Handle {
-        +Owner()
-        +GlobalSlot()
-        +Segment()
-        +Data()
-        +DeviceData()
-        +MarkReady()
-        +MarkFailed()
-    }
-    class CtrlStrategy {
-        +Setup(config)
-        +Layout()
-    }
     class CtrlLayout {
-        +SlotMetaArr()
         +RingPush(rank, blocks)
         +RingDrain(rank, blocks)
     }
@@ -243,23 +233,11 @@ classDiagram
         +dropped
         +entries[4096]
     }
-    class DataStrategy {
-        +Setup(...)
-        +MapAllSegments()
-        +DataAt(globalSlot)
-        +DeviceDataAt(globalSlot)
-    }
-    class ShmNuma {
-        <<namespace>>
-        +DataNodes(...)
-        +SegmentNodes(...)
-        +Initialize(data, bytes, nodes)
-    }
-    class RankDataSegment {
-        <<共享 KV 数据段>>
-        +creatorRank
-        +numaNodes
-        +slotRange
+    class Handle {
+        +Owner()
+        +Data()
+        +MarkReady()
+        +MarkFailed()
     }
     class StoreV1 {
         <<下层存储>>
@@ -268,28 +246,23 @@ classDiagram
         +Wait(handle)
     }
 
-    UCMDirectConnector --> Device : 探测 NPU NUMA
-    UCMDirectConnector --> CacheStore : 传入分段与节点提示
+    Scheduler --> UCMConnector : 查询外部命中
+    UCMConnector --> UCMDirectConnector : use_layerwise=false
+    UCMConnector --> UCMLayerWiseConnector : use_layerwise=true
+    UCMLayerWiseConnector --|> UCMDirectConnector
+    UCMDirectConnector --> RankConsistencyManager
+    RankConsistencyManager --> UcmKVStoreBaseV1 : lookup_on_prefix
+    UcmKVStoreBaseV1 --> CacheStore : Python/C++ binding
     CacheStore *-- BufferManager
     CacheStore *-- PrefetchQueue
-    CacheStore *-- TransManager
-    TransManager *-- LoadQueue
-    TransManager *-- DumpQueue
     BufferManager *-- Buffer
-    BufferManager --> StoreV1
+    BufferManager --> StoreV1 : 查询下层前缀
     PrefetchQueue --> Buffer
-    PrefetchQueue --> StoreV1
-    LoadQueue --> Buffer
-    LoadQueue --> StoreV1
-    DumpQueue --> Buffer
-    Buffer *-- CtrlStrategy
-    CtrlStrategy *-- CtrlLayout
+    PrefetchQueue --> StoreV1 : 预取 shard 0
+    PrefetchQueue ..> Handle : 持有 owner 并发布状态
+    Buffer ..> Handle : Get 返回
+    Buffer *-- CtrlLayout
     CtrlLayout *-- "1..N" PrefetchRing
-    Buffer *-- DataStrategy
-    DataStrategy ..> ShmNuma : 绑定并验证页面
-    DataStrategy --> "1..N" RankDataSegment : 创建本段并映射各段
-    Buffer ..> Handle : 返回实际位置与引用
-    Handle --> Buffer : 析构时释放引用
 ```
 
 ## 6. 测试方法
@@ -316,13 +289,14 @@ classDiagram
 
 ### 6.3 首层预取验收
 
-测试数据应满足“下层存储已有 block、Host Cache 尚未缓存”。在模型、block 数、数据大小以及 Lookup 到 Load 的调度间隔一致时，对比不触发预取和先执行 `LookupOnPrefix` 两组流程：
+测试数据应满足“下层存储已有 block、Host Cache 尚未缓存”。在模型、block 数、数据大小以及 Lookup 到正式访问的调度间隔一致时，对比不触发预取和先执行 `LookupOnPrefix` 两组流程：
 
 - Lookup 结果与未启用预取时一致；
-- 预取只加载 shard 0，正式请求前不发生 H2D；
-- 预取完成时，正式 Load 第一层不再创建重复的下层读取，首层 backend wait 接近 0；
-- 预取尚未完成时，正式 Load 等待同一 slot，不发生重复读取；
-- 命令环溢出或预取失败后，正式 Load 仍能按需加载成功；
+- Direct 和 LayerWise Connector 都调用 `lookup_on_prefix` 并产生预取命令；
+- Direct 模式的 `shard 0` 包含整块 KV，LayerWise 模式的 `shard 0` 只包含模型第 0 层，正式请求前均不发生 H2D；
+- 非流水线并行的 LayerWise 模式中，预取完成后第 0 层不再创建重复的下层读取，首层 backend wait 接近 0；
+- pipeline parallel 的非首 stage 应单独验证并记录当前 `shard 0` 与 `first_layer_id` 不一致的行为；在预取命令携带 shard id 前，不应把它计为本地首层预取命中；
+- 预取尚未完成时，同一 slot 不发生重复的下层读取；命令环溢出或预取失败后，后续访问仍能按需成功；
 - 同时覆盖多个生产者写入预取环、FIFO 顺序、溢出 dropped 计数和队列复用。
 
 绝对耗时受存储介质和数据大小影响，不建议设置统一的毫秒阈值；应在相同环境下比较第一层 backend wait、`ucm:cache_load_duration_ms` 和 TTFT 的分布。
