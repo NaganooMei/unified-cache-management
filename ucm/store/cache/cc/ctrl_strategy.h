@@ -98,7 +98,11 @@ private:
         if (totalSlots > (std::numeric_limits<size_t>::max() - prefixSize) / sizeof(SlotMeta)) {
             return Status::InvalidParam("cache control layout too large");
         }
-        auto totalSize = CtrlLayout::TotalSize(nBuckets, totalSlots);
+        const auto metaEnd = prefixSize + sizeof(SlotMeta) * totalSlots;
+        if (maxRanks > (std::numeric_limits<size_t>::max() - metaEnd) / sizeof(PrefetchRing)) {
+            return Status::InvalidParam("cache control layout too large");
+        }
+        auto totalSize = CtrlLayout::TotalSize(nBuckets, totalSlots, maxRanks);
         auto s = ctrlMem_.Create("ucm_v2_ctrl", totalSize, true);
         if (s.Failure()) { return s; }
         ctrlFd_ = ctrlMem_.Fd();
@@ -161,7 +165,11 @@ private:
         if (totalSlots > (std::numeric_limits<size_t>::max() - prefixSize) / sizeof(SlotMeta)) {
             return Status::InvalidParam("ctrl header invalid");
         }
-        s = ctrlMem_.Remap(CtrlLayout::TotalSize(nBuckets, totalSlots));
+        const auto metaEnd = prefixSize + sizeof(SlotMeta) * totalSlots;
+        if (maxRanks > (std::numeric_limits<size_t>::max() - metaEnd) / sizeof(PrefetchRing)) {
+            return Status::InvalidParam("ctrl header invalid");
+        }
+        s = ctrlMem_.Remap(CtrlLayout::TotalSize(nBuckets, totalSlots, maxRanks));
         if (s.Failure()) { return s; }
         layout_.Bind(ctrlMem_.Addr(), maxRanks, m, nBuckets);
         return Status::OK();

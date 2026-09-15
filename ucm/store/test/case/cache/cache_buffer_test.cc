@@ -28,6 +28,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -558,6 +559,44 @@ TEST(UcmV2CacheBufferTest, PinStormReallocStress)
     EXPECT_FALSE(corrupted.load());
 }
 
+TEST(UcmV2CacheBufferTest, PrefetchRingFifoOverflowDropReuse)
+{
+    namespace C = UC::CacheStore;
+    auto cfg = MakeConfig(-1); /* control-plane-only creator: no data plane */
+    cfg.localRankSize = 4;
+    C::Buffer buf;
+    ASSERT_TRUE(buf.Setup(cfg).Success());
+
+    /* FIFO order. */
+    std::vector<UC::Detail::BlockId> in;
+    for (uint32_t i = 0; i < 10; i++) { in.push_back(MakeBlockIdN(i + 1)); }
+    buf.EnqueuePrefetch(3, in.data(), in.size());
+    std::vector<UC::Detail::BlockId> out(C::kPrefetchDepth);
+    EXPECT_EQ(buf.DrainPrefetch(3, out.data(), out.size()), 10u);
+    for (size_t i = 0; i < 10; i++) { EXPECT_EQ(out[i], in[i]); }
+    EXPECT_EQ(buf.DrainPrefetch(3, out.data(), out.size()), 0u);
+
+    /* Overflow keeps the front of the batch and drops (counts) the remainder. */
+    std::vector<UC::Detail::BlockId> big;
+    for (uint32_t i = 0; i < C::kPrefetchDepth + 7; i++) { big.push_back(MakeBlockIdN(10000 + i)); }
+    buf.EnqueuePrefetch(3, big.data(), big.size());
+    EXPECT_EQ(buf.PrefetchDropped(3), 7u);
+    size_t got = 0;
+    size_t n;
+    while ((n = buf.DrainPrefetch(3, out.data(), 1000)) > 0) {
+        for (size_t i = 0; i < n; i++) { EXPECT_EQ(out[i], big[got + i]); }
+        got += n;
+    }
+    EXPECT_EQ(got, C::kPrefetchDepth);
+    EXPECT_EQ(buf.PrefetchDropped(3), 7u);
+
+    /* Reuse after wraparound. */
+    buf.EnqueuePrefetch(3, in.data(), in.size());
+    EXPECT_EQ(buf.DrainPrefetch(3, out.data(), out.size()), 10u);
+    for (size_t i = 0; i < 10; i++) { EXPECT_EQ(out[i], in[i]); }
+    EXPECT_EQ(buf.PrefetchDropped(3), 7u);
+}
+
 TEST(UcmV2CacheBufferTest, CacheDomainsAndPrivateBuffersAreIsolated)
 {
     auto cfg = MakeConfig(0);
@@ -612,6 +651,30 @@ TEST(UcmV2CacheBufferTest, AbandonedOwnerPublishesFailureAndCanRetry)
     ASSERT_TRUE(retry.Owner());
     retry.MarkReady();
     EXPECT_TRUE(buf.Exist(key, 0));
+}
+
+TEST(UcmV2CacheBufferTest, ConcurrentPrefetchProducersDoNotOverwriteCommands)
+{
+    auto cfg = MakeConfig(-1);
+    UC::CacheStore::Buffer buf;
+    ASSERT_TRUE(buf.Setup(cfg).Success());
+    constexpr size_t producers = 4;
+    constexpr size_t count = 128;
+    std::vector<std::thread> threads;
+    for (size_t p = 0; p < producers; ++p) {
+        threads.emplace_back([&, p] {
+            for (size_t i = 0; i < count; ++i) {
+                auto key = MakeBlockIdN(p * count + i);
+                buf.EnqueuePrefetch(0, &key, 1);
+            }
+        });
+    }
+    for (auto& thread : threads) { thread.join(); }
+    std::vector<UC::Detail::BlockId> out(producers * count);
+    auto n = buf.DrainPrefetch(0, out.data(), out.size());
+    std::set<UC::Detail::BlockId> unique(out.begin(), out.begin() + n);
+    EXPECT_EQ(unique.size(), n);
+    EXPECT_EQ(n + buf.PrefetchDropped(0), producers * count);
 }
 
 TEST(UcmV2CacheBufferTest, PartitionedControlUsesOneTotalCapacityBudget)

@@ -216,6 +216,19 @@ public:
         return ctrl_->Layout().Hdr()->rankDescs[rank].ready.load(std::memory_order_acquire) == 1;
     }
 
+    /* Prefetch command rings: the SPSC ring ops live in CtrlLayout (contract there). */
+    void EnqueuePrefetch(size_t rank, const Detail::BlockId* blocks, size_t num)
+    {
+        ctrl_->Layout().RingPush(rank, blocks, num);
+    }
+
+    size_t DrainPrefetch(size_t rank, Detail::BlockId* out, size_t max)
+    {
+        return ctrl_->Layout().RingDrain(rank, out, max);
+    }
+
+    uint64_t PrefetchDropped(size_t rank) const { return ctrl_->Layout().RingDropped(rank); }
+
     Handle Get(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
                size_t preferredSegment = kInvalidIndex)
     {
