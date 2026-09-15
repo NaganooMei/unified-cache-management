@@ -99,139 +99,161 @@ localSlot = globalSlot % slotsPerSegment
 
 ## 4. Lookup 首层预取
 
-### 4.1 哪个 Connector 调用 Lookup
+### 4.1 背景：把第一层 S2H 提前到 Lookup 之后
 
-Lookup 由 vLLM scheduler 侧发起。新请求进入调度时，scheduler 先查询本地 HBM 命中，再调用外层 `UCMConnector.get_num_new_matched_tokens`；外层 Connector 只负责选择并转发给实际的内部 Connector。
+LayerWise 模式下，第一层 KV 到 `start_load_kv` 才开始加载。后续层可以利用上一层的计算时间准备数据，第一层却要直接等待 S2H（下层存储到 Host Cache），这段等待会增加 TTFT。
 
-普通 KV Cache 场景由 `use_layerwise` 选择内部 Connector：
+其实在更早的 `get_num_new_matched_tokens` 阶段，UCM 已经生成了 blockId，并通过 Lookup 确认下层存储是否命中。此时再给定首层 shardId，worker 就能通过 `Buffer::Get(blockId, shardId)` 查找或分配 Host slot，用 `Handle::Data()` 得到本进程的 Host 地址。因此可以在 Lookup 后立即启动首层 S2H，利用它与 `start_load_kv` 之间的调度时间提前准备数据，不需要等待设备端地址就绪。
 
-| 配置 | 内部 Connector | Lookup 实现 |
+scheduler 只提交预取命令；Host slot 和地址由消费命令的 worker 获取。预取完成后，正式访问复用同一个 `(blockId, shardId)`，省去重复的 S2H。这里预取的只是 Host 数据，不执行 H2D。
+
+普通 `UCMLayerWiseConnector` 继承 `UCMDirectConnector.get_num_new_matched_tokens`，两者都会走 Lookup。当前预取固定使用 `shardId = 0`：LayerWise 下是模型第 0 层，Direct 下是包含所有层的整块 KV。PP 非首 stage 的本地首层可能不为 0；覆盖该场景需要传入实际 `first_layer_id`。
+
+### 4.2 Lookup 如何写入共享队列
+
+调用链如下：
+
+~~~text
+vLLM Scheduler
+  -> UCMConnector.get_num_new_matched_tokens
+  -> UCMDirectConnector.get_num_new_matched_tokens（LayerWise 继承）
+  -> RankConsistencyManager.lookup_on_prefix
+  -> store.lookup_on_prefix
+  -> CacheStore::LookupOnPrefix
+  -> BufferManager::LookupOnPrefixFast
+~~~
+
+这里讨论 scheduler 和 worker 共享 Buffer 的路径。没有 Buffer 或启用 `cacheLoadBackendOnly` 时，Lookup 直接查询下层，不产生这类预取。
+
+1. `LookupOnPrefixFast` 检查 Host Cache，收集未命中的 `missBlk`，并用 `missIdx` 保留它们在输入列表中的位置。
+2. 对 `missBlk` 调用下层 `LookupOnPrefix`。返回值是最后一个命中位置，因此前 `result + 1` 个 block 交给 `PrefetchOnLookup`。
+3. `PrefetchOnLookup` 选择目标 rank，调用 `Buffer::EnqueuePrefetch -> CtrlLayout::RingPush`，把 blockId 写入共享控制区内该 rank 的 `PrefetchRing`。当前队列只存 blockId，shardId 由消费端固定为 0，不传递 Host 指针。
+4. 入队后 Lookup 正常返回，scheduler 不等待 S2H 完成。
+
+每个 rank 的环容量为 4096，支持多个生产者、一个消费者。`RingPush` 尝试获取生产者锁，写入 `entries` 后以 release 发布 `head`；消费者以 acquire 读取 `head`，保证看到完整命令。锁竞争或队列已满时跳过相应命令并增加 `dropped`，避免阻塞 Lookup。
+
+### 4.3 Prefetch 线程如何消费
+
+每个 worker 在 CacheStore 初始化时启动一个 `PrefetchQueue` 线程，只消费自己的 rank 队列：
+
+1. `PrefetchLoop -> Buffer::DrainPrefetch -> CtrlLayout::RingDrain`，每批最多取 64 个 block。取出后推进 `tail`，释放队列空间；空队列时休眠 1 ms 再检查。
+2. `PrefetchBatch` 对每个 block 调用 `Buffer::Get(blockId, 0, false)`。已有 slot 就复用；没有则分配。默认优先从消费 worker 的数据段分配，段内容量不足时允许回退到其他 Ready 段。
+3. 只有取得 owner 的 Handle 才负责读取。用 `Handle::Data()` 构造目标 Host 地址，将 blockId、shardId 和地址组成下层 `Load` 任务，批量提交并 `Wait`。
+4. 成功发布 `Ready`，失败发布 `Failed`。已就绪或已有填充者的 slot 跳过重复读取；失败后可由后续访问重试。`allowReserved = false` 保留正式加载专用 slot。
+
+共享索引负责去重，Handle 引用防止正在填充的 slot 被淘汰。预取命令丢弃或读取失败时，后续仍可按需读取。
+
+### 4.4 Rank 分配与分块 SHM 对齐
+
+#### 当前实现：按过滤后的位置分配
+
+`PrefetchOnLookup` 收集 Ready rank，按下面的规则分发：
+
+~~~text
+targetRank = onlineRanks[i % onlineCount]
+~~~
+
+`i` 是本次待预取列表中的位置，每次调用从 0 开始。在不丢命令时，一批命令分到各在线 rank 的数量最多相差 1；这不保证各 rank 的实际 I/O 耗时相同，也不保证多次短请求累计均匀。
+
+worker 默认优先在自己的段分配新 slot，因此当前分发已能把新预取数据分散到多个 SHM 段。但过滤 Host 命中后，`i` 会重新编号，可能与正式任务使用的 `originalIndex % segmentCount` 不一致。
+
+#### 建议方案：按原始位置绑定 rank 和数据段（尚未实现）
+
+对于第 2 节的共享分块模式，建议让预取沿用同一条放置规则：
+
+~~~text
+preferredSegment = originalIndex % segmentCount
+targetRank = preferredSegment
+~~~
+
+例如有 4 个段，原任务中只有位置 1、4、6 的 block 需要预取：
+
+| 原始位置 | 当前按过滤后位置分配 | 建议按原始位置分配 |
 |---|---|---|
-| `use_layerwise: false` | `UCMDirectConnector` | `UCMDirectConnector.get_num_new_matched_tokens` |
-| `use_layerwise: true` | `UCMLayerWiseConnector` | 继承 `UCMDirectConnector.get_num_new_matched_tokens`，没有单独覆盖 |
+| 1 | rank 0 / 优先段 0 | rank 1 / 优先段 1 |
+| 4 | rank 1 / 优先段 1 | rank 0 / 优先段 0 |
+| 6 | rank 2 / 优先段 2 | rank 2 / 优先段 2 |
 
-因此，整块存取和 LayerWise 都会走 `RankConsistencyManager.lookup_on_prefix -> store.lookup_on_prefix`。只要该调用最终进入 `CacheStore::LookupOnPrefix`，就会由 `BufferManager::LookupOnPrefixFast` 检查 Host Cache、查询下层存储，并对“Host Cache 未命中但下层前缀命中”的 block 触发预取。已经在 Host Cache 中、下层也未命中或没有 Ready worker 时，不会产生有效预取任务。
+这样，预取由目标段对应的 worker 执行，并优先把数据放入该段，与分块 SHM 的访问顺序对齐。落地时需要：
 
-这里的 lookup 预取与显式 `store.prefetch()` 不是同一机制：前者把数据从下层存储提前读入 Host Cache；后者是下层存储的独立提示接口。
+- 保留与正式任务相同定义的 `originalIndex`。现有 `missIdx` 只保留 Lookup 输入位置；上层切掉 HBM 前缀或拆分任务后，还需统一索引基准，不能直接用过滤后的 `i`。
+- 建议命令携带 `blockId、shardId、preferredSegment`，消费时显式传入 `Buffer::Get`。目标 rank 尚未 Ready 时可跳过本次预取；已有 slot 仍复用实际位置，容量不足仍允许跨段回退。
+- 完整连续任务按取余近似均分；过滤后的缺失集合可能集中在少数段。这项改进优先保证预取与 SHM 放置一致，不承诺任意缺失集合都均分，也不把 block 永久绑定到某个段。
 
-### 4.2 整块存取与 LayerWise 的预取含义
+当前策略和建议策略都使用取余，区别在于索引基准和是否绑定数据段。后台线程检查空队列的轮询是另一件事，调整 rank 分配规则不会取消它。
 
-两种模式都会触发 lookup 预取，但 `shardIndex = 0` 表示的数据不同：
+### 4.5 预取时序图
 
-| 模式 | Store 中的布局 | lookup 预取的实际内容 |
-|---|---|---|
-| 整块存取（Direct） | 一个 UCM block 只有一个 shard，所有本地层的 KV 被展平到 `shard 0` | 预取整个 KV block，而不是只预取模型第 0 层 |
-| LayerWise | 每个模型层分别作为一个 shard，正式按层访问使用实际 `layer_id` | 当前实现固定预取 `shard 0`，通常对应模型第 0 层 |
-
-LayerWise 之所以优先预取第一层，是因为第一层开始计算前没有上一层计算可用于掩盖后端读取；后续层可以在前一层计算期间提前准备。vLLM 的 LayerWise Connector 在模型 forward 前提交本地第一层，进入每个 attention layer 时等待当前层并启动下一层，因此 lookup 阶段只需要抢先填充最难隐藏的第一层。
-
-需要注意一个当前实现边界：`PrefetchQueue` 固定调用 `Buffer::Get(block, 0, false)`，而 `UCMLayerWiseConnector` 的正式按层访问使用 `first_layer_id` 和后续实际 `layer_id`。在常见的非流水线并行场景中 `first_layer_id = 0`，预取能够命中本地第一层；在 pipeline parallel 的非首 stage 中，本地 `first_layer_id` 可能大于 0，此时 `shard 0` 不是该 stage 的本地第一层，当前预取不能覆盖它。若目标语义是“每个 PP stage 的本地第一层”，预取命令还需要携带对应的 `first_layer_id`，不能把 shard 固定为 0。
-
-### 4.3 命令分发、去重与失败恢复
-
-`PrefetchOnLookup` 把下层确认命中的连续前缀按 round-robin 分发给当前 Ready 的 worker rank。每个 rank 在共享控制区中拥有一个深度为 4096 的有界命令环；`PrefetchQueue` 后台线程每批最多取 64 个 block，队列为空时休眠 1 ms。
-
-后台线程执行 `Buffer::Get(block, 0, false)`。`allowReserved = false` 会保留正式访问专用 slot；只有取得 owner 的 Handle 才读取下层存储，已经 Ready 或正在由其他任务填充的 block 不会重复读取。批量 `Load` 和 `Wait` 成功后发布 Ready，失败则发布 Failed；失败 Handle 释放后，后续请求仍可重新取得 owner 并重试。
-
-预取是 best-effort 性能提示：没有在线 worker、命令环已满或下层读取失败都不能改变 Lookup 结果，也不能影响后续按需访问的正确性。环满造成的丢弃会累计到 dropped 计数。
-
-### 4.4 预取时序图
+下图对应当前实现；原始索引分段方案见 4.4。
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant S as vLLM Scheduler
-    participant U as UCMConnector
-    participant I as Direct / LayerWise Connector
-    participant R as RankConsistencyManager
-    participant M as CacheStore / BufferManager
+    participant U as Scheduler / UCM Connector
+    participant C as CacheStore / BufferManager
     participant B as 下层存储
-    participant Q as 共享预取命令环
+    participant Q as 共享 CtrlLayout / PrefetchRing
     participant P as Worker PrefetchQueue
-    participant H as Buffer / Host Cache
+    participant H as Buffer / Host 数据段
 
-    S->>U: get_num_new_matched_tokens(request)
-    U->>I: 转发给内部 Connector
-    Note over I: LayerWise 继承 Direct 的 lookup 实现
-    I->>R: lookup_on_prefix(block_ids)
-    R->>M: store.lookup_on_prefix(block_ids)
-    M->>M: 检查 Host Cache
-    M->>B: LookupOnPrefix(Host 未命中 blocks)
-    B-->>M: 返回下层命中的连续前缀
-    loop 按 Ready worker rank 轮转
-        M->>Q: EnqueuePrefetch(rank, block)
+    U->>C: lookup_on_prefix(blockIds)
+    C->>C: 检查 Host，收集 missBlk 和 missIdx
+    C->>B: LookupOnPrefix(missBlk)
+    B-->>C: 最后一个命中位置 result
+    loop 前 result + 1 个 block
+        C->>C: targetRank = onlineRanks[i % onlineCount]
+        C->>Q: EnqueuePrefetch -> RingPush(blockId)
+        Note over Q: 写 entries，发布 head
     end
-    M-->>R: 返回命中 block 数
-    R-->>I: 返回连续前缀长度
-    I-->>U: 返回匹配 token 数
-    U-->>S: 返回匹配 token 数
-
-    P->>Q: DrainPrefetch(最多 64 个)
-    P->>H: Get(block, shard 0, allowReserved=false)
+    C-->>U: 返回 Lookup 结果，不等待预取
+    Note over Q,P: 每个 worker 独立消费本 rank 队列，可与 Lookup 返回并发
+    P->>Q: DrainPrefetch -> RingDrain(最多 64 个)
+    Q-->>P: blockIds，推进 tail
+    P->>H: Get(blockId, 0, false)
+    H-->>P: Handle，owner，Host 地址
     alt 取得 owner
-        P->>B: Load(batch, Host 地址)
+        P->>B: Load(blockId, shardId=0, Host 地址)
+        B->>H: S2H 写入数据
         P->>B: Wait(task)
-        B-->>P: 成功或失败
-        P->>H: MarkReady() / MarkFailed()
-    else 已 Ready 或已有填充者
+        B-->>P: 读取结果
+        P->>H: MarkReady / MarkFailed
+    else 已有数据或填充者
         P->>P: 跳过重复读取
     end
-    Note over P,H: Direct: shard 0 是整块 KV<br/>LayerWise: shard 0 通常是模型第 0 层
 ```
 
 ## 5. 预取类图
 
-下图只展示从 vLLM scheduler lookup 到后台预取的相关类。LayerWise Connector 继承 Direct Connector 的 lookup 实现，所以两种模式的触发入口相同；布局差异只改变 `shard 0` 所代表的数据。
+仅保留共享队列的生产、消费和 Host slot 管理关系。图中 Buffer 对 CtrlLayout 的访问经过内部控制区封装，省略中间类。
 
 ```mermaid
 classDiagram
-    class Scheduler {
-        +schedule()
-    }
-    class UCMConnector {
-        -connector
-        +get_num_new_matched_tokens(request)
-    }
-    class UCMDirectConnector {
-        -store
-        -rank_consistency
-        +get_num_new_matched_tokens(request)
-    }
-    class UCMLayerWiseConnector {
-        <<LayerWise>>
-    }
-    class RankConsistencyManager {
-        +lookup_on_prefix(store, block_ids)
-    }
-    class UcmKVStoreBaseV1 {
-        +lookup_on_prefix(block_ids)
-    }
     class CacheStore {
         +LookupOnPrefix(blocks)
     }
     class BufferManager {
-        +LookupOnPrefixFast(blocks)
+        -LookupOnPrefixFast(blocks)
         -PrefetchOnLookup(blocks)
     }
     class Buffer {
-        +Exist(block, shard)
         +EnqueuePrefetch(rank, blocks)
         +DrainPrefetch(rank)
-        +Get(block, shard, allowReserved)
-    }
-    class PrefetchQueue {
-        -PrefetchLoop()
-        -PrefetchBatch(blocks)
+        +Get(blockId, shardId, allowReserved, preferredSegment)
     }
     class CtrlLayout {
         +RingPush(rank, blocks)
         +RingDrain(rank, blocks)
     }
     class PrefetchRing {
+        +producers
         +head
         +tail
         +dropped
         +entries[4096]
+    }
+    class PrefetchQueue {
+        -PrefetchLoop()
+        -PrefetchBatch(blocks)
     }
     class Handle {
         +Owner()
@@ -240,29 +262,22 @@ classDiagram
         +MarkFailed()
     }
     class StoreV1 {
-        <<下层存储>>
         +LookupOnPrefix(blocks)
         +Load(task)
-        +Wait(handle)
+        +Wait(task)
     }
 
-    Scheduler --> UCMConnector : 查询外部命中
-    UCMConnector --> UCMDirectConnector : use_layerwise=false
-    UCMConnector --> UCMLayerWiseConnector : use_layerwise=true
-    UCMLayerWiseConnector --|> UCMDirectConnector
-    UCMDirectConnector --> RankConsistencyManager
-    RankConsistencyManager --> UcmKVStoreBaseV1 : lookup_on_prefix
-    UcmKVStoreBaseV1 --> CacheStore : Python/C++ binding
     CacheStore *-- BufferManager
-    CacheStore *-- PrefetchQueue
+    CacheStore *-- PrefetchQueue : worker 启动线程
     BufferManager *-- Buffer
-    BufferManager --> StoreV1 : 查询下层前缀
-    PrefetchQueue --> Buffer
-    PrefetchQueue --> StoreV1 : 预取 shard 0
-    PrefetchQueue ..> Handle : 持有 owner 并发布状态
-    Buffer ..> Handle : Get 返回
-    Buffer *-- CtrlLayout
-    CtrlLayout *-- "1..N" PrefetchRing
+    BufferManager --> StoreV1 : 查询下层命中
+    BufferManager --> Buffer : 分发命令
+    Buffer ..> CtrlLayout : 访问共享控制区
+    CtrlLayout --> "每 rank 一个" PrefetchRing : 定位命令环
+    PrefetchQueue --> Buffer : 消费命令并获取 slot
+    Buffer ..> Handle : 返回
+    PrefetchQueue ..> Handle : 获取地址并发布状态
+    PrefetchQueue --> StoreV1 : 执行 S2H
 ```
 
 ## 6. 测试方法
@@ -292,11 +307,13 @@ classDiagram
 测试数据应满足“下层存储已有 block、Host Cache 尚未缓存”。在模型、block 数、数据大小以及 Lookup 到正式访问的调度间隔一致时，对比不触发预取和先执行 `LookupOnPrefix` 两组流程：
 
 - Lookup 结果与未启用预取时一致；
-- Direct 和 LayerWise Connector 都调用 `lookup_on_prefix` 并产生预取命令；
+- 共享 Buffer 路径下，Direct 和 LayerWise Connector 都通过 `lookup_on_prefix` 产生预取命令；
 - Direct 模式的 `shard 0` 包含整块 KV，LayerWise 模式的 `shard 0` 只包含模型第 0 层，正式请求前均不发生 H2D；
 - 非流水线并行的 LayerWise 模式中，预取完成后第 0 层不再创建重复的下层读取，首层 backend wait 接近 0；
 - pipeline parallel 的非首 stage 应单独验证并记录当前 `shard 0` 与 `first_layer_id` 不一致的行为；在预取命令携带 shard id 前，不应把它计为本地首层预取命中；
 - 预取尚未完成时，同一 slot 不发生重复的下层读取；命令环溢出或预取失败后，后续访问仍能按需成功；
-- 同时覆盖多个生产者写入预取环、FIFO 顺序、溢出 dropped 计数和队列复用。
+- 覆盖多生产者入队、FIFO 消费、锁竞争和队列满时的 dropped 计数；无丢弃时，当前策略每批分给各在线 rank 的命令数最多相差 1。
+
+4.4 的原始索引分段方案实现后，再检查过滤 Host 命中后的位置对应、目标 rank 未就绪、已有 slot 复用及跨段回退，确认预取与正式任务采用相同索引基准。
 
 绝对耗时受存储介质和数据大小影响，不建议设置统一的毫秒阈值；应在相同环境下比较第一层 backend wait、`ucm:cache_load_duration_ms` 和 TTFT 的分布。
