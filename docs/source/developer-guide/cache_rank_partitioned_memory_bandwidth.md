@@ -133,18 +133,18 @@ classDiagram
 
 ### 3.1 历史自测数据
 
-历史自测使用 GLM-5.1、64K 输入、并发 1 和 100% 命中，TTFT 如下。该数据用于记录自测用例和历史量级，不作为本方案的验收结果。
+历史自测使用 GLM-5.1、64K 输入、并发 32 和 100% 命中，结果如下。
 
-| 版本 | HBM PC 命中 | Cache 命中 | Posix 命中 |
-|---|---:|---:|---:|
-| 历史优化前 | 591.44 ms | 1045.37 ms | 1369.95 ms |
-| 历史优化后 | 583.94 ms | 943.27 ms | 1540.56 ms |
+| 版本 | HBM PC TTFT | Cache TTFT | Cache 单层 Load | Posix TTFT | Posix 单层 Load |
+|---|---:|---:|---:|---:|---:|
+| 优化前 | 600 ms | 975 ms | Avg 7.46 ms，P99 18.6 ms | 1380 ms | Avg 13.6 ms，P99 40 ms |
+| 优化后 | 570 ms | 740 ms | Avg 3.1 ms，P99 4.35 ms | 1350 ms | Avg 13.3 ms，P99 40 ms |
 
 ### 3.2 验收方法
 
-建议在 A3 多 NUMA 服务器上部署 MLA 模型，使用 64K、并发 1、100% 命中的用例，并控制输出长度。较长的缓存前缀带来足够大的 KV 加载量，低并发和短输出减少额外计算，使逐层 Cache Load 无法被完全掩盖。
+建议测试用例为 A3 + MLA 模型 + 长序列高命中（100%），观察 TTFT 收益。
 
-分别测试 HBM PC 命中、Cache 命中和 Posix 命中。Cache 命中时预先将数据加载到 Host Cache，并确认没有回源 Posix；Posix 命中时确保 Host Cache 未命中、数据从 Posix 回填。固定模型、输入、并行配置、Cache 容量和 stream 数，完成预热后重复执行相同请求，观察：
+分别测试 HBM PC 命中、Cache 命中和 Posix 命中。固定模型、输入、并行配置、Cache 容量和 stream 数，完成预热后重复执行相同请求，观察：
 
 - TTFT：比较三种命中路径的端到端首 token 时延。
 - `ucm:cache_load_duration_ms`：比较 Cache 命中和 Posix 命中时的单层 Cache Load 耗时。
