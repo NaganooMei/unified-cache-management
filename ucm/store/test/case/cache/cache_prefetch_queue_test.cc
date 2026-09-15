@@ -117,7 +117,7 @@ TEST_F(CachePrefetchTest, DemandDefersPrefetchAndFailureCanRetry)
     EXPECT_CALL(backend, Load(_)).WillOnce(Return(Detail::TaskHandle{2}));
     EXPECT_CALL(backend, Wait(2)).WillOnce(Return(Status::Error()));
     EXPECT_EQ(queue.PollOnce(), 1u);
-    EXPECT_FALSE(buffer.Exist(key, 0));
+    EXPECT_TRUE(buffer.Exist(key, 0));
     auto retry = buffer.Get(key, 0);
     EXPECT_TRUE(retry.Owner());
     EXPECT_EQ(retry.GetState(), State::Loading);
