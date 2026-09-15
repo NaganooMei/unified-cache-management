@@ -1154,9 +1154,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
             .get("ucm_connector_config", {})
             .get("share_buffer_enable", self.is_mla)
         )
-        # MLA ranks always share one partitioned host-cache domain. An explicit
-        # false from an older config must not select the retired shared-buffer path.
-        share_buffer_enable = self.is_mla or bool(configured_share_buffer)
+        share_buffer_enable = bool(configured_share_buffer)
         if share_buffer_enable:
             if role == KVConnectorRole.WORKER:
                 self.unique_id = _worker_generate_unique_id()
@@ -1285,13 +1283,10 @@ class UCMDirectConnector(KVConnectorBase_V1):
             )
 
     def _configure_partitioned_store(self, config: dict[str, Any]) -> None:
-        # Rank partitioning is an implementation detail of every shared Buffer,
-        # not a user-selectable mode. MLA always uses the shared Buffer; GQA keeps
-        # its existing default of a process-local Buffer unless sharing is enabled.
-        config.pop("share_buffer_rank_striped", None)
+        # Rank partitioning is an implementation detail of every shared Buffer.
+        # MLA enables sharing by default; GQA defaults to a process-local Buffer.
+        # An explicit share_buffer_enable setting is honored for both layouts.
         config.setdefault("share_buffer_enable", self.is_mla)
-        if self.is_mla:
-            config["share_buffer_enable"] = True
         if not config.get("share_buffer_enable", False):
             return
         parallel = self._vllm_config.parallel_config
@@ -1300,8 +1295,8 @@ class UCMDirectConnector(KVConnectorBase_V1):
         ) % parallel.pipeline_parallel_size
         if parallel.pipeline_parallel_size > 1:
             config["unique_id"] += f"_pp{pp_rank}"
-        # The control-plane process may create the shared layout before workers, so it
-        # must use the same segment count even though it does not own a data segment.
+        # The scheduler is control-only, but must declare the same segment count
+        # when it attaches to and validates the shared control layout.
         config["share_buffer_segment_count"] = self.tp_size
         config["local_rank_size"] = self.tp_size if self.is_mla else 1
         if self._role != KVConnectorRole.WORKER:
@@ -1329,7 +1324,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 f"configured TP size {self.tp_size}"
             )
         config["share_buffer_rank"] = topology[0]
-        config["share_buffer_segment_count"] = topology[1]
 
     def _create_store(
         self,

@@ -103,17 +103,21 @@ class PartitionedBufferTopologyTest(unittest.TestCase):
         configure(worker, config)
         self.assertEqual(config["unique_id"], "instance_pp1")
 
-    def test_mla_forces_partitioned_shared_buffer(self):
-        config = self.config()
-        config["share_buffer_enable"] = False
-        config["share_buffer_rank_striped"] = False
+    def test_mla_defaults_to_partitioned_shared_buffer(self):
+        config = {"unique_id": "instance", "device_id": 15}
         worker = self.worker()
         worker._partitioned_buffer_topology = (3, 8)
         configure(worker, config)
         self.assertTrue(config["share_buffer_enable"])
         self.assertEqual(config["share_buffer_segment_count"], 8)
         self.assertEqual(config["share_buffer_rank"], 3)
-        self.assertNotIn("share_buffer_rank_striped", config)
+
+    def test_mla_honors_explicitly_disabled_shared_buffer(self):
+        config = {"share_buffer_enable": False, "unique_id": "instance"}
+        configure(self.worker(), config)
+        self.assertFalse(config["share_buffer_enable"])
+        self.assertNotIn("share_buffer_segment_count", config)
+        self.assertNotIn("share_buffer_rank", config)
 
     def test_gqa_uses_process_local_buffer_by_default(self):
         worker = self.worker()
