@@ -79,13 +79,32 @@ localSlot = globalSlot % slotsPerSegment
 最新实现不再只依赖进程运行在哪个 CPU 上触发 first-touch，而是先确定 Host 数据区应该使用的 NUMA 节点。选择顺序如下：
 
 1. vLLM worker 通过 `npu-smi info -t topo` 获取 NPU 的 CPU Affinity，再用 `lscpu -e=cpu,node` 将这些 CPU 映射到 NUMA 节点。只有所有亲和 CPU 唯一落在同一 NUMA 节点时，才生成内部的设备亲和节点提示。该提示优先级最高，同时适用于 MLA 的共享 rank 数据段和 GQA 的私有 Buffer。
-2. 无法得到唯一设备亲和节点时，共享 Buffer 使用 `share_buffer_numa_nodes`。配置为空时，程序取“有内存的在线节点”与当前进程 `Mems_allowed_list` 的交集。节点按数据段数分组，同一组中的页面在节点间均匀划分；rank、数据段与 NUMA 节点不要求一一对应。
-3. 对没有可靠拓扑信息的 NPU GQA 私有 Buffer，按 TP rank 在当前允许使用的内存节点之间轮转，避免所有私有 Buffer 都依赖同一个 first-touch 节点。
+2. 无法得到唯一设备亲和节点时，共享 Buffer 使用 `share_buffer_numa_nodes`。配置为空时，程序取“有内存的在线节点”与当前进程 `Mems_allowed_list` 的交集。多个数据段按段数对节点分组，同一组中的页面在节点间均匀划分；只有一个数据段时，该段固定放在节点列表的第一个 NUMA 上，不再依赖 first-touch。
+3. 对没有可靠拓扑信息的 NPU GQA 私有 Buffer，按本机 worker 的 `DP × PP × TP` 位置生成回退序号，再在当前允许使用的内存节点之间轮转。这样 DP rank 和 TP rank 都参与分配，不会在每个 DP 域内重新从 TP rank 0 开始。
 4. 以上信息都不可用时，保留普通 first-touch 作为兜底。
 
-拓扑探测只在 worker 进行。由连接器生成的设备亲和节点和 TP rank 回退提示属于内部策略，不作为用户配置项。显式节点若不在当前进程的 `Mems_allowed_list` 中，会在初始化阶段报错，而不是静默退回到随机放置。
+拓扑探测只在 worker 进行。由连接器生成的设备亲和节点和 worker 回退序号属于内部策略，不作为用户配置项。显式节点若不在当前进程的 `Mems_allowed_list` 中，会在初始化阶段报错，而不是静默退回到随机放置。
 
-### 3.2 绑定、触页与验证
+### 3.2 GQA 与 MLA 在 DP 场景下的差异
+
+GQA 默认关闭共享 Buffer，每个 worker 拥有一块完整的私有 Host Buffer。因此在无法获取设备亲和拓扑的 A3 上，NUMA 分配范围需要覆盖本机所有 GQA worker，而不能只看 TP rank。回退序号按下面的逻辑计算：
+
+~~~text
+fallbackRank = localDpRank * (ppSize * tpSize) + modelParallelRank
+targetNuma = allowedNumaNodes[fallbackRank % allowedNumaNodeCount]
+~~~
+
+MLA 默认共享 Buffer。不同 DP 中相同 TP rank 的 worker 加入同一个 Cache 域，并竞争同一逻辑数据段的创建权；只有一个进程实际创建、初始化和发布该数据段，其他进程映射已经发布的数据段。因此 MLA 的物理数据段数量由 TP 决定，不随 DP 数量增加。
+
+| 场景 | GQA | MLA |
+|---|---|---|
+| A3，DP8 TP1 | 8 个私有 Buffer，回退序号为 0～7；存在至少 8 个可用 NUMA 时分别落在 8 个节点 | 8 个 DP 共享 rank 0 的一个数据段；该段放在一个 NUMA，其他 DP 映射同一份物理页 |
+| A3，DP2 TP8 | 16 个私有 Buffer，按 0～15 在可用 NUMA 上轮转 | 两个 DP 共享 8 个 TP 数据段，每个逻辑段只创建一次 |
+| A2，有有效 topo | 每个私有 Buffer 优先跟随本 worker 的设备亲和 NUMA | 每个共享数据段优先跟随实际创建者的设备亲和 NUMA，其他 DP 映射该段 |
+
+以 A3、DP8 TP1 为例，GQA 的目标是利用 8 个独立私有 Buffer 并行使用 8 个 NUMA；MLA 的目标则是让 8 个 DP 复用同一个共享数据段，避免为相同 KV 创建 8 份 Host Cache。这里所说的“一个共享数据段”不包含控制区；控制区仍是独立的共享元数据映射。
+
+### 3.3 绑定、触页与验证
 
 每个 rank 创建本地数据段后，严格按以下顺序初始化：
 
@@ -299,6 +318,8 @@ classDiagram
 - 各数据段已用 slot 大致均衡，多个内存控制器同时产生有效读带宽；
 - 与流量集中在单节点的基线相比，`ucm:cache_load_duration_ms` 均值和 P99 下降；
 - Posix 命中的 TTFT 与单层 Load 不出现稳定劣化。
+
+在 A3 上还应分别检查 DP8 TP1：GQA 的 `FallbackNumaRank` 应覆盖 0～7，并出现 8 组私有 Buffer 绑定记录；MLA 应只有 rank 0 数据段的一组 `SHM NUMA bind/verify`，其他 DP 只映射该段。可以先运行 `python test/cache_numa_topology_live.py --devices 0-7 --verify-pages` 检查当前机器的预期矩阵和实际页面绑定能力。
 
 建议使用 A3、MLA 模型、长序列高命中（100%）负载，同时比较 HBM PC、Cache 和 Posix 三条命中路径。预期 Cache 命中的 `ucm:cache_load_duration_ms` 相对单块共享内存版本降低 20% 以上，并体现为 TTFT 下降。
 
