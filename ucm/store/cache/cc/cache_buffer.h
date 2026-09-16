@@ -217,12 +217,12 @@ public:
     }
 
     /* Prefetch command rings: the SPSC ring ops live in CtrlLayout (contract there). */
-    void EnqueuePrefetch(size_t rank, const Detail::BlockId* blocks, size_t num)
+    void EnqueuePrefetch(size_t rank, const PrefetchCommand* commands, size_t num)
     {
-        ctrl_->Layout().RingPush(rank, blocks, num);
+        ctrl_->Layout().RingPush(rank, commands, num);
     }
 
-    size_t DrainPrefetch(size_t rank, Detail::BlockId* out, size_t max)
+    size_t DrainPrefetch(size_t rank, PrefetchCommand* out, size_t max)
     {
         return ctrl_->Layout().RingDrain(rank, out, max);
     }

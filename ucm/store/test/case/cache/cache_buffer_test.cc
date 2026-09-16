@@ -568,23 +568,35 @@ TEST(UcmV2CacheBufferTest, PrefetchRingFifoOverflowDropReuse)
     ASSERT_TRUE(buf.Setup(cfg).Success());
 
     /* FIFO order. */
-    std::vector<UC::Detail::BlockId> in;
-    for (uint32_t i = 0; i < 10; i++) { in.push_back(MakeBlockIdN(i + 1)); }
+    std::vector<C::PrefetchCommand> in;
+    for (uint32_t i = 0; i < 10; i++) {
+        in.push_back({MakeBlockIdN(i + 1), i + 10, i % 4});
+    }
     buf.EnqueuePrefetch(3, in.data(), in.size());
-    std::vector<UC::Detail::BlockId> out(C::kPrefetchDepth);
+    std::vector<C::PrefetchCommand> out(C::kPrefetchDepth);
     EXPECT_EQ(buf.DrainPrefetch(3, out.data(), out.size()), 10u);
-    for (size_t i = 0; i < 10; i++) { EXPECT_EQ(out[i], in[i]); }
+    for (size_t i = 0; i < 10; i++) {
+        EXPECT_EQ(out[i].block, in[i].block);
+        EXPECT_EQ(out[i].shard, in[i].shard);
+        EXPECT_EQ(out[i].preferredSegment, in[i].preferredSegment);
+    }
     EXPECT_EQ(buf.DrainPrefetch(3, out.data(), out.size()), 0u);
 
     /* Overflow keeps the front of the batch and drops (counts) the remainder. */
-    std::vector<UC::Detail::BlockId> big;
-    for (uint32_t i = 0; i < C::kPrefetchDepth + 7; i++) { big.push_back(MakeBlockIdN(10000 + i)); }
+    std::vector<C::PrefetchCommand> big;
+    for (uint32_t i = 0; i < C::kPrefetchDepth + 7; i++) {
+        big.push_back({MakeBlockIdN(10000 + i), i % 3, i % 4});
+    }
     buf.EnqueuePrefetch(3, big.data(), big.size());
     EXPECT_EQ(buf.PrefetchDropped(3), 7u);
     size_t got = 0;
     size_t n;
     while ((n = buf.DrainPrefetch(3, out.data(), 1000)) > 0) {
-        for (size_t i = 0; i < n; i++) { EXPECT_EQ(out[i], big[got + i]); }
+        for (size_t i = 0; i < n; i++) {
+            EXPECT_EQ(out[i].block, big[got + i].block);
+            EXPECT_EQ(out[i].shard, big[got + i].shard);
+            EXPECT_EQ(out[i].preferredSegment, big[got + i].preferredSegment);
+        }
         got += n;
     }
     EXPECT_EQ(got, C::kPrefetchDepth);
@@ -593,7 +605,11 @@ TEST(UcmV2CacheBufferTest, PrefetchRingFifoOverflowDropReuse)
     /* Reuse after wraparound. */
     buf.EnqueuePrefetch(3, in.data(), in.size());
     EXPECT_EQ(buf.DrainPrefetch(3, out.data(), out.size()), 10u);
-    for (size_t i = 0; i < 10; i++) { EXPECT_EQ(out[i], in[i]); }
+    for (size_t i = 0; i < 10; i++) {
+        EXPECT_EQ(out[i].block, in[i].block);
+        EXPECT_EQ(out[i].shard, in[i].shard);
+        EXPECT_EQ(out[i].preferredSegment, in[i].preferredSegment);
+    }
     EXPECT_EQ(buf.PrefetchDropped(3), 7u);
 }
 
@@ -655,6 +671,7 @@ TEST(UcmV2CacheBufferTest, AbandonedOwnerPublishesFailureAndCanRetry)
 
 TEST(UcmV2CacheBufferTest, ConcurrentPrefetchProducersDoNotOverwriteCommands)
 {
+    namespace C = UC::CacheStore;
     auto cfg = MakeConfig(-1);
     UC::CacheStore::Buffer buf;
     ASSERT_TRUE(buf.Setup(cfg).Success());
@@ -664,15 +681,16 @@ TEST(UcmV2CacheBufferTest, ConcurrentPrefetchProducersDoNotOverwriteCommands)
     for (size_t p = 0; p < producers; ++p) {
         threads.emplace_back([&, p] {
             for (size_t i = 0; i < count; ++i) {
-                auto key = MakeBlockIdN(p * count + i);
-                buf.EnqueuePrefetch(0, &key, 1);
+                C::PrefetchCommand command{MakeBlockIdN(p * count + i), p, p % producers};
+                buf.EnqueuePrefetch(0, &command, 1);
             }
         });
     }
     for (auto& thread : threads) { thread.join(); }
-    std::vector<UC::Detail::BlockId> out(producers * count);
+    std::vector<C::PrefetchCommand> out(producers * count);
     auto n = buf.DrainPrefetch(0, out.data(), out.size());
-    std::set<UC::Detail::BlockId> unique(out.begin(), out.begin() + n);
+    std::set<UC::Detail::BlockId> unique;
+    for (size_t i = 0; i < n; i++) { unique.insert(out[i].block); }
     EXPECT_EQ(unique.size(), n);
     EXPECT_EQ(n + buf.PrefetchDropped(0), producers * count);
 }

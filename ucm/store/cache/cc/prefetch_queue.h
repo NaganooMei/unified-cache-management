@@ -48,8 +48,8 @@ public:
     }
 
 private:
-    /* Prefetch executor: drains this rank's command ring and loads the first shard of
-     * each requested block from the backend into the cache. Sequential on purpose —
+    /* Prefetch executor: drains this rank's command ring and loads the command's shard
+     * from the backend into the requested cache segment. Sequential on purpose —
      * prefetch is a background hint; integration point for the future Dispatch engine. */
     void PrefetchLoop()
     {
@@ -57,7 +57,7 @@ private:
         constexpr size_t kPrefetchBatch = 64;
         auto rank = buffer_->MyRank();
         if (rank == kInvalidIndex) { return; }
-        Detail::BlockId batch[kPrefetchBatch];
+        PrefetchCommand batch[kPrefetchBatch];
         while (!stop_.load(std::memory_order_relaxed)) {
             auto n = buffer_->DrainPrefetch(rank, batch, kPrefetchBatch);
             if (n == 0) {
@@ -74,24 +74,26 @@ private:
     /* One backend Load per drained batch. Failure is batch-granular (Wait reports a
      * single status): on failure the whole batch is marked Failed and healed by the
      * next Get/prefetch that takes ownership. */
-    void PrefetchBatch(const Detail::BlockId* blocks, size_t num)
+    void PrefetchBatch(const PrefetchCommand* commands, size_t num)
     {
         Detail::TaskDesc task;
         std::vector<Buffer::Handle> handles;
         handles.reserve(num);
         for (size_t i = 0; i < num; i++) {
-            /* First shard only; allowReserved=false keeps the load-exclusive region
-             * for real loads. A non-owner handle means the block is cached or being
-             * loaded by any rank — ensure-cached semantics, nothing to do. */
-            auto h = buffer_->Get(blocks[i], 0, false);
+            /* allowReserved=false keeps the load-exclusive region for real loads. A
+             * non-owner handle means the block is cached or being loaded by any rank —
+             * ensure-cached semantics, nothing to do. */
+            const auto& command = commands[i];
+            auto h = buffer_->Get(command.block, command.shard, false,
+                                  command.preferredSegment);
             if (!h || !h.Owner()) { continue; }
             if (h.Data() == nullptr) {
                 h.MarkFailed();
                 continue;
             }
             Detail::Shard shard;
-            shard.owner = blocks[i];
-            shard.index = 0;
+            shard.owner = command.block;
+            shard.index = command.shard;
             shard.addrs.push_back(h.Data());
             task.push_back(std::move(shard));
             handles.emplace_back(std::move(h));

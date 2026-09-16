@@ -56,7 +56,7 @@ inline constexpr size_t kPrefetchDepth = 4096;
 /* Bumped on every incompatible SlotMeta / layout change; all ranks sharing one cache
  * domain must run the same binary. */
 inline constexpr uint32_t kMagic =
-    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 11u;
+    (static_cast<uint32_t>('U') << 16) | (static_cast<uint32_t>('C') << 8) | 12u;
 
 enum class State : uint8_t { Loading, Ready, Failed };
 
@@ -115,6 +115,15 @@ struct SlotMeta {
     }
 };
 
+/* A scheduler-side lookup does not own a data mapping. It sends the cache key and the
+ * same placement hint that the later formal Load will use; the target worker resolves
+ * the process-local Host address when it consumes the command. */
+struct PrefetchCommand {
+    Detail::BlockId block{};
+    size_t shard{0};
+    size_t preferredSegment{kInvalidIndex};
+};
+
 /* Per-rank command ring: try-lock serialization supports concurrent producers.
  * One worker consumes each ring. Hints may be dropped on contention or overflow. */
 struct PrefetchRing {
@@ -122,7 +131,7 @@ struct PrefetchRing {
     alignas(64) std::atomic<uint64_t> head{0};
     alignas(64) std::atomic<uint64_t> tail{0};
     alignas(64) std::atomic<uint64_t> dropped{0};
-    Detail::BlockId entries[kPrefetchDepth];
+    PrefetchCommand entries[kPrefetchDepth];
 };
 
 struct Header {

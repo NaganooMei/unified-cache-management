@@ -105,9 +105,9 @@ public:
     }
 
     // Multiple producers, one consumer per rank. Lookup must not wait on a producer.
-    void RingPush(size_t rank, const Detail::BlockId* blocks, size_t num)
+    void RingPush(size_t rank, const PrefetchCommand* commands, size_t num)
     {
-        if (rank >= maxRanks_ || num == 0 || blocks == nullptr) { return; }
+        if (rank >= maxRanks_ || num == 0 || commands == nullptr) { return; }
         auto* ring = RingOf(rank);
         if (!ring->producers.TryLock()) {
             ring->dropped.fetch_add(num, std::memory_order_relaxed);
@@ -117,13 +117,15 @@ public:
         auto t = ring->tail.load(std::memory_order_acquire);
         auto free = kPrefetchDepth - static_cast<size_t>(h - t);
         auto n = num < free ? num : free;
-        for (size_t i = 0; i < n; i++) { ring->entries[(h + i) % kPrefetchDepth] = blocks[i]; }
+        for (size_t i = 0; i < n; i++) {
+            ring->entries[(h + i) % kPrefetchDepth] = commands[i];
+        }
         ring->head.store(h + n, std::memory_order_release);
         if (n < num) { ring->dropped.fetch_add(num - n, std::memory_order_relaxed); }
         ring->producers.Unlock();
     }
 
-    size_t RingDrain(size_t rank, Detail::BlockId* out, size_t max)
+    size_t RingDrain(size_t rank, PrefetchCommand* out, size_t max)
     {
         if (rank >= maxRanks_ || max == 0 || out == nullptr) { return 0; }
         auto* ring = RingOf(rank);
