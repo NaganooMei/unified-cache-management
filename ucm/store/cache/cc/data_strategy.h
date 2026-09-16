@@ -111,8 +111,8 @@ public:
             try {
                 nodes = ShmNuma::RankNode(ShmNuma::DefaultNodes(), *config.fallbackNumaRank);
             } catch (const std::exception& error) {
-                UC_WARN("Cannot distribute private Buffer by TP rank: {}. Fall back to "
-                        "first-touch.",
+                UC_WARN("Cannot distribute private Buffer by host-local worker rank: {}. "
+                        "Fall back to first-touch.",
                         error.what());
             }
         }

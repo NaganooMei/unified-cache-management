@@ -174,8 +174,10 @@ def _segment_nodes(
 ) -> Tuple[int, ...]:
     """Mirror ShmNuma::DataNodes/SegmentNodes for a shared Buffer."""
 
-    if segments <= 1 or not nodes:
+    if not nodes:
         return ()
+    if segments == 1:
+        return (nodes[0],)
     groups = math.gcd(segments, len(nodes))
     per_group = len(nodes) // groups
     first = (segment % groups) * per_group
@@ -203,9 +205,9 @@ def _worker_placements(
                 source = "NPU topology"
             else:
                 # This is the current _configure_numa_placement fallback.
-                fallback_rank = tp_rank % tp_size
+                fallback_rank = worker
                 targets = (allowed_nodes[fallback_rank % len(allowed_nodes)],)
-                source = f"TP-rank fallback({fallback_rank})"
+                source = f"local-worker fallback({fallback_rank})"
         else:
             segment = f"shared-segment-{tp_rank}"
             if detected_node is not None:
@@ -286,15 +288,6 @@ def _print_scenario(
         )
         print(f"private Buffer distribution: {dict(sorted(counts.items()))}")
         verify_nodes.extend(counts)
-        if (
-            dp_size > 1
-            and len(counts) == 1
-            and all(item.detected_node is None for item in placements)
-        ):
-            warnings.append(
-                "all GQA private Buffers converge on one NUMA node because every "
-                "DP worker has TP rank 0"
-            )
     else:
         by_segment: Dict[str, List[WorkerPlacement]] = {}
         for item in placements:
@@ -321,12 +314,6 @@ def _print_scenario(
             ("shared segment", "candidate devices", "possible target", "ownership"),
             summary_rows,
         )
-        if tp_size == 1 and all(not item.owner_target for item in placements):
-            warnings.append(
-                "MLA DP8TP1 has one shared segment and no topology result; its pages "
-                "use uncontrolled first-touch placement"
-            )
-
     for item in placements:
         if not item.valid:
             warnings.append(

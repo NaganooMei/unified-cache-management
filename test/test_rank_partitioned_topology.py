@@ -30,16 +30,20 @@ configure_numa = namespace["_configure_numa_placement"]
 
 
 class PartitionedBufferTopologyTest(unittest.TestCase):
-    def worker(self, dp=0, rank=0, pp=1):
+    def worker(self, dp=0, rank=0, pp=1, tp=8, local_dp_rank=None):
         parallel = types.SimpleNamespace(
-            tensor_parallel_size=8,
+            tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
             data_parallel_rank=dp,
+            data_parallel_rank_local=(
+                dp if local_dp_rank is None else local_dp_rank
+            ),
+            data_parallel_index=dp,
             rank=rank,
         )
         return types.SimpleNamespace(
             is_mla=True,
-            tp_size=8,
+            tp_size=tp,
             _role=ROLE.WORKER,
             _vllm_config=types.SimpleNamespace(parallel_config=parallel),
         )
@@ -146,16 +150,41 @@ class PartitionedBufferTopologyTest(unittest.TestCase):
         self.assertEqual(config["share_buffer_rank"], 5)
         self.assertEqual(config["local_rank_size"], 1)
 
-    def test_gqa_without_topology_falls_back_to_tp_rank(self):
-        worker = self.worker(rank=13)
+    def test_a3_gqa_dp8tp1_spreads_by_local_worker_rank(self):
+        for dp_rank in range(8):
+            worker = self.worker(dp=dp_rank, rank=0, tp=1)
+            worker.is_mla = False
+            worker.device_id = dp_rank
+            worker.device = Mock()
+            worker.device.get_numa_node.return_value = None
+            config = {}
+            configure_numa(worker, config)
+            self.assertEqual(config["cache_fallback_numa_rank"], dp_rank)
+
+    def test_a3_gqa_dp2tp8_uses_full_worker_position(self):
+        worker = self.worker(dp=1, rank=7, tp=8)
         worker.is_mla = False
-        worker.tp_rank = 13
-        worker.device_id = 5
+        worker.device_id = 15
         worker.device = Mock()
         worker.device.get_numa_node.return_value = None
         config = {}
         configure_numa(worker, config)
-        self.assertEqual(config["cache_fallback_numa_rank"], 5)
+        self.assertEqual(config["cache_fallback_numa_rank"], 15)
+
+    def test_a3_mla_dp8tp1_keeps_one_shared_segment(self):
+        for dp_rank in range(8):
+            worker = self.worker(dp=dp_rank, rank=0, tp=1)
+            worker._partitioned_buffer_topology = (0, 1)
+            worker.device_id = dp_rank
+            worker.device = Mock()
+            worker.device.get_numa_node.return_value = None
+            config = {"unique_id": "instance"}
+            configure(worker, config)
+            configure_numa(worker, config)
+            self.assertEqual(config["unique_id"], "instance")
+            self.assertEqual(config["share_buffer_segment_count"], 1)
+            self.assertEqual(config["share_buffer_rank"], 0)
+            self.assertNotIn("cache_fallback_numa_rank", config)
 
     def test_detected_topology_takes_priority_for_gqa_and_mla(self):
         for is_mla in (False, True):

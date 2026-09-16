@@ -65,7 +65,8 @@ struct Config {
     std::optional<size_t> shareBufferRank{};
     // Connector-detected device-affine NUMA node. Not a user-selectable policy.
     std::optional<size_t> detectedNumaNode{};
-    // Connector-derived TP rank used only when GQA has no device topology affinity.
+    // Connector-derived host-local worker rank used only when a private GQA Buffer has no
+    // device topology affinity.
     std::optional<size_t> fallbackNumaRank{};
     size_t waitingQueueDepth{8192};
     size_t runningQueueDepth{524288};

@@ -59,6 +59,8 @@ TEST(UCCacheShmNumaLayoutTest, PrefersDetectedDeviceNodeForSharedAndPrivateData)
     EXPECT_EQ(Numa::DataNodes(3, {}, 1, 0, false), (std::vector<size_t>{3}));
     EXPECT_EQ(Numa::DataNodes(std::nullopt, {0, 1}, 8, 5, true),
               (std::vector<size_t>{1}));
+    EXPECT_EQ(Numa::DataNodes(std::nullopt, {0, 1}, 1, 0, true),
+              (std::vector<size_t>{0}));
     EXPECT_TRUE(Numa::DataNodes(std::nullopt, {}, 1, 0, false).empty());
 }
 

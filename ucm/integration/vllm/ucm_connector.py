@@ -1335,8 +1335,22 @@ class UCMDirectConnector(KVConnectorBase_V1):
             return
         if current_platform.device_type == "npu" and not self.is_mla:
             # A3 exposes no useful device affinity. Spread GQA private Buffers over
-            # the available NUMA nodes by TP rank instead of relying on first-touch.
-            config["cache_fallback_numa_rank"] = self.tp_rank % self.tp_size
+            # the available NUMA nodes by the worker's DP x PP x TP position.
+            # Unlike MLA, each GQA DP worker owns a private Buffer, so every local
+            # DP rank must participate instead of restarting from TP rank zero.
+            parallel = self._vllm_config.parallel_config
+            dp_rank = getattr(parallel, "data_parallel_rank_local", None)
+            if dp_rank is None:
+                dp_rank = getattr(
+                    parallel, "data_parallel_index", parallel.data_parallel_rank
+                )
+            model_parallel_size = (
+                parallel.pipeline_parallel_size * parallel.tensor_parallel_size
+            )
+            model_parallel_rank = parallel.rank % model_parallel_size
+            config["cache_fallback_numa_rank"] = (
+                dp_rank * model_parallel_size + model_parallel_rank
+            )
 
     def _create_store(
         self,
