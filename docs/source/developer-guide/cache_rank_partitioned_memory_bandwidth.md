@@ -118,18 +118,15 @@ MLA 默认共享 Buffer。不同 DP 中相同 TP rank 的 worker 加入同一个
 
 ## 4. Lookup 首层预取
 
-### 4.1 整体思路
+### 4.1 背景：把第一层 S2H 提前到 Lookup 之后
 
-预取只把下层存储中的 KV 提前读到 Host Cache，也就是提前做 S2H；它不做 H2D。正式 Load 到来后复用同一个 Host slot，再把数据拷到请求对应的 HBM 地址。
+LayerWise 模式下，第一层 KV 到 `start_load_kv` 才开始加载。后续层可以利用上一层的计算时间准备数据，第一层却要直接等待 S2H（下层存储到 Host Cache），这段等待会增加 TTFT。
 
-可以把当前实现理解成下面四步：
+其实在更早的 `get_num_new_matched_tokens` 阶段，UCM 已经生成了 blockId，并通过 Lookup 确认下层存储是否命中。此时再给定首层 shardId，worker 就能通过 `Buffer::Get(blockId, shardId)` 查找或分配 Host slot，用 `Handle::Data()` 得到本进程的 Host 地址。因此可以在 Lookup 后立即启动首层 S2H，利用它与 `start_load_kv` 之间的调度时间提前准备数据，不需要等待设备端地址就绪。
 
-1. scheduler 确定哪些 block 在下层存储命中；
-2. scheduler 按 `originalIndex % segmentCount` 把预取命令写入共享控制区中对应 rank 的队列；
-3. 所有 worker 都映射共享控制区，但每个 worker 只消费自己 rank 的队列；
-4. worker 执行 S2H，正式 Load 复用结果并执行 H2D。
+scheduler 只提交预取命令；Host slot 和地址由消费命令的 worker 获取。预取完成后，正式访问复用同一个 `(blockId, shardId)`，省去重复的 S2H。这里预取的只是 Host 数据，不执行 H2D。
 
-当前预取命令使用 `shardId = 0`。Direct 模式下它表示包含全部本地层的唯一 shard；LayerWise 模式下表示第 0 层。PP 非首 stage 的本地第一层不一定是 0，该场景仍需后续把实际 `first_layer_id` 传给 scheduler。
+普通 `UCMLayerWiseConnector` 继承 `UCMDirectConnector.get_num_new_matched_tokens`，两者都会走 Lookup。当前预取固定使用 `shardId = 0`：LayerWise 下是模型第 0 层，Direct 下是包含所有层的整块 KV。PP 非首 stage 的本地首层可能不为 0；覆盖该场景需要传入实际 `first_layer_id`。
 
 ### 4.2 Scheduler 如何写控制区
 
@@ -164,25 +161,7 @@ Buffer::Get(blockId, shardId, allowReserved=false, preferredSegment)
 
 只有取得 `Owner` 的 worker 才调用下层 `Load` 做 S2H，并在完成后发布 `Ready`；其他 worker 或正式 Load 看到同一个 `(blockId, shardId)` 时不会重复读取。
 
-### 4.4 与正式 Load 的关系
-
-在当前 `shardId = 0` 适用的 Direct、PP1 LayerWise 场景中，预取和正式 Load 使用相同的三项信息：
-
-- 相同的 `(blockId, shardId)`，因此命中同一个 Cache slot；
-- 相同的 `originalIndex % segmentCount`，因此使用相同的优先数据段；
-- 相同的下层 `StoreV1::Load` 接口完成 S2H。
-
-区别只有时机和目标地址：预取提前把数据读到 Host Cache；正式 Load 带有请求的 HBM 地址。正式 Load 到达时，如果 slot 已经 `Ready`，就跳过 S2H、直接做 H2D；如果预取仍在 `Loading`，正式 Load 等待它完成；如果正式 Load 先取得 `Owner`，则由正式 Load 完成 S2H。
-
-以 4 个数据段为例，连续 8 个 block 的分配为：
-
-| `originalIndex` | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 目标队列/优先段 | 0 | 1 | 2 | 3 | 0 | 1 | 2 | 3 |
-
-连续任务会自然均分。如果过滤后只有原始位置 1、4、6 需要预取，它们仍分别写入队列 1、0、2；此时优先保证与正式 Load 的 SHM 放置一致，不保证任意缺失集合的任务数完全均匀。
-
-### 4.5 时序图
+### 4.4 时序图
 
 ```mermaid
 sequenceDiagram
