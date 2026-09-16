@@ -72,6 +72,46 @@ localSlot = globalSlot % slotsPerSegment
 
 如果目标数据段经过两轮扫描仍找不到可回收 slot，则继续扫描其他已就绪数据段。该策略优先在目标 NUMA 数据段内完成淘汰和复用，同时在局部容量不足时允许跨段回退，避免单个数据段耗尽导致 Cache 分配失败。
 
+### 2.4 Prealloc：只提前占元数据，不负责加载数据
+
+这里的 `Prealloc` 与第 4 节的 Lookup 首层预取不是一回事。Lookup 预取会真正执行下层存储到 Host Cache 的 S2H；`LoadQueue` 中的 `Prealloc` 只是为下一个 shard 提前准备 `(blockId, shardId)` 对应的 slot 元数据，不提交后端 Load，也不会把 slot 标记为 `Ready`。
+
+正确的职责关系应当是：
+
+~~~text
+Prealloc：创建 Loading 占位，reference = 0，不取得 Owner，不执行 I/O
+正式 Get：第一次把 reference 从 0 改为 1，成为唯一 Owner
+Owner：执行后端到 Host Cache 的读取，完成后发布 Ready 或 Failed
+其他 Get：只增加引用并等待同一个 slot，不重复读取
+~~~
+
+#### 偶现 Load failure 的原因
+
+旧实现让 `TryPrealloc()` 直接调用普通 `TryGet()`。当 slot 不存在时，`TryGet()` 会按正式请求的语义创建 `Loading` slot，将 `reference` 发布为 1，并返回一个 `Owner` Handle。随后 `TryPrealloc()` 只是把该 Handle 的 `owner` 标志清掉，让它看起来不负责加载数据。
+
+问题出现在正式 Load 恰好与这个临时 Handle 重叠时：
+
+1. Prealloc 创建 `Loading` slot，当前 `reference = 1`，但没有执行后端读取。
+2. 正式 Load 调用 `Get()`，看到引用已经不是 0，于是把引用从 1 加到 2，并判断自己不是 Owner。
+3. Prealloc 的临时 Handle 析构，把引用从 2 减到 1。
+4. 正式 Load 持有剩余引用并等待状态从 `Loading` 变为 `Ready`，但系统中实际上没有任何 Owner 会执行读取和发布状态。
+
+因此，请求会一直停在某一个 shard 的 `Loading` 状态，最后表现为某一层偶现 Load timeout/failure。它不是固定层错误：只有正式 Load 落入“Prealloc 临时引用尚未释放”的并发窗口才会触发，所以相同请求有时正常、有时卡住。
+
+`Exist()` 也需要避免类似问题。如果观察线程先把一个未填充占位的引用从 0 改为 1，随后正式 Load 可能同样得到非 Owner Handle；即使观察线程很快释放引用，正式 Load 已经持有剩余引用，仍然不会重新成为 Owner。
+
+#### 修复后的 Owner 选举
+
+修复后，`TryPrealloc()` 不再借用 `TryGet()`：
+
+- 它使用目标 bucket 锁直接查找或分配元数据，占位发布为 `Loading + reference 0`。
+- 它不创建 Handle，也不冒充数据生产者；拿不到 bucket 锁或可回收 slot 时直接跳过，保持 best-effort。
+- 第一个正式 `Get()` 通过 `reference 0 -> 1` 成为唯一 Owner，并负责后端读取和 `MarkReady()` / `MarkFailed()`。
+- 并发到达的其他 `Get()` 只能成为非 Owner，等待这个 Owner 发布结果。
+- `Exist()` 在 slot 尚未 Ready 且 `reference = 0` 时不获取第一个引用，避免抢走正式 Load 的 Owner 资格。
+
+对应回归测试覆盖三种情况：Prealloc 后正式 Get 必须取得 Owner；Prealloc 与 16 个正式 Get 并发时必须且只能产生一个 Owner；`Exist()` 持续并发观察时也不能影响唯一 Owner 的产生。修复提交为 `d6f98396`。
+
 ## 3. NUMA 绑定
 
 ### 3.1 节点选择策略
