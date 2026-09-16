@@ -98,6 +98,7 @@ inline void Verify(void* base, const std::vector<Range>& ranges, const std::stri
     std::vector<int> status(batchSize);
     for (const auto& range : ranges) {
         std::map<int, size_t> counts;
+        std::map<int, size_t> queryErrors;
         size_t mismatches = 0;
         const auto pageCount = range.bytes / pageSize;
         for (size_t first = 0; first < pageCount;) {
@@ -106,14 +107,20 @@ inline void Verify(void* base, const std::vector<Range>& ranges, const std::stri
                 addresses[i] = static_cast<char*>(base) + range.offset + (first + i) * pageSize;
             }
             std::fill(status.begin(), status.end(), -EIO);
-            CheckSystemCall(
-                syscall(SYS_move_pages, 0, count, addresses.data(), nullptr, status.data(), 0),
-                "move_pages query shm=" + name);
+            const auto result =
+                syscall(SYS_move_pages, 0, count, addresses.data(), nullptr, status.data(), 0);
+            if (result < 0) {
+                const auto error = errno;
+                UC_WARN_UNLIMITED(
+                    "SHM NUMA verification is unavailable: file={} offset={} expectedNode={} "
+                    "error={} (errno={}); continuing because NUMA verification is best-effort.",
+                    name, range.offset, range.node, std::strerror(error), error);
+                return;
+            }
             for (size_t i = 0; i < count; ++i) {
                 if (status[i] < 0) {
-                    throw std::runtime_error(
-                        "move_pages page query failed: " + std::string(std::strerror(-status[i])) +
-                        " shm=" + name);
+                    ++queryErrors[-status[i]];
+                    continue;
                 }
                 ++counts[status[i]];
                 if (static_cast<size_t>(status[i]) != range.node) { ++mismatches; }
@@ -126,8 +133,19 @@ inline void Verify(void* base, const std::vector<Range>& ranges, const std::stri
                 "bytes={} mismatches={}.",
                 name, range.offset, range.node, node, pages, pages * pageSize, mismatches);
         }
+        for (const auto& [error, pages] : queryErrors) {
+            UC_WARN_UNLIMITED(
+                "SHM NUMA page verification was incomplete: file={} offset={} expectedNode={} "
+                "error={} (errno={}) pages={}; continuing because NUMA verification is "
+                "best-effort.",
+                name, range.offset, range.node, std::strerror(error), error, pages);
+        }
         if (mismatches != 0) {
-            throw std::runtime_error("SHM NUMA placement verification failed: " + name);
+            UC_WARN_UNLIMITED(
+                "SHM NUMA placement differs from the requested node: file={} offset={} "
+                "expectedNode={} mismatches={}; continuing with potentially reduced "
+                "performance.",
+                name, range.offset, range.node, mismatches);
         }
     }
 }
