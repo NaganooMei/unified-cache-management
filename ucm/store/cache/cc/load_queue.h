@@ -48,7 +48,6 @@ class LoadQueue {
         Buffer::Handle bufferHandle;
         Detail::TaskHandle backendTaskHandle;
         WaiterPtr waiter;
-        size_t originalIndex{TransTask::kDiagnosticInvalidIndex};
         bool fromPosix{false};
     };
 
