@@ -72,45 +72,23 @@ localSlot = globalSlot % slotsPerSegment
 
 如果目标数据段经过两轮扫描仍找不到可回收 slot，则继续扫描其他已就绪数据段。该策略优先在目标 NUMA 数据段内完成淘汰和复用，同时在局部容量不足时允许跨段回退，避免单个数据段耗尽导致 Cache 分配失败。
 
-### 2.4 Prealloc：只提前占元数据，不负责加载数据
+### 2.4 Prealloc 与正式 Load：并发时不能抢走 Owner
 
-这里的 `Prealloc` 与第 4 节的 Lookup 首层预取不是一回事。Lookup 预取会真正执行下层存储到 Host Cache 的 S2H；`LoadQueue` 中的 `Prealloc` 只是为下一个 shard 提前准备 `(blockId, shardId)` 对应的 slot 元数据，不提交后端 Load，也不会把 slot 标记为 `Ready`。
+`Prealloc` 只为下一个 shard 准备 slot 元数据，不读取数据；它不是第 4 节会实际执行 S2H 的 Lookup 预取。Owner 指负责读取数据、最终发布 `Ready` 或 `Failed` 的 Handle。
 
-正确的职责关系应当是：
+为什么逐层 `wait` 仍可能重叠？每个 worker 进程都有自己的分发线程 `ucm_load_disp` 和传输线程 `ucm_load_xfer`。同一个 LoadQueue 的 `Prealloc` 和正式 `Get` 在分发线程中串行执行，但不同 worker 会访问同一共享 slot。当前 shard 先进入传输队列，分发线程再执行下一 shard 的 `Prealloc`；本地传输完成、`wait` 返回，不等于所有 worker 的 `Prealloc` 都已结束。因此，即使是 DP1 TP16，也不能用逐层 `wait` 推导出跨 worker 的两者互斥。
 
-~~~text
-Prealloc：创建 Loading 占位，reference = 0，不取得 Owner，不执行 I/O
-正式 Get：第一次把 reference 从 0 改为 1，成为唯一 Owner
-Owner：执行后端到 Host Cache 的读取，完成后发布 Ready 或 Failed
-其他 Get：只增加引用并等待同一个 slot，不重复读取
-~~~
+旧实现的问题不是“一并发就出错”，而是同一 `(blockId, shardId)` 上出现以下交错：
 
-#### 偶现 Load failure 的原因
+1. `Prealloc` 借用 `TryGet()`，取得尚未填充 slot 的第一个引用（`0 -> 1`），随后清掉自己的 Owner 标志，却不执行读取。
+2. 临时 Handle 释放前，另一个 worker 的正式 `Get()` 加引用（`1 -> 2`），因此没有成为 Owner。
+3. 临时 Handle 释放（`2 -> 1`），剩下的正式请求仍是非 Owner：大家等 `Ready`，却没人负责加载，最终超时。
 
-旧实现让 `TryPrealloc()` 直接调用普通 `TryGet()`。当 slot 不存在时，`TryGet()` 会按正式请求的语义创建 `Loading` slot，将 `reference` 发布为 1，并返回一个 `Owner` Handle。随后 `TryPrealloc()` 只是把该 Handle 的 `owner` 标志清掉，让它看起来不负责加载数据。
+修复 [d6f98396](https://github.com/NaganooMei/unified-cache-management/commit/d6f983968449fc99f0fed012945cc8c5373e6af1) 让 `Prealloc` 在 bucket 锁内只创建 `Loading + reference 0` 的占位，不创建 Handle、不占第一个引用；第一个正式 `Get()` 再通过 `0 -> 1` 成为唯一 Owner。`Exist()` 也不能抢占未 Ready slot 的第一个引用。修复允许并发，通过引用和 Owner 规则保证正确性，而不是把所有 worker 的 Prealloc 和 Load 串行化。
 
-问题出现在正式 Load 恰好与这个临时 Handle 重叠时：
+验证结论：两份 DP1 TP16 日志分别在 layer 42、61 卡住，现象支持 Owner 丢失，但没有直接记录上述交错；`transferred` 统计成功提交的 H2D 数量，与 Rank 重排吻合只解释各 rank 的停顿位置，不能单独证明根因。
 
-1. Prealloc 创建 `Loading` slot，当前 `reference = 1`，但没有执行后端读取。
-2. 正式 Load 调用 `Get()`，看到引用已经不是 0，于是把引用从 1 加到 2，并判断自己不是 Owner。
-3. Prealloc 的临时 Handle 析构，把引用从 2 减到 1。
-4. 正式 Load 持有剩余引用并等待状态从 `Loading` 变为 `Ready`，但系统中实际上没有任何 Owner 会执行读取和发布状态。
-
-因此，请求会一直停在某一个 shard 的 `Loading` 状态，最后表现为某一层偶现 Load timeout/failure。它不是固定层错误：只有正式 Load 落入“Prealloc 临时引用尚未释放”的并发窗口才会触发，所以相同请求有时正常、有时卡住。
-
-`Exist()` 也需要避免类似问题。如果观察线程先把一个未填充占位的引用从 0 改为 1，随后正式 Load 可能同样得到非 Owner Handle；即使观察线程很快释放引用，正式 Load 已经持有剩余引用，仍然不会重新成为 Owner。
-
-#### 修复后的 Owner 选举
-
-修复后，`TryPrealloc()` 不再借用 `TryGet()`：
-
-- 它使用目标 bucket 锁直接查找或分配元数据，占位发布为 `Loading + reference 0`。
-- 它不创建 Handle，也不冒充数据生产者；拿不到 bucket 锁或可回收 slot 时直接跳过，保持 best-effort。
-- 第一个正式 `Get()` 通过 `reference 0 -> 1` 成为唯一 Owner，并负责后端读取和 `MarkReady()` / `MarkFailed()`。
-- 并发到达的其他 `Get()` 只能成为非 Owner，等待这个 Owner 发布结果。
-- `Exist()` 在 slot 尚未 Ready 且 `reference = 0` 时不获取第一个引用，避免抢走正式 Load 的 Owner 资格。
-
-对应回归测试覆盖三种情况：Prealloc 后正式 Get 必须取得 Owner；Prealloc 与 16 个正式 Get 并发时必须且只能产生一个 Owner；`Exist()` 持续并发观察时也不能影响唯一 Owner 的产生。修复提交为 `d6f98396`。
+修复包含 Prealloc 后取 Owner、16 路并发唯一 Owner、并发 Exist 不干扰选举的回归测试。用户反馈修复后未再复现，可暂按该问题已修复处理，但不等于排除了所有其他 Load 超时原因。
 
 ## 3. NUMA 绑定
 
