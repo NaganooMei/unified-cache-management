@@ -35,6 +35,8 @@ namespace UC::CacheStore {
 
 class TransManager : public Detail::TaskWrapper<TransTask, Detail::TaskHandle> {
     size_t shardSize_;
+    int32_t deviceId_{-1};
+    size_t bufferRank_{0};
     LoadQueue loadQ_;
     DumpQueue dumpQ_;
 
@@ -43,6 +45,8 @@ public:
     {
         timeoutMs_ = config.timeoutMs;
         shardSize_ = config.shardSize;
+        deviceId_ = config.deviceId;
+        bufferRank_ = config.EffectiveBufferRank();
         auto s = loadQ_.Setup(config, &failureSet_, buffer);
         if (s.Failure()) [[unlikely]] { return s; }
         return dumpQ_.Setup(config, &failureSet_, buffer);
@@ -50,6 +54,33 @@ public:
 
 protected:
     Status FailureStatus(const TaskPtr& task) const override { return task->FailureStatus(); }
+    void Cancel(TaskPtr task) override
+    {
+        if (task->type != TransTask::Type::LOAD) { return; }
+        UC_ERROR(
+            "CACHE_LOAD_DIAG task_timeout task={} brief={} device={} buffer_rank={} shards={} "
+            "dispatch_phase={} dispatched={} dispatch_original={} dispatch_shard={} "
+            "dispatch_block_hash={} preferred_segment={} transfer_phase={} transferred={} "
+            "transfer_original={} transfer_shard={} transfer_block_hash={} segment={} "
+            "global_slot={} backend_task={} slot_state={} pending_owners={}",
+            task->id, task->desc.brief, deviceId_, bufferRank_, task->desc.size(),
+            LoadDispatchPhaseName(task->loadDispatchPhase.load(std::memory_order_acquire)),
+            task->dispatchedShards.load(std::memory_order_relaxed),
+            task->dispatchOriginalIndex.load(std::memory_order_relaxed),
+            task->dispatchShardIndex.load(std::memory_order_relaxed),
+            task->dispatchBlockHash.load(std::memory_order_relaxed),
+            task->dispatchPreferredSegment.load(std::memory_order_relaxed),
+            LoadTransferPhaseName(task->loadTransferPhase.load(std::memory_order_acquire)),
+            task->transferredShards.load(std::memory_order_relaxed),
+            task->transferOriginalIndex.load(std::memory_order_relaxed),
+            task->transferShardIndex.load(std::memory_order_relaxed),
+            task->transferBlockHash.load(std::memory_order_relaxed),
+            task->transferSegment.load(std::memory_order_relaxed),
+            task->transferGlobalSlot.load(std::memory_order_relaxed),
+            task->transferBackendTask.load(std::memory_order_relaxed),
+            task->transferSlotState.load(std::memory_order_relaxed),
+            task->pendingOwnerShards.load(std::memory_order_relaxed));
+    }
     void Dispatch(TaskPtr t, WaiterPtr w) override
     {
         const auto id = t->id;

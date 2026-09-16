@@ -77,6 +77,7 @@ public:
         bool Owner() const { return owner_; }
         size_t GlobalSlot() const { return Valid() ? slotIdx_ : kInvalidIndex; }
         size_t Segment() const { return Valid() ? buf_->SegmentAt(slotIdx_) : kInvalidIndex; }
+        size_t ReferenceCount() const { return Valid() ? buf_->ReferenceCount(slotIdx_) : 0; }
         void* Data() { return Valid() ? buf_->DataAt(slotIdx_) : nullptr; }
         void* DeviceData() { return Valid() ? buf_->DeviceDataAt(slotIdx_) : nullptr; }
         bool Ready() const { return Valid() && buf_->Ready(slotIdx_); }
@@ -522,6 +523,11 @@ private:
     State GetState(size_t slotIdx)
     {
         return ctrl_->Layout().SlotMetaArr()[slotIdx].state.load(std::memory_order_acquire);
+    }
+
+    size_t ReferenceCount(size_t slotIdx)
+    {
+        return ctrl_->Layout().SlotMetaArr()[slotIdx].reference.load(std::memory_order_acquire);
     }
 
     void MarkReady(size_t slotIdx)

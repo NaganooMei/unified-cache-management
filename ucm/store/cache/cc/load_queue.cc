@@ -28,6 +28,13 @@
 
 namespace UC::CacheStore {
 
+namespace {
+constexpr double kSlowLoadPhaseMs = 100.0;
+constexpr double kPeerWaitReportIntervalSeconds = 2.0;
+
+size_t BlockHash(const Detail::BlockId& block) { return Detail::BlockIdHasher{}(block); }
+}  // namespace
+
 LoadQueue::~LoadQueue()
 {
     stop_.store(true);
@@ -128,15 +135,42 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
         const auto originalIndex = indexes[i];
         auto& shard = task->desc[originalIndex];
         ShardTask shardTask;
+        shardTask.originalIndex = originalIndex;
         const auto preferredSegment =
             shared_ ? (stripeAcrossSegments_ ? originalIndex % segmentCount_ : bufferRank_)
                     : kInvalidIndex;
+        const auto blockHash = BlockHash(shard.owner);
+        task->loadDispatchPhase.store(LoadDispatchPhase::BufferGet, std::memory_order_relaxed);
+        task->dispatchOriginalIndex.store(originalIndex, std::memory_order_relaxed);
+        task->dispatchShardIndex.store(shard.index, std::memory_order_relaxed);
+        task->dispatchPreferredSegment.store(preferredSegment, std::memory_order_relaxed);
+        task->dispatchBlockHash.store(blockHash, std::memory_order_relaxed);
+        auto tpGet = NowTime::Now();
         shardTask.bufferHandle = buffer_->Get(shard.owner, shard.index, true, preferredSegment);
+        auto getMs = (NowTime::Now() - tpGet) * 1e3;
         if (!shardTask.bufferHandle) {
+            task->loadDispatchPhase.store(LoadDispatchPhase::Failed, std::memory_order_relaxed);
+            UC_ERROR(
+                "CACHE_LOAD_DIAG buffer_get_failed task={} brief={} device={} buffer_rank={} "
+                "dispatch={}/{} original={} shard={} block_hash={} preferred_segment={} "
+                "cost={:.3f}ms",
+                task->id, task->desc.brief, deviceId_, bufferRank_, i, nShard, originalIndex,
+                shard.index, blockHash, preferredSegment, getMs);
             task->Fail(Status::Retry());
             failureSet_->Insert(task->id);
             waiter->Done();
             return;
+        }
+        if (getMs >= kSlowLoadPhaseMs) {
+            UC_WARN(
+                "CACHE_LOAD_DIAG slow_buffer_get task={} brief={} device={} buffer_rank={} "
+                "dispatch={}/{} original={} shard={} block_hash={} preferred_segment={} "
+                "actual_segment={} global_slot={} owner={} state={} references={} cost={:.3f}ms",
+                task->id, task->desc.brief, deviceId_, bufferRank_, i, nShard, originalIndex,
+                shard.index, blockHash, preferredSegment, shardTask.bufferHandle.Segment(),
+                shardTask.bufferHandle.GlobalSlot(), shardTask.bufferHandle.Owner(),
+                static_cast<int>(shardTask.bufferHandle.GetState()),
+                shardTask.bufferHandle.ReferenceCount(), getMs);
         }
         shardTask.backendTaskHandle = 0;
         shardTask.fromPosix = !shardTask.bufferHandle.Ready();
@@ -153,7 +187,11 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
                 Detail::Shard{shard.owner, shard.index, {shardTask.bufferHandle.Data()}}
             };
             backendTask.brief = "Backend2Cache";
+            task->loadDispatchPhase.store(LoadDispatchPhase::BackendSubmit,
+                                          std::memory_order_relaxed);
+            auto tpBackendSubmit = NowTime::Now();
             auto res = backend_->Load(std::move(backendTask));
+            auto backendSubmitMs = (NowTime::Now() - tpBackendSubmit) * 1e3;
             if (!res) [[unlikely]] {
                 UC_ERROR("Failed({}) to submit load task({}) to backend.", res.Error(), task->id);
                 UC::Metrics::UpdateStats(
@@ -167,7 +205,18 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
                 return;
             }
             shardTask.backendTaskHandle = res.Value();
+            task->pendingOwnerShards.fetch_add(1, std::memory_order_relaxed);
             backendSubmitCount++;
+            if (backendSubmitMs >= kSlowLoadPhaseMs) {
+                UC_WARN(
+                    "CACHE_LOAD_DIAG slow_backend_submit task={} brief={} device={} buffer_rank={} "
+                    "dispatch={}/{} original={} shard={} block_hash={} segment={} global_slot={} "
+                    "backend_task={} pending_owners={} cost={:.3f}ms",
+                    task->id, task->desc.brief, deviceId_, bufferRank_, i, nShard, originalIndex,
+                    shard.index, blockHash, shardTask.bufferHandle.Segment(),
+                    shardTask.bufferHandle.GlobalSlot(), shardTask.backendTaskHandle,
+                    task->pendingOwnerShards.load(std::memory_order_relaxed), backendSubmitMs);
+            }
         }
         if (shard.index + 1 != nShardPerBlock_) {
             preallocHints.push_back(
@@ -176,11 +225,36 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
         shardTask.task = task;
         shardTask.shard = std::move(shard);
         shardTask.waiter = (i + 1 < nShard) ? nullptr : waiter;
+        task->loadDispatchPhase.store(LoadDispatchPhase::RunningQueue, std::memory_order_relaxed);
+        auto tpRunningPush = NowTime::Now();
         running_.Push(std::move(shardTask));
+        auto runningPushMs = (NowTime::Now() - tpRunningPush) * 1e3;
+        task->dispatchedShards.store(i + 1, std::memory_order_relaxed);
+        if (runningPushMs >= kSlowLoadPhaseMs) {
+            UC_WARN(
+                "CACHE_LOAD_DIAG slow_running_push task={} brief={} device={} buffer_rank={} "
+                "dispatch={}/{} original={} shard={} block_hash={} preferred_segment={} "
+                "pending_owners={} cost={:.3f}ms",
+                task->id, task->desc.brief, deviceId_, bufferRank_, i, nShard, originalIndex,
+                task->dispatchShardIndex.load(std::memory_order_relaxed), blockHash,
+                preferredSegment, task->pendingOwnerShards.load(std::memory_order_relaxed),
+                runningPushMs);
     }
     auto tpDispatch = NowTime::Now();
+    task->loadDispatchPhase.store(LoadDispatchPhase::Prealloc, std::memory_order_relaxed);
+    auto tpPrealloc = NowTime::Now();
     for (const auto& hint : preallocHints) {
         buffer_->Prealloc(hint.block, hint.shard, true, hint.segment);
+    }
+    auto preallocMs = (NowTime::Now() - tpPrealloc) * 1e3;
+    task->loadDispatchPhase.store(LoadDispatchPhase::Done, std::memory_order_release);
+    if (preallocMs >= kSlowLoadPhaseMs) {
+        UC_WARN(
+            "CACHE_LOAD_DIAG slow_prealloc task={} brief={} device={} buffer_rank={} hints={} "
+            "dispatched={}/{} pending_owners={} cost={:.3f}ms",
+            task->id, task->desc.brief, deviceId_, bufferRank_, preallocHints.size(),
+            task->dispatchedShards.load(std::memory_order_relaxed), nShard,
+            task->pendingOwnerShards.load(std::memory_order_relaxed), preallocMs);
     }
     UC_DEBUG("Cache task({}) dispatch shards({}), wait={:.3f}ms, cost={:.3f}ms.", task->id, nShard,
              (tpWait - tp) * 1e3, (tpDispatch - tpWait) * 1e3);
@@ -233,22 +307,61 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
 
     auto s = Status::OK();
     auto waiter = task.waiter;
+    parentTask->transferOriginalIndex.store(task.originalIndex, std::memory_order_relaxed);
+    parentTask->transferShardIndex.store(task.shard.index, std::memory_order_relaxed);
+    parentTask->transferGlobalSlot.store(task.bufferHandle.GlobalSlot(), std::memory_order_relaxed);
+    parentTask->transferSegment.store(task.bufferHandle.Segment(), std::memory_order_relaxed);
+    parentTask->transferBlockHash.store(BlockHash(task.shard.owner), std::memory_order_relaxed);
+    parentTask->transferBackendTask.store(task.backendTaskHandle, std::memory_order_relaxed);
+    parentTask->transferSlotState.store(static_cast<int32_t>(task.bufferHandle.GetState()),
+                                        std::memory_order_relaxed);
     do {
         auto tpBackendWait = NowTime::Now();
+        parentTask->loadTransferPhase.store(
+            task.backendTaskHandle != 0 ? LoadTransferPhase::OwnerBackendWait
+                                        : LoadTransferPhase::PeerReadyWait,
+            std::memory_order_release);
         s = WaitBackendTaskReady(task);
+        if (task.backendTaskHandle != 0) {
+            parentTask->pendingOwnerShards.fetch_sub(1, std::memory_order_relaxed);
+        }
         if (s.Failure()) [[unlikely]] {
+            parentTask->loadTransferPhase.store(LoadTransferPhase::Failed,
+                                                std::memory_order_relaxed);
             RecordShardResults(holder_, &task, false);
             break;
         }
         auto tpBackendReady = NowTime::Now();
+        parentTask->transferSlotState.store(static_cast<int32_t>(task.bufferHandle.GetState()),
+                                            std::memory_order_relaxed);
+        auto backendWaitMs = (tpBackendReady - tpBackendWait) * 1e3;
+        if (backendWaitMs >= kSlowLoadPhaseMs) {
+            UC_WARN(
+                "CACHE_LOAD_DIAG slow_ready_wait task={} brief={} device={} buffer_rank={} "
+                "kind={} original={} shard={} block_hash={} segment={} global_slot={} "
+                "backend_task={} state={} references={} dispatch_phase={} dispatched={}/{} "
+                "pending_owners={} cost={:.3f}ms",
+                taskHandle, parentTask->desc.brief, deviceId_, bufferRank_,
+                task.backendTaskHandle != 0 ? "owner" : "peer", task.originalIndex,
+                task.shard.index, parentTask->transferBlockHash.load(std::memory_order_relaxed),
+                task.bufferHandle.Segment(), task.bufferHandle.GlobalSlot(),
+                task.backendTaskHandle, static_cast<int>(task.bufferHandle.GetState()),
+                task.bufferHandle.ReferenceCount(),
+                LoadDispatchPhaseName(parentTask->loadDispatchPhase.load(std::memory_order_acquire)),
+                parentTask->dispatchedShards.load(std::memory_order_relaxed),
+                parentTask->desc.size(),
+                parentTask->pendingOwnerShards.load(std::memory_order_relaxed), backendWaitMs);
+        }
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_shard_backend_wait_ms"),
-                                 (tpBackendReady - tpBackendWait) * 1e3);
+                                 backendWaitMs);
 
         auto* host = cacheSdmaDirect_ ? task.bufferHandle.DeviceData() : task.bufferHandle.Data();
         if (host == nullptr) {
             s = Status::Error("cache transfer mapping unavailable");
             break;
         }
+        parentTask->loadTransferPhase.store(LoadTransferPhase::H2dSubmit,
+                                            std::memory_order_release);
         s = HostToDeviceAsync(stream, host, task.shard.addrs.data());
         auto tpH2dSubmitted = NowTime::Now();
         if (s.Failure()) [[unlikely]] {
@@ -257,15 +370,41 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             RecordShardResults(holder_, &task, false);
             break;
         }
+        auto h2dSubmitMs = (tpH2dSubmitted - tpBackendReady) * 1e3;
+        parentTask->transferredShards.fetch_add(1, std::memory_order_relaxed);
+        if (h2dSubmitMs >= kSlowLoadPhaseMs) {
+            UC_WARN(
+                "CACHE_LOAD_DIAG slow_h2d_submit task={} brief={} device={} buffer_rank={} "
+                "original={} shard={} block_hash={} segment={} global_slot={} submitted={}/{} "
+                "cost={:.3f}ms",
+                taskHandle, parentTask->desc.brief, deviceId_, bufferRank_, task.originalIndex,
+                task.shard.index, parentTask->transferBlockHash.load(std::memory_order_relaxed),
+                task.bufferHandle.Segment(), task.bufferHandle.GlobalSlot(),
+                parentTask->transferredShards.load(std::memory_order_relaxed),
+                parentTask->desc.size(), h2dSubmitMs);
+        }
         UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
-                                 (tpH2dSubmitted - tpBackendReady) * 1e3);
+                                 h2dSubmitMs);
         if (!waiter) {
+            parentTask->loadTransferPhase.store(LoadTransferPhase::Idle,
+                                                std::memory_order_relaxed);
             holder_.push_back(std::move(task));
             return;
         }
         auto tpH2dSyncStart = NowTime::Now();
+        parentTask->loadTransferPhase.store(LoadTransferPhase::H2dSync,
+                                            std::memory_order_release);
         s = stream.Synchronize();
         auto h2dSyncMs = (NowTime::Now() - tpH2dSyncStart) * 1e3;
+        if (h2dSyncMs >= kSlowLoadPhaseMs) {
+            UC_WARN(
+                "CACHE_LOAD_DIAG slow_h2d_sync task={} brief={} device={} buffer_rank={} "
+                "submitted={}/{} held={} pending_owners={} cost={:.3f}ms status={}",
+                taskHandle, parentTask->desc.brief, deviceId_, bufferRank_,
+                parentTask->transferredShards.load(std::memory_order_relaxed),
+                parentTask->desc.size(), holder_.size() + 1,
+                parentTask->pendingOwnerShards.load(std::memory_order_relaxed), h2dSyncMs, s);
+        }
         RecordH2dSyncMetrics(h2dSyncMs);
         RecordShardResults(holder_, &task, s.Success());
         holder_.clear();
@@ -274,8 +413,10 @@ void LoadQueue::TransferOneTask(CopyStream& stream, ShardTask&& task)
             UC::Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
             break;
         }
+        parentTask->loadTransferPhase.store(LoadTransferPhase::Done, std::memory_order_release);
     } while (0);
     if (s.Failure()) [[unlikely]] {
+        parentTask->loadTransferPhase.store(LoadTransferPhase::Failed, std::memory_order_relaxed);
         stream.Synchronize();
         holder_.clear();
         parentTask->Fail(s);
@@ -299,11 +440,34 @@ Status LoadQueue::WaitBackendTaskReady(ShardTask& task)
         task.bufferHandle.MarkReady();
         return Status::OK();
     }
+    auto tpPeerWait = NowTime::Now();
+    auto nextReport = tpPeerWait + kPeerWaitReportIntervalSeconds;
     for (;;) {
         auto state = task.bufferHandle.GetState();
+        task.task->transferSlotState.store(static_cast<int32_t>(state),
+                                           std::memory_order_relaxed);
         if (state == State::Ready) { return Status::OK(); }
         if (state == State::Failed) { return Status::Retry(); }
         if (failureSet_->Contains(task.task->id)) { return task.task->FailureStatus(); }
+        auto now = NowTime::Now();
+        if (now >= nextReport) {
+            UC_WARN(
+                "CACHE_LOAD_DIAG peer_stall task={} brief={} device={} buffer_rank={} "
+                "original={} shard={} block_hash={} segment={} global_slot={} state={} "
+                "references={} dispatch_phase={} dispatched={}/{} transferred={} "
+                "pending_owners={} waited={:.3f}ms",
+                task.task->id, task.task->desc.brief, deviceId_, bufferRank_, task.originalIndex,
+                task.shard.index, BlockHash(task.shard.owner), task.bufferHandle.Segment(),
+                task.bufferHandle.GlobalSlot(), static_cast<int>(state),
+                task.bufferHandle.ReferenceCount(),
+                LoadDispatchPhaseName(task.task->loadDispatchPhase.load(std::memory_order_acquire)),
+                task.task->dispatchedShards.load(std::memory_order_relaxed),
+                task.task->desc.size(),
+                task.task->transferredShards.load(std::memory_order_relaxed),
+                task.task->pendingOwnerShards.load(std::memory_order_relaxed),
+                (now - tpPeerWait) * 1e3);
+            nextReport = now + kPeerWaitReportIntervalSeconds;
+        }
         std::this_thread::yield();
     }
 }
