@@ -116,6 +116,10 @@ private:
 
     /* Optimistic pin attempts before falling back to the bucket-lock path. */
     static constexpr size_t kPinSpinFast = 64;
+    /* Large shared buffers need more time for NUMA initialization, host registration,
+     * and mapping every rank segment. Keep this startup-only deadline independent from
+     * the runtime operation timeout configured by timeout_ms. */
+    static constexpr size_t kBufferSetupTimeoutMs = 120000;
 
 public:
     Buffer() = default;
@@ -132,7 +136,9 @@ public:
     {
         timeoutMs_ = cfg.timeoutMs;
         ctrl_ = MakeCtrlStrategy();
-        if (auto s = ctrl_->Setup(cfg); s.Failure()) { return s; }
+        auto setupCfg = cfg;
+        setupCfg.timeoutMs = kBufferSetupTimeoutMs;
+        if (auto s = ctrl_->Setup(setupCfg); s.Failure()) { return s; }
         auto* header = ctrl_->Layout().Hdr();
         slotSize_ = header->slotSize;
         nSlotsPerRank_ = header->nSlotsPerRank;
@@ -194,7 +200,7 @@ public:
                 }
             }
             if (shared_) {
-                s = data_->MapAllSegments(timeoutMs_);
+                s = data_->MapAllSegments(kBufferSetupTimeoutMs);
                 if (s.Failure()) { return s; }
             }
         }
