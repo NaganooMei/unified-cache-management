@@ -239,6 +239,7 @@ void LoadQueue::DispatchOneTask(TaskPair&& pair)
                 task->dispatchShardIndex.load(std::memory_order_relaxed), blockHash,
                 preferredSegment, task->pendingOwnerShards.load(std::memory_order_relaxed),
                 runningPushMs);
+        }
     }
     auto tpDispatch = NowTime::Now();
     task->loadDispatchPhase.store(LoadDispatchPhase::Prealloc, std::memory_order_relaxed);
