@@ -275,10 +275,23 @@ public:
     bool TryPrealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
                      size_t preferredSegment = kInvalidIndex)
     {
-        auto h = TryGet(blockId, offset, allowReserved, 128, preferredSegment);
-        if (!h) { return false; }
-        h.owner_ = false;  // A metadata placeholder has no in-flight writer.
-        return true;
+        if (myRank_ == kInvalidIndex) { return false; }
+        auto iBucket = HashKey(blockId, nBuckets_);
+        auto& layout = ctrl_->Layout();
+        if (!layout.LockOf(iBucket)->TryLock()) { return false; }
+        auto iNode = Lookup(layout, iBucket, blockId, offset);
+        if (iNode != kInvalidIndex) {
+            layout.SlotMetaArr()[iNode].accessed.store(1, std::memory_order_relaxed);
+            layout.LockOf(iBucket)->Unlock();
+            return true;
+        }
+        /* Publish an unpinned metadata placeholder. A demand Get either observes the
+         * transient kSlotClaimed value and retries, or pins reference 0 and becomes the
+         * unique data-loading owner. Prealloc itself never impersonates a producer. */
+        iNode =
+            Alloc(layout, blockId, offset, iBucket, allowReserved, 128, preferredSegment, 0);
+        layout.LockOf(iBucket)->Unlock();
+        return iNode != kInvalidIndex;
     }
 
     bool Exist(const Detail::BlockId& blockId, size_t offset)
@@ -356,6 +369,12 @@ private:
                 ++spin;
                 continue;
             }
+            /* An observer must not consume the first pin of an unfilled placeholder:
+             * demand Get relies on 0 -> 1 to elect the data-loading owner. */
+            if (!takeOwnership && r == 0 &&
+                meta->state.load(std::memory_order_acquire) != State::Ready) {
+                return false;
+            }
             if (!meta->reference.compare_exchange_weak(r, r + 1, std::memory_order_acq_rel)) {
                 std::this_thread::yield();
                 ++spin;
@@ -406,11 +425,13 @@ private:
     /* Reconfigure a victim slot for (blockId, offset). Called with the target bucket lock
      * held. Protocol: claim the slot exclusively via CAS(0 -> kSlotClaimed), unlink it
      * from its old bucket (TryLock, roll the claim back on failure), rewrite the key while
-     * the slot is unreachable, then link it into the target bucket and publish with
-     * reference.store(1, release).
+     * the slot is unreachable, then link it into the target bucket and publish
+     * initialReference with release. Demand allocation publishes one owner pin;
+     * metadata-only preallocation publishes zero for later owner election.
      * Return after a bounded scan so Get can release the bucket lock before retrying. */
     size_t Alloc(CtrlLayout& layout, const Detail::BlockId& blockId, size_t offset, size_t iBucket,
-                 bool allowReserved, size_t attempts, size_t preferredSegment)
+                 bool allowReserved, size_t attempts, size_t preferredSegment,
+                 size_t initialReference = 1)
     {
         for (size_t scan = 0; scan < attempts; ++scan) {
             auto iNode = FetchNode(layout, allowReserved, preferredSegment, scan);
@@ -445,7 +466,7 @@ private:
             }
             meta->accessed.store(1, std::memory_order_relaxed);
             /* Publish the new key to acquiring readers. */
-            meta->reference.store(1, std::memory_order_release);
+            meta->reference.store(initialReference, std::memory_order_release);
             return iNode;
         }
         return kInvalidIndex;

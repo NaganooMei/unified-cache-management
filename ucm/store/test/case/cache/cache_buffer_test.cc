@@ -429,11 +429,94 @@ TEST(UcmV2CacheBufferTest, PreallocThenGetOwnerLoading)
     auto h = buf.Get(blk, 0);
     ASSERT_TRUE(h);
     EXPECT_TRUE(h.Owner());
+    EXPECT_EQ(h.ReferenceCount(), 1);
     EXPECT_FALSE(h.Ready());
     h.MarkReady();
     EXPECT_TRUE(h.Ready());
     buf.Prealloc(blk, 0);
     EXPECT_TRUE(buf.Exist(blk, 0));
+}
+
+TEST(UcmV2CacheBufferTest, ConcurrentPreallocAndDemandElectOneOwner)
+{
+    constexpr int kThreads = 16;
+    constexpr int kRounds = 64;
+    auto cfg = MakeConfig(0, 128);
+    UC::CacheStore::Buffer buf;
+    ASSERT_TRUE(buf.Setup(cfg).Success());
+
+    for (int round = 0; round < kRounds; round++) {
+        auto blk = MakeBlockIdN(1000 + round);
+        std::atomic<bool> start{false};
+        std::atomic<int> owners{0};
+        std::atomic<int> valid{0};
+        std::thread prealloc([&] {
+            while (!start.load(std::memory_order_acquire)) { std::this_thread::yield(); }
+            buf.TryPrealloc(blk, 0);
+        });
+        std::vector<std::thread> loads;
+        loads.reserve(kThreads);
+        for (int i = 0; i < kThreads; i++) {
+            loads.emplace_back([&] {
+                while (!start.load(std::memory_order_acquire)) { std::this_thread::yield(); }
+                auto h = buf.Get(blk, 0);
+                if (!h) { return; }
+                valid.fetch_add(1, std::memory_order_relaxed);
+                if (h.Owner()) {
+                    owners.fetch_add(1, std::memory_order_relaxed);
+                    h.MarkReady();
+                }
+            });
+        }
+        start.store(true, std::memory_order_release);
+        prealloc.join();
+        for (auto& load : loads) { load.join(); }
+        EXPECT_EQ(valid.load(std::memory_order_relaxed), kThreads) << "round " << round;
+        EXPECT_EQ(owners.load(std::memory_order_relaxed), 1) << "round " << round;
+    }
+}
+
+TEST(UcmV2CacheBufferTest, ExistDoesNotStealPreallocatedOwner)
+{
+    constexpr int kThreads = 16;
+    auto cfg = MakeConfig(0);
+    UC::CacheStore::Buffer buf;
+    ASSERT_TRUE(buf.Setup(cfg).Success());
+    auto blk = MakeBlockId('x');
+    ASSERT_TRUE(buf.TryPrealloc(blk, 0));
+
+    std::atomic<bool> observerStarted{false};
+    std::atomic<bool> stopObserver{false};
+    std::thread observer([&] {
+        observerStarted.store(true, std::memory_order_release);
+        while (!stopObserver.load(std::memory_order_acquire)) { buf.Exist(blk, 0); }
+    });
+    while (!observerStarted.load(std::memory_order_acquire)) { std::this_thread::yield(); }
+
+    std::atomic<bool> start{false};
+    std::atomic<int> owners{0};
+    std::vector<std::thread> loads;
+    loads.reserve(kThreads);
+    for (int i = 0; i < kThreads; i++) {
+        loads.emplace_back([&] {
+            while (!start.load(std::memory_order_acquire)) { std::this_thread::yield(); }
+            auto h = buf.Get(blk, 0);
+            if (h.Owner()) {
+                owners.fetch_add(1, std::memory_order_relaxed);
+                h.MarkReady();
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& load : loads) { load.join(); }
+    stopObserver.store(true, std::memory_order_release);
+    observer.join();
+
+    EXPECT_EQ(owners.load(std::memory_order_relaxed), 1);
+    auto ready = buf.Get(blk, 0);
+    ASSERT_TRUE(ready);
+    EXPECT_TRUE(ready.Ready());
+    EXPECT_FALSE(ready.Owner());
 }
 
 TEST(UcmV2CacheBufferTest, FailedThenOwnerRetry)

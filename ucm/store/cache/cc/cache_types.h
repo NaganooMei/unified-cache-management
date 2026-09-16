@@ -74,14 +74,17 @@ struct RankDataDesc {
  * bucket lock, so every read must be race-free.
  *
  * Synchronization model (see Buffer for the full protocol):
- *  - reference is the only coordination point. 0 = reclaimable, kSlotClaimed = a writer
- *    owns the slot exclusively while reconfiguring it, (0, n) = n readers hold pins.
+ *  - reference is the only coordination point. 0 = reclaimable or an unpinned metadata
+ *    placeholder, kSlotClaimed = a writer owns the slot exclusively while reconfiguring it,
+ *    (0, n) = n readers hold pins.
  *  - A reader pins via CAS(r -> r + 1) and must re-validate the key after the CAS: once
  *    pinned, no writer can be concurrent, so the re-validation is a consistent snapshot.
  *  - A writer claims via CAS(0 -> kSlotClaimed), unlinks the slot (hash = kInvalidIndex,
  *    unreachable for bucket walkers), rewrites the key, then publishes by linking the slot
  *    into the target bucket (hash stored with release, before the bucket head store) and
- *    finally reference.store(1, release). Acquiring readers therefore observe the new key.
+ *    finally publishes reference with release. Demand allocation publishes 1 for its owner;
+ *    metadata-only preallocation publishes 0 for later owner election. Acquiring readers
+ *    therefore observe the new key.
  *  - state written with release by MarkReady/MarkFailed is visible to later pinners: the
  *    previous owner's Release (fetch_sub, release) keeps the release sequence alive, so
  *    the next pin's acquire-CAS synchronizes with everything the owner did before release.
