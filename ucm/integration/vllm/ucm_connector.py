@@ -1329,7 +1329,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
             return
         numa_node = self.device.get_numa_node(self.device_id)
         if numa_node is not None:
-            # Connector-internal hint derived from the physical NPU topology.
+            # Connector-internal hint derived from the physical accelerator topology.
             # It applies to both a GQA private Buffer and this MLA rank's segment.
             config["cache_detected_numa_node"] = numa_node
             return

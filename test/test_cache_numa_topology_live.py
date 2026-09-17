@@ -1,7 +1,11 @@
 """Pure placement-matrix tests for cache_numa_topology_live.py."""
 
 import unittest
-from test.cache_numa_topology_live import _worker_placements
+from test.cache_numa_topology_live import (
+    _parse_cuda_gpu_bus_ids,
+    _parse_cuda_topo_affinity,
+    _worker_placements,
+)
 
 
 class CacheNumaTopologyLiveMatrixTest(unittest.TestCase):
@@ -46,6 +50,49 @@ class CacheNumaTopologyLiveMatrixTest(unittest.TestCase):
                     self.targets(placements),
                     [(device // 2,) for device in self.devices],
                 )
+
+    def test_cuda_gqa_uses_detected_gpu_numa_nodes(self):
+        detected = {device: device // 4 for device in self.devices}
+        placements = _worker_placements(
+            "GQA",
+            1,
+            8,
+            self.devices,
+            detected,
+            [0, 1],
+            platform_type="cuda",
+        )
+        self.assertEqual(self.targets(placements), [(0,)] * 4 + [(1,)] * 4)
+
+    def test_cuda_gqa_without_topology_uses_first_touch(self):
+        placements = _worker_placements(
+            "GQA",
+            1,
+            8,
+            self.devices,
+            dict.fromkeys(self.devices),
+            [0, 1],
+            platform_type="cuda",
+        )
+        self.assertEqual(self.targets(placements), [()] * 8)
+
+    def test_parse_h100_topology_and_pci_bus_ids(self):
+        topo = """
+                GPU0    GPU1    CPU Affinity    NUMA Affinity    GPU NUMA ID
+        GPU0     X       NV18    0-47,96-143     0                N/A
+        GPU1     NV18    X       48-95,144-191   1                N/A
+        """
+        self.assertEqual(
+            _parse_cuda_topo_affinity(topo),
+            {
+                0: list(range(0, 48)) + list(range(96, 144)),
+                1: list(range(48, 96)) + list(range(144, 192)),
+            },
+        )
+        self.assertEqual(
+            _parse_cuda_gpu_bus_ids("0, 00000000:1A:00.0\n1, 00000000:3D:00.0\n"),
+            {0: "0000:1a:00.0", 1: "0000:3d:00.0"},
+        )
 
 
 if __name__ == "__main__":

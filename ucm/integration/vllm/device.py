@@ -49,8 +49,7 @@ def _parse_npu_topo_affinity(output: str) -> Dict[int, List[int]]:
         match = re.fullmatch(r"NPU(\d+)", parts[0])
         if (
             match is None
-            or re.fullmatch(r"\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*", parts[-1])
-            is None
+            or re.fullmatch(r"\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*", parts[-1]) is None
         ):
             continue
         affinity[int(match.group(1))] = _expand_cpu_list(parts[-1])
@@ -79,6 +78,37 @@ def _resolve_npu_numa_node(
         return None
     nodes = {cpu_numa[cpu] for cpu in affinity}
     return next(iter(nodes)) if len(nodes) == 1 else None
+
+
+def _normalize_cuda_pci_bus_id(pci_bus_id: str) -> Optional[str]:
+    """Normalize CUDA/NVML PCI IDs to the Linux sysfs BDF form."""
+    match = re.fullmatch(
+        r"(?P<domain>[0-9a-fA-F]{4,8}):(?P<bus>[0-9a-fA-F]{2}):"
+        r"(?P<device>[0-9a-fA-F]{2})\.(?P<function>[0-7])",
+        pci_bus_id.strip(),
+    )
+    if match is None:
+        return None
+    return (
+        f"{int(match.group('domain'), 16):04x}:"
+        f"{match.group('bus').lower()}:"
+        f"{match.group('device').lower()}.{match.group('function')}"
+    )
+
+
+def _resolve_cuda_numa_node(
+    pci_bus_id: str, sysfs_root: str = "/sys/bus/pci/devices"
+) -> Optional[int]:
+    """Resolve a CUDA device PCI ID through the kernel's PCI NUMA metadata."""
+    bdf = _normalize_cuda_pci_bus_id(pci_bus_id)
+    if bdf is None:
+        return None
+    try:
+        with open(os.path.join(sysfs_root, bdf, "numa_node")) as file:
+            node = int(file.read().strip())
+        return node if node >= 0 else None
+    except (OSError, ValueError):
+        return None
 
 
 class Device(ABC):
@@ -173,6 +203,28 @@ class Device(ABC):
 class CudaDevice(Device):
     def __init__(self):
         super().__init__()
+        self._numa_node_cache: Dict[int, Optional[int]] = {}
+
+    def get_numa_node(self, device_ordinal: int) -> Optional[int]:
+        if device_ordinal in self._numa_node_cache:
+            return self._numa_node_cache[device_ordinal]
+        node: Optional[int] = None
+        try:
+            prop = torch.cuda.get_device_properties(device_ordinal)
+            pci_bus_id = (
+                f"{prop.pci_domain_id:04x}:"
+                f"{prop.pci_bus_id:02x}:"
+                f"{prop.pci_device_id:02x}.0"
+            )
+            node = _resolve_cuda_numa_node(pci_bus_id)
+        except Exception as error:
+            logger.warning(
+                "[Cache NUMA] failed to query topology for CUDA device %s: %s",
+                device_ordinal,
+                error,
+            )
+        self._numa_node_cache[device_ordinal] = node
+        return node
 
     def get_event_handle(self) -> int:
         try:
@@ -210,23 +262,12 @@ class CudaDevice(Device):
         2. fallback: split current allowed CPUs by local_rank
         """
         try:
-            prop = torch.cuda.get_device_properties(local_rank)
-            pci_bus_id = (
-                f"{prop.pci_domain_id:04x}:"
-                f"{prop.pci_bus_id:02x}:"
-                f"{prop.pci_device_id:02x}.0"
-            )
-
-            numa_path = f"/sys/bus/pci/devices/{pci_bus_id}/numa_node"
-            if os.path.exists(numa_path):
-                with open(numa_path) as f:
-                    numa_node = int(f.read().strip())
-
-                if numa_node >= 0:
-                    cpu_list_path = f"/sys/devices/system/node/node{numa_node}/cpulist"
-                    if os.path.exists(cpu_list_path):
-                        with open(cpu_list_path) as f:
-                            return f.read().strip()
+            numa_node = self.get_numa_node(local_rank)
+            if numa_node is not None:
+                cpu_list_path = f"/sys/devices/system/node/node{numa_node}/cpulist"
+                if os.path.exists(cpu_list_path):
+                    with open(cpu_list_path) as f:
+                        return f.read().strip()
         except Exception as e:
             logger.warning(f"get cuda cpu affinity from numa failed: {e}")
 

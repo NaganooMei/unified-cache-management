@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect live NPU topology and exercise Cache NUMA placement decisions.
+"""Inspect live accelerator topology and exercise Cache NUMA placement decisions.
 
 This diagnostic intentionally avoids importing torch and vLLM.  It loads the
 topology parsing helpers directly from ``ucm/integration/vllm/device.py``, reads
@@ -47,14 +47,18 @@ def _load_production_topology_helpers() -> Tuple[
     Callable[[str], List[int]],
     Callable[[str], Dict[int, List[int]]],
     Callable[[str, str, int], Optional[int]],
+    Callable[[str], Optional[str]],
+    Callable[[str], Optional[int]],
 ]:
-    """Load the exact stdlib-only parsing helpers used by NpuDevice."""
+    """Load the exact stdlib-only topology helpers used by Device implementations."""
 
     names = {
         "_expand_cpu_list",
         "_parse_npu_topo_affinity",
         "_parse_cpu_numa_map",
         "_resolve_npu_numa_node",
+        "_normalize_cuda_pci_bus_id",
+        "_resolve_cuda_numa_node",
     }
     tree = ast.parse(DEVICE_SOURCE.read_text(encoding="utf-8-sig"))
     functions = [
@@ -68,6 +72,7 @@ def _load_production_topology_helpers() -> Tuple[
         missing = ", ".join(sorted(names - found))
         raise RuntimeError(f"cannot load production topology helpers: {missing}")
     namespace = {
+        "os": os,
         "re": re,
         "Dict": Dict,
         "List": List,
@@ -83,10 +88,18 @@ def _load_production_topology_helpers() -> Tuple[
         namespace["_expand_cpu_list"],
         namespace["_parse_npu_topo_affinity"],
         namespace["_resolve_npu_numa_node"],
+        namespace["_normalize_cuda_pci_bus_id"],
+        namespace["_resolve_cuda_numa_node"],
     )
 
 
-EXPAND_LIST, PARSE_AFFINITY, RESOLVE_NUMA = _load_production_topology_helpers()
+(
+    EXPAND_LIST,
+    PARSE_NPU_AFFINITY,
+    RESOLVE_NPU_NUMA,
+    NORMALIZE_CUDA_BDF,
+    RESOLVE_CUDA_NUMA,
+) = _load_production_topology_helpers()
 
 
 @dataclass(frozen=True)
@@ -142,9 +155,89 @@ def _allowed_memory_nodes() -> List[int]:
     return nodes
 
 
-def _discover_devices(topo: str, explicit: Optional[str]) -> List[int]:
+def _parse_cuda_topo_affinity(output: str) -> Dict[int, List[int]]:
+    """Parse the CPU Affinity column from ``nvidia-smi topo -m``."""
+    lines = output.splitlines()
+    header = next((line for line in lines if "CPU Affinity" in line), "")
+    if not header:
+        return {}
+    topology_columns = len(header.split("CPU Affinity", 1)[0].split())
+    affinity: Dict[int, List[int]] = {}
+    for line in lines:
+        parts = line.split()
+        if not parts:
+            continue
+        match = re.fullmatch(r"GPU(\d+)", parts[0])
+        affinity_index = 1 + topology_columns
+        if match is None or affinity_index >= len(parts):
+            continue
+        cpu_list = parts[affinity_index]
+        if re.fullmatch(r"\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*", cpu_list) is None:
+            continue
+        affinity[int(match.group(1))] = EXPAND_LIST(cpu_list)
+    return affinity
+
+
+def _parse_cuda_gpu_bus_ids(output: str) -> Dict[int, str]:
+    """Parse ``nvidia-smi --query-gpu=index,pci.bus_id`` output."""
+    devices: Dict[int, str] = {}
+    for line in output.splitlines():
+        parts = [part.strip() for part in line.split(",", 1)]
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        bdf = NORMALIZE_CUDA_BDF(parts[1])
+        if bdf is not None:
+            devices[int(parts[0])] = bdf
+    return devices
+
+
+def _detect_platform(requested: str) -> str:
+    if requested != "auto":
+        return requested
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        return "cuda"
+    if os.environ.get("ASCEND_RT_VISIBLE_DEVICES") or os.environ.get(
+        "ASCEND_VISIBLE_DEVICES"
+    ):
+        return "npu"
+    for candidate, command in (("cuda", "nvidia-smi"), ("npu", "npu-smi")):
+        try:
+            result = subprocess.run(
+                [command, "--help"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return candidate
+    raise RuntimeError("cannot detect CUDA or NPU platform; pass --platform explicitly")
+
+
+def _discover_devices(
+    platform_type: str,
+    topo: str,
+    explicit: Optional[str],
+    cuda_bus_ids: Optional[Dict[int, str]] = None,
+) -> List[int]:
     if explicit:
         devices = EXPAND_LIST(explicit)
+    elif platform_type == "cuda":
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible:
+            try:
+                devices = [
+                    int(item.strip()) for item in visible.split(",") if item.strip()
+                ]
+            except ValueError as error:
+                raise RuntimeError(
+                    "CUDA_VISIBLE_DEVICES contains UUIDs; pass --devices with eight "
+                    "physical GPU IDs"
+                ) from error
+        else:
+            devices = sorted((cuda_bus_ids or {}).keys())
     else:
         visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES") or os.environ.get(
             "ASCEND_VISIBLE_DEVICES"
@@ -160,10 +253,10 @@ def _discover_devices(topo: str, explicit: Optional[str]) -> List[int]:
                 }
             )
     if len(devices) != len(set(devices)):
-        raise RuntimeError(f"duplicate NPU IDs in device list: {devices}")
+        raise RuntimeError(f"duplicate device IDs in device list: {devices}")
     if len(devices) < 8:
         raise RuntimeError(
-            f"the DP1TP8/DP8TP1 matrix needs 8 visible NPUs, found {devices}; "
+            f"the DP1TP8/DP8TP1 matrix needs 8 visible devices, found {devices}; "
             "pass --devices with eight physical IDs"
         )
     return devices[:8]
@@ -191,6 +284,7 @@ def _worker_placements(
     devices: Sequence[int],
     detected: Dict[int, Optional[int]],
     allowed_nodes: Sequence[int],
+    platform_type: str = "npu",
 ) -> List[WorkerPlacement]:
     placements: List[WorkerPlacement] = []
     for worker in range(dp_size * tp_size):
@@ -202,17 +296,20 @@ def _worker_placements(
             segment = f"private-dp{dp_rank}-tp{tp_rank}"
             if detected_node is not None:
                 targets = (detected_node,)
-                source = "NPU topology"
-            else:
+                source = f"{platform_type.upper()} topology"
+            elif platform_type == "npu":
                 # This is the current _configure_numa_placement fallback.
                 fallback_rank = worker
                 targets = (allowed_nodes[fallback_rank % len(allowed_nodes)],)
                 source = f"local-worker fallback({fallback_rank})"
+            else:
+                targets = ()
+                source = "first-touch"
         else:
             segment = f"shared-segment-{tp_rank}"
             if detected_node is not None:
                 targets = (detected_node,)
-                source = "NPU topology if this DP owns segment"
+                source = f"{platform_type.upper()} topology if this DP owns segment"
             else:
                 targets = _segment_nodes(allowed_nodes, tp_size, tp_rank)
                 source = "segment striping" if targets else "first-touch"
@@ -423,10 +520,16 @@ def _verify_memfd_node(node: int, size: int) -> Dict[int, int]:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--platform",
+        choices=("auto", "cuda", "npu"),
+        default="auto",
+        help="accelerator platform (default: auto-detect)",
+    )
+    parser.add_argument(
         "--devices",
         help=(
-            "eight physical NPU IDs, for example 0-7 or 0,1,2,3,4,5,6,7; "
-            "defaults to ASCEND_RT_VISIBLE_DEVICES/ASCEND_VISIBLE_DEVICES, then topo rows"
+            "eight physical device IDs, for example 0-7 or 0,1,2,3,4,5,6,7; "
+            "defaults to the platform visible-device variable, then topology rows"
         ),
     )
     parser.add_argument(
@@ -443,7 +546,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--show-raw",
         action="store_true",
-        help="print raw npu-smi and lscpu output",
+        help="print raw accelerator topology and lscpu output",
     )
     parser.add_argument(
         "--fail-on-warning",
@@ -458,14 +561,42 @@ def main() -> int:
     if args.verify_mib_per_node <= 0:
         raise RuntimeError("--verify-mib-per-node must be positive")
 
-    topo = _run(["npu-smi", "info", "-t", "topo"])
+    platform_type = _detect_platform(args.platform)
+    cuda_bus_ids: Dict[int, str] = {}
+    if platform_type == "cuda":
+        topo_command = ["nvidia-smi", "topo", "-m"]
+        topo = _run(topo_command)
+        cuda_bus_ids = _parse_cuda_gpu_bus_ids(
+            _run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,pci.bus_id",
+                    "--format=csv,noheader,nounits",
+                ]
+            )
+        )
+        affinity = _parse_cuda_topo_affinity(topo)
+    else:
+        topo_command = ["npu-smi", "info", "-t", "topo"]
+        topo = _run(topo_command)
+        affinity = PARSE_NPU_AFFINITY(topo)
     cpu_numa = _run(["lscpu", "-e=cpu,node"])
-    devices = _discover_devices(topo, args.devices)
+    devices = _discover_devices(platform_type, topo, args.devices, cuda_bus_ids)
     allowed_nodes = _allowed_memory_nodes()
-    affinity = PARSE_AFFINITY(topo)
-    detected = {device: RESOLVE_NUMA(topo, cpu_numa, device) for device in devices}
+    if platform_type == "cuda":
+        missing = [device for device in devices if device not in cuda_bus_ids]
+        if missing:
+            raise RuntimeError(f"nvidia-smi did not report PCI IDs for GPUs {missing}")
+        detected = {
+            device: RESOLVE_CUDA_NUMA(cuda_bus_ids[device]) for device in devices
+        }
+    else:
+        detected = {
+            device: RESOLVE_NPU_NUMA(topo, cpu_numa, device) for device in devices
+        }
 
     print("== Live host topology ==")
+    print(f"platform: {platform_type}")
     print(f"architecture: {platform.machine()}")
     print(f"selected physical devices: {devices}")
     print(f"allowed memory NUMA nodes: {allowed_nodes}")
@@ -483,7 +614,7 @@ def main() -> int:
         ),
     )
     if args.show_raw:
-        print("\n-- npu-smi info -t topo --")
+        print(f"\n-- {' '.join(topo_command)} --")
         print(topo.rstrip())
         print("\n-- lscpu -e=cpu,node --")
         print(cpu_numa.rstrip())
@@ -498,6 +629,7 @@ def main() -> int:
             devices,
             detected,
             allowed_nodes,
+            platform_type,
         )
         scenario_nodes, scenario_warnings = _print_scenario(
             model, dp_size, tp_size, placements
