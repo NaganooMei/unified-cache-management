@@ -855,6 +855,7 @@ class UCMHybridLinearAttentionConnector(UCMDirectConnector, SupportsHMA):
         config["unique_id"] = f"{self.unique_id}{unique_id_suffix}"
         self._configure_partitioned_store(config)
         self._set_default_shm_buffer_capacity(config)
+        self._configure_numa_placement(config)
         if self._role == KVConnectorRole.WORKER:
             config["device_id"] = self.device_id
             tensor_size_list = _normalize_tensor_size_list(
