@@ -46,7 +46,8 @@ def create_worker(store_pipeline, unique_id) -> UcmKVStoreBaseV1:
     config["block_size"] = shard_size * shard_number
     config["device_id"] = device_id
     config["unique_id"] = unique_id
-    config["share_buffer_enable"] = True
+    config["share_buffer_segment_count"] = 1
+    config["share_buffer_rank"] = 0
     config["cache_buffer_capacity_gb"] = 8
     config["storage_backends"] = storage_backends
     return UcmConnectorFactoryV1.create_connector(class_name, config, module_path)

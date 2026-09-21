@@ -89,11 +89,12 @@ def main():
     config = {}
     config["store_pipeline"] = "Cache|Empty"
     config["unique_id"] = secrets.token_hex(8)
+    config["share_buffer_segment_count"] = 1
+    config["share_buffer_rank"] = 0
     config["timeout_ms"] = 10000
     config["tensor_size"] = tensor_size
     config["shard_size"] = chunk_block_size
     config["block_size"] = chunk_block_size
-    config["share_buffer_enable"] = True
     config["waiting_queue_depth"] = 16
     config["running_queue_depth"] = 1024
     worker = UcmPipelineStore(config | {"device_id": device_id})

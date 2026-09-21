@@ -137,7 +137,8 @@ class PipelineStoreConfig(BaseModel):
 
     cache_buffer_capacity_gb: Optional[int] = None
     cache_stream_number: Optional[int] = None
-    share_buffer_enable: bool = False
+    share_buffer_segment_count: Optional[int] = None
+    share_buffer_rank: Optional[int] = None
     waiting_queue_depth: Optional[int] = None
     running_queue_depth: Optional[int] = None
 
@@ -194,7 +195,6 @@ class ConfigParser:
 
     @classmethod
     def parse_model_config(cls, weight_path: str, scp_size: int):
-        share_buffer_enable = False
         is_mla = False
 
         config_json = os.path.join(weight_path, "config.json")
@@ -202,9 +202,8 @@ class ConfigParser:
         if "kv_lora_rank" in model_arc:
             # for deepseek model
             is_mla = True
-            share_buffer_enable = scp_size == 1
 
-        return is_mla, share_buffer_enable
+        return is_mla
 
     @classmethod
     def check_kvcs_certificates(cls):
@@ -243,27 +242,40 @@ class ConfigParser:
 
     @classmethod
     def get_unified_config(
-        cls, config_path: str, device_id: int, kv_caches: Any
+        cls,
+        config_path: str,
+        device_id: int,
+        kv_caches: Any,
+        tp_rank: Optional[int] = None,
+        dp_rank: Optional[int] = None,
     ) -> Tuple[MempoolConfig, PipelineStoreConfig]:
         uc_config = ConfigParser.safe_load(config_path)
         mindie_config = ConfigParser.safe_load(uc_config.get("mindie_config_path"))
 
         parallel_config = ConfigParser.parse_mindie_config(mindie_config)
-        is_mla, share_buffer_enable = ConfigParser.parse_model_config(
+        is_mla = ConfigParser.parse_model_config(
             parallel_config["weight_path"], parallel_config["scp_size"]
         )
         tensor_sizes, shard_size = ConfigParser.get_io_size_info(kv_caches)
 
         mempool_config = MempoolConfig(is_mla=is_mla, **parallel_config)
+        if tp_rank is None and device_id >= 0:
+            tp_rank = device_id % mempool_config.tp_size
+        if tp_rank is not None and not 0 <= tp_rank < mempool_config.tp_size:
+            raise ValueError(
+                f"Invalid TP rank {tp_rank} for TP size {mempool_config.tp_size}."
+            )
+        if dp_rank is None:
+            dp_rank = device_id // mempool_config.tp_size if device_id >= 0 else 0
+        unique_id = get_dual_consensus_uids()
+        if not is_mla:
+            unique_id = f"{unique_id}_dp{dp_rank}"
         store_data = {
             **uc_config,
             "device_id": device_id,
-            "share_buffer_enable": share_buffer_enable,
-            "local_rank_size": parallel_config["tp_size"] if share_buffer_enable else 1,
-            "share_buffer_segment_count": (
-                parallel_config["tp_size"] if share_buffer_enable else 1
-            ),
-            "unique_id": get_dual_consensus_uids(),
+            "share_buffer_segment_count": mempool_config.tp_size,
+            "share_buffer_rank": tp_rank,
+            "unique_id": unique_id,
             "tensor_size_list": tensor_sizes,
             "shard_size": shard_size,
             "block_size": shard_size,
@@ -298,9 +310,11 @@ class UnifiedCacheMempool(MemPool):
     def __init__(self, config_path, role, **kwargs):
         device_id = kwargs.get("device_id", -1)
         kv_caches = kwargs.get("kv_caches", None)
+        tp_rank = kwargs.get("tp_rank", None)
+        dp_rank = kwargs.get("dp_rank", None)
 
         self.runtime_cfg, self.store_cfg = ConfigParser.get_unified_config(
-            config_path, device_id, kv_caches
+            config_path, device_id, kv_caches, tp_rank, dp_rank
         )
 
         logger.info(

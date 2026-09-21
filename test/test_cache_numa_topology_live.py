@@ -64,7 +64,7 @@ class CacheNumaTopologyLiveMatrixTest(unittest.TestCase):
         )
         self.assertEqual(self.targets(placements), [(0,)] * 4 + [(1,)] * 4)
 
-    def test_cuda_gqa_without_topology_uses_first_touch(self):
+    def test_cuda_gqa_without_topology_uses_segment_placement(self):
         placements = _worker_placements(
             "GQA",
             1,
@@ -74,7 +74,7 @@ class CacheNumaTopologyLiveMatrixTest(unittest.TestCase):
             [0, 1],
             platform_type="cuda",
         )
-        self.assertEqual(self.targets(placements), [()] * 8)
+        self.assertEqual(self.targets(placements), [(0,), (1,)] * 4)
 
     def test_parse_h100_topology_and_pci_bus_ids(self):
         topo = """

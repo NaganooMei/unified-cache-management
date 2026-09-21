@@ -106,13 +106,16 @@ public:
         auto s = data_.Create(name, size, true);
         if (s.Failure()) { return s; }
         auto nodes = ShmNuma::DataNodes(config.detectedNumaNode, config.shareBufferNumaNodes,
-                                        rankCount_, rank, config.shareBufferEnable);
-        if (nodes.empty() && !config.shareBufferEnable && config.fallbackNumaRank.has_value()) {
+                                        rankCount_, rank);
+        if (!config.detectedNumaNode.has_value() && config.fallbackNumaRank.has_value()) {
             try {
-                nodes = ShmNuma::RankNode(ShmNuma::DefaultNodes(), *config.fallbackNumaRank);
+                const auto allowedNodes = config.shareBufferNumaNodes.empty()
+                                              ? ShmNuma::DefaultNodes()
+                                              : config.shareBufferNumaNodes;
+                nodes = ShmNuma::RankNode(allowedNodes, *config.fallbackNumaRank);
             } catch (const std::exception& error) {
-                UC_WARN("Cannot distribute private Buffer by host-local worker rank: {}. "
-                        "Fall back to first-touch.",
+                UC_WARN("Cannot distribute Cache data segment by host-local worker rank: {}. "
+                        "Keep default NUMA placement.",
                         error.what());
             }
         }
@@ -130,7 +133,6 @@ public:
         }
         s = Trans::Buffer::RegisterHostBuffer(data_.Addr(), size, &devicePtr_);
         if (s.Failure()) { return s; }
-        if (!config.shareBufferEnable) { return Status::OK(); }
         s = dataSock_.Listen(name);
         if (s.Failure()) { return s; }
         acceptThread_ = std::thread([this] {

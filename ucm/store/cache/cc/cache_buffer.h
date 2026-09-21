@@ -111,7 +111,6 @@ private:
     size_t reserved_{0};
     size_t timeoutMs_{30000};
     size_t maxRanks_{0};
-    bool shared_{false};
     bool ownsRankData_{false};
 
     /* Optimistic pin attempts before falling back to the bucket-lock path. */
@@ -125,12 +124,7 @@ public:
     Buffer() = default;
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
-    ~Buffer()
-    {
-        if (data_ && ownsRankData_ && !shared_ && myRank_ != kInvalidIndex) {
-            ctrl_->Layout().Hdr()->rankDescs[myRank_].ready.store(3, std::memory_order_release);
-        }
-    }
+    ~Buffer() = default;
 
     Status Setup(const Config& cfg)
     {
@@ -144,21 +138,16 @@ public:
         nSlotsPerRank_ = header->nSlotsPerRank;
         nBuckets_ = header->nBuckets;
         maxRanks_ = header->maxRanks;
-        shared_ = cfg.shareBufferEnable;
-        if (shared_ && cfg.loadExclusiveBufferNumber % maxRanks_ != 0) {
+        if (cfg.loadExclusiveBufferNumber % maxRanks_ != 0) {
             return Status::InvalidParam(
                 "loadExclusiveBufferNumber({}) must be divisible by segment count({})",
                 cfg.loadExclusiveBufferNumber, maxRanks_);
         }
-        reserved_ =
-            shared_ ? cfg.loadExclusiveBufferNumber / maxRanks_ : cfg.loadExclusiveBufferNumber;
+        reserved_ = cfg.loadExclusiveBufferNumber / maxRanks_;
         if (nSlotsPerRank_ == 0 || nBuckets_ == 0) {
             return Status::InvalidParam("ctrl header has zero slots per rank or buckets");
         }
         if (cfg.deviceId >= 0) {
-            if (cfg.physicalDeviceId < 0) {
-                return Status::InvalidParam("invalid physicalDeviceId({})", cfg.physicalDeviceId);
-            }
             /* reserved_ comes from the local config while nSlotsPerRank_ comes from the
              * creator's header; reject mismatched configurations instead of underflowing
              * in FetchNode. Only allocating ranks need this invariant. */
@@ -168,7 +157,7 @@ public:
                     "rank({})",
                     reserved_, nSlotsPerRank_);
             }
-            myRank_ = shared_ ? cfg.EffectiveBufferRank() : 0;
+            myRank_ = cfg.EffectiveBufferRank();
             if (myRank_ >= maxRanks_) {
                 return Status::InvalidParam("cache rank({}) must be in [0, {})", myRank_,
                                             maxRanks_);
@@ -179,7 +168,6 @@ public:
             auto& ready = ctrl_->Layout().Hdr()->rankDescs[myRank_].ready;
             uint8_t expected = 0;
             ownsRankData_ = ready.compare_exchange_strong(expected, 2, std::memory_order_acq_rel);
-            if (!ownsRankData_ && !shared_) { return Status::DuplicateKey(); }
             if (!ownsRankData_ && expected == 3) {
                 return Status::Error("cache rank segment is unavailable");
             }
@@ -199,10 +187,8 @@ public:
                     return publish;
                 }
             }
-            if (shared_) {
-                s = data_->MapAllSegments(kBufferSetupTimeoutMs);
-                if (s.Failure()) { return s; }
-            }
+            s = data_->MapAllSegments(kBufferSetupTimeoutMs);
+            if (s.Failure()) { return s; }
         }
         /* else: control-plane-only participant; myRank_ stays kInvalidIndex and the
          * allocation APIs below are disabled for it. */
@@ -231,7 +217,7 @@ public:
         auto attempts = nSlotsPerRank_ > std::numeric_limits<size_t>::max() / 2
                             ? std::numeric_limits<size_t>::max()
                             : 2 * nSlotsPerRank_;
-        if (shared_ && attempts <= std::numeric_limits<size_t>::max() / maxRanks_) {
+        if (attempts <= std::numeric_limits<size_t>::max() / maxRanks_) {
             attempts *= maxRanks_;
         }
         do {
@@ -483,15 +469,12 @@ private:
     {
         auto total = nSlotsPerRank_ - (allowReserved ? 0 : reserved_);
         if (total == 0) { return kInvalidIndex; }
-        size_t segment = myRank_;
-        if (shared_) {
-            const auto first = preferredSegment < maxRanks_ ? preferredSegment : myRank_;
-            const auto window = total > std::numeric_limits<size_t>::max() / 2 ? total : 2 * total;
-            const auto fallback = window == 0 ? 0 : attempt / window;
-            if (fallback >= maxRanks_) { return kInvalidIndex; }
-            segment = (first + fallback) % maxRanks_;
-            if (!RankReady(segment)) { return kInvalidIndex; }
-        }
+        const auto first = preferredSegment < maxRanks_ ? preferredSegment : myRank_;
+        const auto window = total > std::numeric_limits<size_t>::max() / 2 ? total : 2 * total;
+        const auto fallback = window == 0 ? 0 : attempt / window;
+        if (fallback >= maxRanks_) { return kInvalidIndex; }
+        const auto segment = (first + fallback) % maxRanks_;
+        if (!RankReady(segment)) { return kInvalidIndex; }
         auto cur =
             layout.Hdr()->clockHands[segment].fetch_add(1, std::memory_order_relaxed) % total +
             segment * nSlotsPerRank_;

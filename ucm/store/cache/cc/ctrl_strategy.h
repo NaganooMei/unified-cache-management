@@ -56,7 +56,6 @@ public:
     Status Setup(const Config& cfg)
     {
         socketName_ = CacheDomainName(cfg.uniqueId) + "_ctrl";
-        if (!cfg.shareBufferEnable) { return SetupCreator(cfg); }
         // A scheduler/control-only participant normally has no shard layout yet. Let a
         // worker create the control region, then attach to the published header.
         if (cfg.deviceId < 0 && cfg.shardSize == 0) { return SetupJoiner(cfg); }
@@ -83,7 +82,7 @@ private:
         if (slotSize == 0 || cfg.bufferCapacity < slotSize) {
             return Status::InvalidParam("ctrl creator requires valid shardSize and capacity");
         }
-        const auto maxRanks = cfg.shareBufferEnable ? cfg.EffectiveBufferSegmentCount() : 1;
+        const auto maxRanks = cfg.EffectiveBufferSegmentCount();
         if (maxRanks == 0 || maxRanks > kMaxRanks) {
             return Status::InvalidParam("invalid cache segment count({})", maxRanks);
         }
@@ -105,9 +104,7 @@ private:
         layout_.Bind(ctrlMem_.Addr(), maxRanks, m, nBuckets);
         layout_.InitHeader(slotSize, cfg.shareBufferNumaNodes);
         layout_.SetMagic();
-        if (cfg.shareBufferEnable) {
-            acceptThread_ = std::thread([this] { AcceptLoop(); });
-        }
+        acceptThread_ = std::thread([this] { AcceptLoop(); });
         return Status::OK();
     }
 

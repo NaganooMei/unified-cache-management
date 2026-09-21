@@ -53,11 +53,9 @@ TEST_F(UCCacheBufferManagerTest, Lookup)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = true;
     config.loadExclusiveBufferNumber = 0;
     ASSERT_TRUE(bufferMgr.Setup(config).Success());
     std::vector<UC::Detail::BlockId> blocks(3);
@@ -106,14 +104,12 @@ TEST_F(UCCacheBufferManagerTest, BackendOnlyLookupBypassesCache)
     UC::CacheStore::Config config;
     config.storeBackend = &backend;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.tensorSizes = {4096};
     config.shardSize = 4096;
     config.blockSize = config.shardSize;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = false;
     config.loadExclusiveBufferNumber = 0;
     config.cacheLoadBackendOnly = true;
     ASSERT_TRUE(bufferMgr.Setup(config).Success());

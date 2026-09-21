@@ -136,10 +136,10 @@ inline std::vector<size_t> SegmentNodes(const std::vector<size_t>& nodes, size_t
 
 inline std::vector<size_t> DataNodes(const std::optional<size_t>& detectedNode,
                                      const std::vector<size_t>& sharedNodes, size_t segments,
-                                     size_t segment, bool shared)
+                                     size_t segment)
 {
     if (detectedNode.has_value()) { return {*detectedNode}; }
-    if (!shared || sharedNodes.empty()) { return {}; }
+    if (sharedNodes.empty()) { return {}; }
     // A single shared segment (for example MLA DP8 TP1) is one physical SHM
     // allocation shared by every DP participant. Keep it on one deterministic
     // NUMA node instead of striping the one segment or relying on first-touch.

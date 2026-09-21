@@ -117,6 +117,8 @@ class PrefixCachePlugin(Plugin):
                 config_path=self.generator_backend.kv_pool_config_path,
                 role=MEM_POOL_ROLE_KEY,
                 device_id=self.device_id,
+                tp_rank=self.tp_rank,
+                dp_rank=self.generator_backend.mapping.attn_dp.rank,
                 kv_caches=self.generator_backend.cache_pool.npu_cache,
             )
             if self.m_store is None:

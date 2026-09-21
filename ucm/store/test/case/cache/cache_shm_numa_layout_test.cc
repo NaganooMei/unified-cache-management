@@ -53,15 +53,15 @@ TEST(UCCacheShmNumaLayoutTest, MapsSegmentsEvenlyAcrossNodes)
     EXPECT_EQ(Numa::SegmentNodes({2, 4, 6}, 2, 1), (std::vector<size_t>{2, 4, 6}));
 }
 
-TEST(UCCacheShmNumaLayoutTest, PrefersDetectedDeviceNodeForSharedAndPrivateData)
+TEST(UCCacheShmNumaLayoutTest, PrefersDetectedDeviceNodeForPartitionedData)
 {
-    EXPECT_EQ(Numa::DataNodes(3, {0, 1}, 8, 5, true), (std::vector<size_t>{3}));
-    EXPECT_EQ(Numa::DataNodes(3, {}, 1, 0, false), (std::vector<size_t>{3}));
-    EXPECT_EQ(Numa::DataNodes(std::nullopt, {0, 1}, 8, 5, true),
+    EXPECT_EQ(Numa::DataNodes(3, {0, 1}, 8, 5), (std::vector<size_t>{3}));
+    EXPECT_EQ(Numa::DataNodes(3, {}, 1, 0), (std::vector<size_t>{3}));
+    EXPECT_EQ(Numa::DataNodes(std::nullopt, {0, 1}, 8, 5),
               (std::vector<size_t>{1}));
-    EXPECT_EQ(Numa::DataNodes(std::nullopt, {0, 1}, 1, 0, true),
+    EXPECT_EQ(Numa::DataNodes(std::nullopt, {0, 1}, 1, 0),
               (std::vector<size_t>{0}));
-    EXPECT_TRUE(Numa::DataNodes(std::nullopt, {}, 1, 0, false).empty());
+    EXPECT_TRUE(Numa::DataNodes(std::nullopt, {}, 1, 0).empty());
 }
 
 TEST(UCCacheShmNumaLayoutTest, SpreadsFallbackRanksAcrossAvailableNodes)

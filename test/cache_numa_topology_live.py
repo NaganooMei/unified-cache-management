@@ -293,18 +293,19 @@ def _worker_placements(
         detected_node = detected.get(device_id)
         valid = detected_node is None or detected_node in allowed_nodes
         if model == "GQA":
-            segment = f"private-dp{dp_rank}-tp{tp_rank}"
+            segment = f"dp{dp_rank}-segment-{tp_rank}"
             if detected_node is not None:
                 targets = (detected_node,)
                 source = f"{platform_type.upper()} topology"
             elif platform_type == "npu":
-                # This is the current _configure_numa_placement fallback.
+                # Each GQA DP owns its TP segments. The fallback rank spreads
+                # those independent segments across host-local NUMA nodes.
                 fallback_rank = worker
                 targets = (allowed_nodes[fallback_rank % len(allowed_nodes)],)
                 source = f"local-worker fallback({fallback_rank})"
             else:
-                targets = ()
-                source = "first-touch"
+                targets = _segment_nodes(allowed_nodes, tp_size, tp_rank)
+                source = "segment striping" if targets else "first-touch"
         else:
             segment = f"shared-segment-{tp_rank}"
             if detected_node is not None:
@@ -379,11 +380,9 @@ def _print_scenario(
     warnings: List[str] = []
     if model == "GQA":
         counts = Counter(
-            item.owner_target[0]
-            for item in placements
-            if item.valid and len(item.owner_target) == 1
+            node for item in placements if item.valid for node in item.owner_target
         )
-        print(f"private Buffer distribution: {dict(sorted(counts.items()))}")
+        print(f"GQA DP-scoped segment distribution: {dict(sorted(counts.items()))}")
         verify_nodes.extend(counts)
     else:
         by_segment: Dict[str, List[WorkerPlacement]] = {}

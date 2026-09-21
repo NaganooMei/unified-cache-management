@@ -38,7 +38,7 @@ UC::CacheStore::Config MakeConfig(int32_t deviceId, size_t m = 64)
 {
     UC::CacheStore::Config cfg;
     cfg.deviceId = deviceId;
-    cfg.physicalDeviceId = deviceId;
+    if (deviceId >= 0) { cfg.shareBufferRank = static_cast<size_t>(deviceId); }
     cfg.shardSize = 4096;
     cfg.alignSize = 4096;
     cfg.bufferCapacity = 4096 * m;
@@ -122,7 +122,7 @@ TEST(UcmV2CacheBufferTest, ForkTwoProcessesCtrlShared)
     if (pid == 0) {
         close(startPipe[1]);
         auto cfg1 = MakeConfig(1);
-        cfg1.localRankSize = 2;
+        cfg1.shareBufferSegmentCount = 2;
         cfg1.uniqueId = "fork-ctrl-shared";
         UC::CacheStore::Buffer buf1;
         if (buf1.Setup(cfg1).Failure()) { _exit(2); }
@@ -134,7 +134,7 @@ TEST(UcmV2CacheBufferTest, ForkTwoProcessesCtrlShared)
     }
     close(startPipe[0]);
     auto cfg0 = MakeConfig(0);
-    cfg0.localRankSize = 2;
+    cfg0.shareBufferSegmentCount = 2;
     cfg0.uniqueId = "fork-ctrl-shared";
     UC::CacheStore::Buffer buf0;
     auto setup = buf0.Setup(cfg0);
@@ -168,7 +168,7 @@ TEST(UcmV2CacheBufferTest, CrossRankDataFetch)
     if (pid == 0) {
         close(startPipe[1]);
         auto cfg1 = MakeConfig(1);
-        cfg1.localRankSize = 2;
+        cfg1.shareBufferSegmentCount = 2;
         cfg1.uniqueId = "cross-rank-data";
         UC::CacheStore::Buffer buf1;
         if (buf1.Setup(cfg1).Failure()) { _exit(2); }
@@ -183,7 +183,7 @@ TEST(UcmV2CacheBufferTest, CrossRankDataFetch)
     }
     close(startPipe[0]);
     auto cfg0 = MakeConfig(0);
-    cfg0.localRankSize = 2;
+    cfg0.shareBufferSegmentCount = 2;
     cfg0.uniqueId = "cross-rank-data";
     UC::CacheStore::Buffer buf0;
     auto setup = buf0.Setup(cfg0);
@@ -219,7 +219,7 @@ TEST(UcmV2CacheBufferTest, CrossRankDataFetchNonMultipleCapacity)
     if (pid == 0) {
         close(startPipe[1]);
         auto cfg1 = MakeConfig(1, M);
-        cfg1.localRankSize = 2;
+        cfg1.shareBufferSegmentCount = 2;
         cfg1.bufferCapacity = 4096 * M + 2048;
         cfg1.uniqueId = "cross-rank-non-multiple";
         UC::CacheStore::Buffer buf1;
@@ -242,7 +242,7 @@ TEST(UcmV2CacheBufferTest, CrossRankDataFetchNonMultipleCapacity)
     }
     close(startPipe[0]);
     auto cfg0 = MakeConfig(0, M);
-    cfg0.localRankSize = 2;
+    cfg0.shareBufferSegmentCount = 2;
     cfg0.bufferCapacity = 4096 * M + 2048;
     cfg0.uniqueId = "cross-rank-non-multiple";
     UC::CacheStore::Buffer buf0;
@@ -641,11 +641,11 @@ TEST(UcmV2CacheBufferTest, PinStormReallocStress)
     EXPECT_FALSE(corrupted.load());
 }
 
-TEST(UcmV2CacheBufferTest, CacheDomainsAndPrivateBuffersAreIsolated)
+TEST(UcmV2CacheBufferTest, CacheDomainsAreIsolated)
 {
     auto cfg = MakeConfig(0);
     cfg.uniqueId = "domain-a";
-    UC::CacheStore::Buffer a, b, local1, local2;
+    UC::CacheStore::Buffer a, b;
     ASSERT_TRUE(a.Setup(cfg).Success());
     cfg.uniqueId = "domain-b";
     ASSERT_TRUE(b.Setup(cfg).Success());
@@ -653,12 +653,6 @@ TEST(UcmV2CacheBufferTest, CacheDomainsAndPrivateBuffersAreIsolated)
     auto h = a.Get(key, 0);
     h.MarkReady();
     EXPECT_FALSE(b.Exist(key, 0));
-    cfg.shareBufferEnable = false;
-    ASSERT_TRUE(local1.Setup(cfg).Success());
-    ASSERT_TRUE(local2.Setup(cfg).Success());
-    auto local = local1.Get(key, 0);
-    local.MarkReady();
-    EXPECT_FALSE(local2.Exist(key, 0));
 }
 
 TEST(UcmV2CacheBufferTest, SpeculationDoesNotWaitForPinnedSlots)
@@ -701,7 +695,6 @@ TEST(UcmV2CacheBufferTest, PartitionedControlUsesOneTotalCapacityBudget)
 {
     auto cfg = MakeConfig(-1, 65);
     cfg.uniqueId = "partitioned-control";
-    cfg.localRankSize = 1;
     cfg.shareBufferSegmentCount = 4;
     cfg.shareBufferNumaNodes = {0};
     UC::CacheStore::Buffer buf;
@@ -714,7 +707,6 @@ TEST(UcmV2CacheBufferTest, PartitionedJoinerRejectsDifferentTopology)
 {
     auto cfg = MakeConfig(-1, 64);
     cfg.uniqueId = "partitioned-mismatch";
-    cfg.localRankSize = 1;
     cfg.shareBufferSegmentCount = 4;
     cfg.shareBufferNumaNodes = {0, 1};
     UC::CacheStore::Buffer creator;

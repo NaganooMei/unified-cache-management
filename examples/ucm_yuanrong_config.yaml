@@ -29,7 +29,6 @@ ucm_connectors:
       # Maximum YuanRong buffers held by Posix per UCM process.
       yuanrong_posix_max_inflight_gb: 1
 
-      share_buffer_enable: true
       storage_backends: "/mnt/ucm"
       # "aio" is supported when io_direct is true; "psync" supports either mode.
       posix_io_engine: "psync"

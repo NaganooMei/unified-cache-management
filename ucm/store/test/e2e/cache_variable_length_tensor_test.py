@@ -116,10 +116,11 @@ def main():
     config = {}
     config["store_pipeline"] = "Cache|Empty"
     config["unique_id"] = secrets.token_hex(8)
+    config["share_buffer_segment_count"] = 1
+    config["share_buffer_rank"] = 0
     config["tensor_size_list"] = tensor_size
     config["shard_size"] = shard_size
     config["block_size"] = block_size
-    config["share_buffer_enable"] = True
     config["cache_buffer_capacity_gb"] = 4
     worker = UcmPipelineStore(config | {"device_id": device_id})
     scheduler = UcmPipelineStore(config)

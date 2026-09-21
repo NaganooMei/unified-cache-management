@@ -63,8 +63,6 @@ private:
     bool useGdr_{false};
     bool cacheIOAggregation_{false};
     bool cacheSdmaDirect_{false};
-    bool shared_{false};
-    bool stripeAcrossSegments_{false};
     std::vector<ssize_t> cpuAffinityCores_{};
     size_t segmentCount_{1};
     size_t bufferRank_{0};

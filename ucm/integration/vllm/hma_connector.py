@@ -639,13 +639,11 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         module_path = self.connector_configs[0].get("ucm_connector_module_path", None)
         config = copy.deepcopy(self.connector_configs[0]["ucm_connector_config"])
         config.setdefault("store_pipeline", "Cache|Empty")
-        # MLA ranks share one logical store buffer; non-MLA stores are per rank.
-        config.setdefault("share_buffer_enable", self.is_mla)
         if isinstance(config.get("storage_backends"), str):
             config["storage_backends"] = [
                 path for path in config["storage_backends"].split(":")
             ]
-        config["unique_id"] = f"{self.unique_id}_fawa_{store_suffix}"
+        config["unique_id"] = self._cache_unique_id(f"_fawa_{store_suffix}")
         self._configure_partitioned_store(config)
         self._namespace_storage_backends(config, store_suffix)
         dp_rank = self._vllm_config.parallel_config.data_parallel_rank
@@ -657,9 +655,6 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
         return name, module_path, config
 
     def _set_default_shm_buffer_capacity(self, config: dict[str, object]) -> None:
-        if not bool(config.get("share_buffer_enable", False)):
-            return
-
         # HMA creates two shared-buffer stores, FA and WA, so split the
         # shared-buffer capacity evenly between them, whether user-set or the
         # 128GB direct-connector default.
@@ -721,8 +716,8 @@ class UCMFAWAConnector(UCMDirectConnector, SupportsHMA):
                     f"GC file size of {label} does not match real file size. "
                     f"Worker: {padded_size}, Scheduler: {self.file_size[label]}"
                 )
-            # MLA stores aggregate TP shards under one logical rank group.
-            config["local_rank_size"] = self.tp_size if self.is_mla else 1
+            # Both layouts schedule Cache data over TP-sized segments.
+            config["local_rank_size"] = self.tp_size
             if cpu_affinity_cores:
                 config["cpu_affinity_cores"] = list(cpu_affinity_cores)
         else:

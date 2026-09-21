@@ -72,18 +72,15 @@ worker_cpu_affinity_enable = False
 MODEL_PROFILES = {
     "glm-5.2": {
         "worker_mode": "mla",
-        "share_buffer_enable": True,
         "layer_tensor_size_list": [131072, 16384, 32768],
     },
     # MiniMax tensor sizes below are for TP=8; adjust them for other TP sizes.
     "minimax-m2.7 tp8": {
         "worker_mode": "gqa",
-        "share_buffer_enable": False,
         "layer_tensor_size_list": [32768, 32768],
     },
     "dsv4": {
         "worker_mode": "mla",
-        "share_buffer_enable": True,
         "full_tensor_size_list": [
             131072,
             16384,
@@ -191,7 +188,6 @@ if model_profile is None:
         f"unsupported model {model_name!r}; choose one of: {available_models}"
     )
 worker_mode = model_profile["worker_mode"]
-share_buffer_enable = model_profile["share_buffer_enable"]
 tensor_size_list = resolve_tensor_size_list(model_profile)
 shard_size = (sum(tensor_size_list) + 4095) // 4096 * 4096
 effective_use_layerwise = (
@@ -413,7 +409,6 @@ def create_cache_worker(
     config["tensor_size_list"] = tensor_size_list
     config["shard_size"] = shard_size
     config["block_size"] = shard_size
-    config["share_buffer_enable"] = share_buffer_enable
     config["io_direct"] = True
     config["cache_load_backend_only"] = True
     config["cache_buffer_capacity_gb"] = 32
@@ -421,6 +416,8 @@ def create_cache_worker(
     config["cache_sdma_direct"] = cache_sdma_direct
     config["timeout_ms"] = 30000
     config["device_id"] = device_id
+    config["share_buffer_segment_count"] = worker_number
+    config["share_buffer_rank"] = device_id
     if store_cpu_affinity_cores:
         config["cpu_affinity_cores"] = store_cpu_affinity_cores
     return pipeline_store_cls(config)
@@ -436,12 +433,12 @@ def create_cache_scheduler(
     # Keep scheduler tensor sizes and shard size unset so the C++ defaults are
     # used; an empty Python list is parsed as vector<any> and fails any_cast.
     config["block_size"] = shard_size
-    config["share_buffer_enable"] = share_buffer_enable
     config["io_direct"] = True
     config["cache_buffer_capacity_gb"] = 32
     config["cache_sdma_direct"] = cache_sdma_direct
     config["timeout_ms"] = 30000
     config["device_id"] = -1
+    config["share_buffer_segment_count"] = worker_number
     if store_cpu_affinity_cores:
         config["cpu_affinity_cores"] = store_cpu_affinity_cores
     return pipeline_store_cls(config)
@@ -623,7 +620,6 @@ def worker_loop(
         f"warmup_epoch_number={warmup_epoch_number}, "
         f"epoch_interval_ms={epoch_interval_ms}, "
         f"cache_sdma_direct={cache_sdma_direct}, "
-        f"share_buffer_enable={share_buffer_enable}, "
         f"worker_cpu_affinity_enable={worker_cpu_affinity_enable}, "
         f"worker_cpu_affinity_cores={worker_cpu_affinity_cores}, "
         f"store_cpu_affinity_cores={store_cpu_affinity_cores}, "

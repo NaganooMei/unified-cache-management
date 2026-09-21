@@ -77,7 +77,6 @@ def build_llm_with_uc(module_path: str, name: str, model: str):
                     "ucm_connector_config": {
                         "store_pipeline": "Empty",
                         "store_health": {"enabled": True},
-                        "share_buffer_enable": True,
                     },
                 }
             ],

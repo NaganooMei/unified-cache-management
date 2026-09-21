@@ -49,10 +49,7 @@ Status DumpQueue::Setup(const Config& config, TaskIdSet* failureSet, Buffer* buf
     useGdr_ = config.useGdr;
     cacheIOAggregation_ = config.cacheIOAggregation;
     cacheSdmaDirect_ = config.cacheSdmaDirect;
-    shared_ = config.shareBufferEnable;
     segmentCount_ = buffer_->NumRanks();
-    bufferRank_ = shared_ ? config.EffectiveBufferRank() : 0;
-    stripeAcrossSegments_ = shared_ && config.localRankSize > 1;
     cpuAffinityCores_ = config.cpuAffinityCores;
     waiting_.Setup(config.waitingQueueDepth);
     dumping_.Setup(config.runningQueueDepth);
@@ -141,8 +138,7 @@ Status DumpQueue::DumpOneTask(CopyStream& stream, TaskPtr task)
     size_t copiedShards = 0;
     for (size_t i = 0; i < nShard; i++) {
         auto& shard = task->desc[i];
-        const auto preferredSegment =
-            shared_ ? (stripeAcrossSegments_ ? i % segmentCount_ : bufferRank_) : kInvalidIndex;
+        const auto preferredSegment = i % segmentCount_;
         auto handle = buffer_->Get(shard.owner, shard.index, false, preferredSegment);
         if (!handle) {
             stream.Synchronize();

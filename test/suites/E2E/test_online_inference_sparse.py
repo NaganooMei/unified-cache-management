@@ -175,7 +175,6 @@ class TestBasicOnlineInference:
                     "ucm_connector_name": "UcmPipelineStore",
                     "ucm_connector_config": {
                         "store_pipeline": "Empty",
-                        "share_buffer_enable": True,
                     },
                 }
             ],
@@ -289,7 +288,6 @@ class TestBasicOnlineInference:
                     "ucm_connector_name": "UcmPipelineStore",
                     "ucm_connector_config": {
                         "store_pipeline": "Empty",
-                        "share_buffer_enable": True,
                     },
                 }
             ],

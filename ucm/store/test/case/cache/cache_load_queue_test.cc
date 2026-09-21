@@ -52,11 +52,9 @@ TEST_F(UCCacheLoadQueueTest, LoadSameBlockTwice)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = true;
     Buffer buffer;
     LoadQueue loadQ;
     auto s = buffer.Setup(config);
@@ -95,11 +93,9 @@ TEST_F(UCCacheLoadQueueTest, SharedFailureStopsNonOwnerWait)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = true;
     Buffer buffer;
     LoadQueue loadQ;
     auto s = buffer.Setup(config);
@@ -147,11 +143,9 @@ TEST_F(UCCacheLoadQueueTest, LoadWhileBackendSubmitFailed)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = true;
     Buffer buffer;
     LoadQueue loadQ;
     auto s = buffer.Setup(config);
@@ -200,11 +194,9 @@ TEST_F(UCCacheLoadQueueTest, LoadWhileBackendWaitFailed)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = true;
     Buffer buffer;
     LoadQueue loadQ;
     auto s = buffer.Setup(config);

@@ -46,7 +46,6 @@ struct Config {
     StoreV1* storeBackend{};
     std::string uniqueId{};
     int32_t deviceId{-1};
-    int32_t physicalDeviceId{-1};
     std::vector<size_t> tensorSizes{};
     size_t shardSize{0};
     size_t blockSize{0};
@@ -55,18 +54,15 @@ struct Config {
     std::vector<ssize_t> cpuAffinityCores{};
     size_t bufferCapacity{256ULL << 30};
     size_t loadExclusiveBufferNumber{1024};
-    bool shareBufferEnable{true};
-    // Connector-derived physical segment count. Unset clients use localRankSize.
-    // This is separate because GQA can use rank-local placement in a shared domain.
+    // Connector-derived physical segment count. Unset clients use one segment.
     std::optional<size_t> shareBufferSegmentCount{};
-    // Empty detects allowed online memory nodes; ignored for process-local buffers.
+    // Empty detects allowed online memory nodes.
     std::vector<size_t> shareBufferNumaNodes{};
     // Rank within the shared-buffer group, independent of the device ordinal.
     std::optional<size_t> shareBufferRank{};
     // Connector-detected device-affine NUMA node. Not a user-selectable policy.
     std::optional<size_t> detectedNumaNode{};
-    // Connector-derived host-local worker rank used only when a private GQA Buffer has no
-    // device topology affinity.
+    // Connector-derived host-local worker rank used when device topology has no affinity.
     std::optional<size_t> fallbackNumaRank{};
     size_t waitingQueueDepth{8192};
     size_t runningQueueDepth{524288};
@@ -79,7 +75,6 @@ struct Config {
     bool useGdr{false};
     bool cacheIOAggregation{false};
     bool cacheSdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
-    size_t localRankSize{1};
 
     size_t EffectiveStreamNumber() const noexcept
     {
@@ -87,11 +82,11 @@ struct Config {
     }
     size_t EffectiveBufferRank() const noexcept
     {
-        return shareBufferRank.value_or(static_cast<size_t>(physicalDeviceId));
+        return shareBufferRank.value_or(0);
     }
     size_t EffectiveBufferSegmentCount() const noexcept
     {
-        return shareBufferSegmentCount.value_or(localRankSize);
+        return shareBufferSegmentCount.value_or(1);
     }
 };
 

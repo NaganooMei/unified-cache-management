@@ -54,9 +54,7 @@ public:
     {
         backend_ = config.storeBackend;
         loadBackendOnly_ = config.cacheLoadBackendOnly;
-        if (config.deviceId == -1 && (!config.shareBufferEnable || loadBackendOnly_)) {
-            return Status::OK();
-        }
+        if (config.deviceId == -1 && loadBackendOnly_) { return Status::OK(); }
         try {
             buffer_ = std::make_unique<Buffer>();
         } catch (const std::exception& e) {

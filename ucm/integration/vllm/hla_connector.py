@@ -848,11 +848,10 @@ class UCMHybridLinearAttentionConnector(UCMDirectConnector, SupportsHMA):
         name = self.connector_configs[0]["ucm_connector_name"]
         module_path = self.connector_configs[0].get("ucm_connector_module_path", None)
         config = copy.deepcopy(self.connector_configs[0]["ucm_connector_config"])
-        config.setdefault("share_buffer_enable", self.is_mla)
         if "storage_backends" in config:
             backends = [path for path in config["storage_backends"].split(":")]
             config["storage_backends"] = backends
-        config["unique_id"] = f"{self.unique_id}{unique_id_suffix}"
+        config["unique_id"] = self._cache_unique_id(unique_id_suffix)
         self._configure_partitioned_store(config)
         self._set_default_shm_buffer_capacity(config)
         self._configure_numa_placement(config)
@@ -877,7 +876,7 @@ class UCMHybridLinearAttentionConnector(UCMDirectConnector, SupportsHMA):
             config["shard_size"] = shard_size * self.blocks_per_chunk
             config["block_size"] = block_size * self.blocks_per_chunk
             self._publish_block_size(config["block_size"])
-            config["local_rank_size"] = self.tp_size if self.is_mla else 1
+            config["local_rank_size"] = self.tp_size
             buffer_addrs = kv_cache_layout.base_ptrs.reshape(-1).tolist()
             buffer_sizes = kv_cache_layout.buffer_sizes.reshape(-1).tolist()
             gpu_kv_buffer_set = set()

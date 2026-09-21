@@ -1149,18 +1149,10 @@ class UCMDirectConnector(KVConnectorBase_V1):
         self.launch_config = ucm_config.get_config()
         self.connector_configs = self.launch_config.get("ucm_connectors", [])
         assert len(self.connector_configs) > 0, "no storage connector name in config."
-        share_buffer_enable = bool(
-            self.connector_configs[0]
-            .get("ucm_connector_config", {})
-            .get("share_buffer_enable", self.is_mla)
-        )
-        if share_buffer_enable:
-            if role == KVConnectorRole.WORKER:
-                self.unique_id = _worker_generate_unique_id()
-            else:
-                self.unique_id = _scheduler_read_unique_id()
+        if role == KVConnectorRole.WORKER:
+            self.unique_id = _worker_generate_unique_id()
         else:
-            self.unique_id = self.engine_id
+            self.unique_id = _scheduler_read_unique_id()
         self.enable_event_sync = self.launch_config.get("enable_event_sync", True)
         self.enable_record_traces = self.launch_config.get(
             "enable_record_traces", False
@@ -1240,6 +1232,20 @@ class UCMDirectConnector(KVConnectorBase_V1):
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         return [RequestHasher(vllm_config, rank_id) for rank_id in range(1, tp_size)]
 
+    def _cache_unique_id(self, suffix: str = "") -> str:
+        """Return the Cache domain ID used by this connector's Store.
+
+        MLA keeps one Cache domain across all DP ranks.  GQA gets one domain
+        per DP rank, while TP workers in that DP continue to share the same
+        control/data layout.  ``data_parallel_index`` is used instead of the
+        local DP rank because it remains the stable service-wide DP identity.
+        """
+        cache_id = self.unique_id
+        if not self.is_mla:
+            dp_rank = self._vllm_config.parallel_config.data_parallel_index
+            cache_id = f"{cache_id}_dp{dp_rank}"
+        return f"{cache_id}{suffix}"
+
     def _record_load_error(self, metric_name: str, block_ids: Any) -> None:
         invalid_blocks = set(block_ids)
         new_invalid_blocks = invalid_blocks - self._invalid_block_ids
@@ -1273,8 +1279,6 @@ class UCMDirectConnector(KVConnectorBase_V1):
         return ret
 
     def _set_default_shm_buffer_capacity(self, config: dict[str, Any]) -> None:
-        if not bool(config.get("share_buffer_enable", False)):
-            return
         if config.get("cache_buffer_capacity_gb") is None:
             config["cache_buffer_capacity_gb"] = 128
             logger.info(
@@ -1282,12 +1286,9 @@ class UCMDirectConnector(KVConnectorBase_V1):
             )
 
     def _configure_partitioned_store(self, config: dict[str, Any]) -> None:
-        # Rank partitioning is an implementation detail of every shared Buffer.
-        # MLA enables sharing by default; GQA defaults to a process-local Buffer.
-        # An explicit share_buffer_enable setting is honored for both layouts.
-        config.setdefault("share_buffer_enable", self.is_mla)
-        if not config.get("share_buffer_enable", False):
-            return
+        # Both GQA and MLA use one control area and TP-sized data partitions.
+        # The Cache domain ID isolates GQA's DP replicas while MLA shares them.
+        config.pop("share_buffer_enable", None)
         parallel = self._vllm_config.parallel_config
         pp_rank = (
             parallel.rank // parallel.tensor_parallel_size
@@ -1297,7 +1298,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
         # The scheduler is control-only, but must declare the same segment count
         # when it attaches to and validates the shared control layout.
         config["share_buffer_segment_count"] = self.tp_size
-        config["local_rank_size"] = self.tp_size if self.is_mla else 1
+        config["local_rank_size"] = self.tp_size
         if self._role != KVConnectorRole.WORKER:
             return
         topology = getattr(self, "_partitioned_buffer_topology", None)
@@ -1330,20 +1331,16 @@ class UCMDirectConnector(KVConnectorBase_V1):
         numa_node = self.device.get_numa_node(self.device_id)
         if numa_node is not None:
             # Connector-internal hint derived from the physical accelerator topology.
-            # It applies to both a GQA private Buffer and this MLA rank's segment.
+            # Bind this TP rank's data segment to its accelerator's NUMA node.
             config["cache_detected_numa_node"] = numa_node
             return
         if current_platform.device_type == "npu" and not self.is_mla:
-            # A3 exposes no useful device affinity. Spread GQA private Buffers over
-            # the available NUMA nodes by the worker's DP x PP x TP position.
-            # Unlike MLA, each GQA DP worker owns a private Buffer, so every local
-            # DP rank must participate instead of restarting from TP rank zero.
+            # On A3, spread the independent GQA DP/TP data segments across the
+            # allowed NUMA nodes when device topology does not expose affinity.
             parallel = self._vllm_config.parallel_config
             dp_rank = getattr(parallel, "data_parallel_rank_local", None)
             if dp_rank is None:
-                dp_rank = getattr(
-                    parallel, "data_parallel_index", parallel.data_parallel_rank
-                )
+                dp_rank = parallel.data_parallel_index
             model_parallel_size = (
                 parallel.pipeline_parallel_size * parallel.tensor_parallel_size
             )
@@ -1370,7 +1367,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
         if "storage_backends" in config:
             backends = [path for path in config["storage_backends"].split(":")]
             config["storage_backends"] = backends
-        config["unique_id"] = f"{self.unique_id}"
+        config["unique_id"] = self._cache_unique_id()
         self._configure_partitioned_store(config)
         self._set_default_shm_buffer_capacity(config)
         self._configure_numa_placement(config)
@@ -1401,7 +1398,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
                     f"logical_block_size={logical_block_size}, "
                     f"store_block_size={store_block_size}."
                 )
-            config["local_rank_size"] = self.tp_size if self.is_mla else 1
+            config["local_rank_size"] = self.tp_size
             buffer_addrs = kv_cache_layout.base_ptrs.reshape(-1).tolist()
             buffer_sizes = kv_cache_layout.buffer_sizes.reshape(-1).tolist()
             gpu_kv_buffer_set = set()

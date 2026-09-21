@@ -57,11 +57,9 @@ TEST_F(UCCacheDumpQueueTest, DumpOneBlock)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = true;
     config.loadExclusiveBufferNumber = 0;
     Buffer buffer;
     DumpQueue dumpQ;
@@ -97,11 +95,9 @@ TEST_F(UCCacheDumpQueueTest, DumpBlockWhileBackendSubmitFailed)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = true;
     config.loadExclusiveBufferNumber = 0;
     Buffer buffer;
     DumpQueue dumpQ;
@@ -136,11 +132,9 @@ TEST_F(UCCacheDumpQueueTest, DumpBlockWhileBackendUnhealthy)
     config.shardSize = tensorSize;
     config.blockSize = config.shardSize;
     config.deviceId = 0;
-    config.physicalDeviceId = 0;
     config.loadExclusiveBufferNumber = 512;
     config.bufferCapacity = config.shardSize * 1024;
     config.uniqueId = rd.RandomString(10);
-    config.shareBufferEnable = true;
     config.loadExclusiveBufferNumber = 0;
     Buffer buffer;
     DumpQueue dumpQ;
