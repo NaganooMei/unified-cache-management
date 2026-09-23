@@ -13,6 +13,7 @@
 
 ## 当前文档
 
+- [基于稳定 A5 分支迁移 Develop Cache 的方案](features/active/cache-unification-develop-proposal.md)
 - [Cache 内存按 Rank 划分、NUMA 绑定与 Lookup 首层预取](features/active/cache_rank_partitioned_memory_bandwidth.md)
 
 功能实现应在独立 feature 分支完成。本分支只维护文档，并长期保留稳定的 GitHub 链接；需要合入主仓的正式文档再由对应功能 PR 选择性带入。
