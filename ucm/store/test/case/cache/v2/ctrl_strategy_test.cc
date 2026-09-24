@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <future>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <new>
@@ -29,6 +30,7 @@ struct CtrlStrategyTestAccess {
     static const void* HeaderAddress(const CtrlLayout& layout) { return layout.Hdr(); }
     static size_t RankCount(const CtrlLayout& layout) { return layout.RankCount(); }
     static size_t SlotsPerRank(const CtrlLayout& layout) { return layout.SlotsPerRank(); }
+    static size_t SlotSize(const CtrlLayout& layout) { return layout.SlotSize(); }
     static size_t TotalSize(size_t bucketCount, size_t lockCount, size_t slotCount)
     {
         return CtrlLayout::TotalSize(bucketCount, lockCount, slotCount);
@@ -137,8 +139,96 @@ Config MakeControlConfig(const std::string& uniqueId, int rank)
     cfg.localRankSize = 8;
     cfg.shardSize = 4096;
     cfg.bufferCapacity = cfg.localRankSize * 8 * cfg.shardSize;
+    if (rank < 0) { cfg.shardSize = 0; }
     cfg.timeoutMs = 10000;
     return cfg;
+}
+
+std::string ControlTestId(const char* name)
+{
+    return std::string(name) + "_" + std::to_string(::getpid()) + "_" +
+           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+}
+
+void CheckSchedulerWithoutShardSize(bool schedulerFirst)
+{
+    auto id = ControlTestId("scheduler_no_shard");
+    auto workerConfig = MakeControlConfig(id, 0);
+    auto schedulerConfig = MakeControlConfig(id, -1);
+    CtrlStrategy worker;
+    CtrlStrategy scheduler;
+    if (schedulerFirst) {
+        auto joining =
+            std::async(std::launch::async, [&] { return scheduler.Setup(schedulerConfig); });
+        // The scheduler must wait for a worker instead of creating an invalid layout.
+        EXPECT_EQ(joining.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+        EXPECT_TRUE(worker.Setup(workerConfig).Success());
+        ASSERT_TRUE(joining.get().Success());
+    } else {
+        ASSERT_TRUE(worker.Setup(workerConfig).Success());
+        ASSERT_TRUE(scheduler.Setup(schedulerConfig).Success());
+    }
+    EXPECT_EQ(schedulerConfig.shardSize, 0);
+    auto& layout = scheduler.Layout();
+    EXPECT_EQ(CtrlStrategyTestAccess::SlotSize(layout), workerConfig.shardSize);
+    EXPECT_EQ(CtrlStrategyTestAccess::RankCount(layout), workerConfig.localRankSize);
+    EXPECT_EQ(CtrlStrategyTestAccess::SlotsPerRank(layout), 8);
+    CtrlLayout::RankDataDesc desc;
+    desc.handle.store(123, std::memory_order_relaxed);
+    ASSERT_TRUE(worker.Layout().SetRankDesc(0, desc).Success());
+    auto observed = layout.GetRankDesc(0);
+    ASSERT_TRUE(observed);
+    EXPECT_EQ(observed.Value().handle.load(std::memory_order_relaxed), 123);
+}
+
+TEST(Cache2CtrlStrategyTest, SchedulerWithoutShardSizeStartsBeforeWorker)
+{
+    CheckSchedulerWithoutShardSize(true);
+}
+
+TEST(Cache2CtrlStrategyTest, SchedulerWithoutShardSizeStartsAfterWorker)
+{
+    CheckSchedulerWithoutShardSize(false);
+}
+
+TEST(Cache2CtrlStrategyTest, SchedulerWithoutShardSizeTimesOutWithoutWorker)
+{
+    auto cfg = MakeControlConfig(ControlTestId("scheduler_timeout"), -1);
+    cfg.timeoutMs = 20;
+    CtrlStrategy scheduler;
+    EXPECT_EQ(scheduler.Setup(cfg), Status::Retry());
+}
+
+TEST(Cache2CtrlStrategyTest, SchedulerStillRejectsMismatchedCapacityAndRanks)
+{
+    auto id = ControlTestId("scheduler_mismatch");
+    CtrlStrategy worker;
+    ASSERT_TRUE(worker.Setup(MakeControlConfig(id, 0)).Success());
+    auto cfg = MakeControlConfig(id, -1);
+    cfg.bufferCapacity *= 2;
+    CtrlStrategy wrongCapacity;
+    EXPECT_EQ(wrongCapacity.Setup(cfg), Status::InvalidParam());
+    cfg = MakeControlConfig(id, -1);
+    cfg.localRankSize = 4;
+    CtrlStrategy wrongRanks;
+    EXPECT_EQ(wrongRanks.Setup(cfg), Status::InvalidParam());
+}
+
+TEST(Cache2CtrlStrategyTest, WorkerStillRequiresMatchingShardSize)
+{
+    auto id = ControlTestId("worker_shard");
+    auto cfg = MakeControlConfig(id, 0);
+    cfg.shardSize = 0;
+    CtrlStrategy invalidCreator;
+    EXPECT_EQ(invalidCreator.Setup(cfg), Status::InvalidParam());
+    CtrlStrategy worker;
+    ASSERT_TRUE(worker.Setup(MakeControlConfig(id, 0)).Success());
+    cfg.deviceId = 1;
+    CtrlStrategy invalidJoiner;
+    EXPECT_EQ(invalidJoiner.Setup(cfg), Status::InvalidParam());
+    cfg.shardSize = 8192;
+    CtrlStrategy mismatchedJoiner;
+    EXPECT_EQ(mismatchedJoiner.Setup(cfg), Status::InvalidParam());
 }
 
 [[noreturn]] void RunParticipant(int startFd, int releaseFd, int reportFd, ProcessState* state,
