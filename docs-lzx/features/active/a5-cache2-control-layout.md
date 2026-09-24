@@ -108,7 +108,7 @@ SlotMeta   (alignof = 64，三个 alignas(64) 字段各占一条独立 cache lin
 
 ### 3.1 链表示例（含跨 rank 段）
 
-假设 `slotsPerRank = 4`、`rankCount = 2`，因此 rank 0 段是 slot `[0,4)`、rank 1 段是 slot `[4,8)`，槽 1 属于 rank 0，槽 5 / 9 属于 rank 1：
+假设 `slotsPerRank = 4`、`rankCount = 2`，因此 rank 0 段是 slot `[0,4)`、rank 1 段是 slot `[4,8)`，槽 1 / 2 属于 rank 0，槽 5 属于 rank 1：
 
 ```mermaid
 ---
@@ -127,31 +127,31 @@ flowchart LR
         direction TB
         H0["bucket 0 = 5"]
         H1["bucket 1 = kInvalid（空桶）"]
-        H2["bucket 2 = 9"]
+        H2["bucket 2 = 2"]
     end
 
     subgraph R1["SlotMetaArr()：rank 1 段"]
         direction TB
         N5["slot 5：hash=0 prev=kInvalid next=1"]
-        N9["slot 9：hash=2 next=kInvalid"]
     end
 
     subgraph R0["SlotMetaArr()：rank 0 段"]
         direction TB
         N1["slot 1：hash=0 prev=5 next=kInvalid"]
+        N2["slot 2：hash=2 prev=kInvalid next=kInvalid"]
     end
 
     H0 -- 链首 --> N5
     N5 -- next --> N1
-    H2 -- 链首 --> N9
+    H2 -- 链首 --> N2
 
     classDef head fill:#eff6ff,stroke:#2563eb,color:#172033
     classDef slot fill:#f5f3ff,stroke:#7c3aed,color:#172033
     class H0,H1,H2 head
-    class N1,N5,N9 slot
+    class N1,N2,N5 slot
 ```
 
-图中 bucket 0 的链是 `5 → 1`，横跨 rank 1 段与 rank 0 段 —— **分配受 rank 分区限制，但链本身可以跨分区**，这正是多个 rank 共享同一份缓存目录的基础。bucket 1 为空，bucket 2 只有槽 9。
+图中 bucket 0 的链是 `5 → 1`，横跨 rank 1 段与 rank 0 段 —— **分配受 rank 分区限制，但链本身可以跨分区**，这正是多个 rank 共享同一份缓存目录的基础。bucket 1 为空，bucket 2 只有槽 2。
 
 ## 4. 挂链与摘链
 
