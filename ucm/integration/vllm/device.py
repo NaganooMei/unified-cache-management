@@ -654,7 +654,9 @@ class NpuDevice(Device):
                 return None
             self._get_pcie_info(device_map_info)
             self._get_numa_info(device_map_info)
-            topo = device_map_info.get(device_ordinal)
+            # The map is keyed by the logic device id, so a process-local ordinal
+            # has to go through the visible-device list first.
+            topo = device_map_info.get(self._get_device_id(device_ordinal))
             if topo is None or topo.numa_id is None:
                 return None
             return topo.numa_id

@@ -22,6 +22,7 @@
  * SOFTWARE.
  * */
 #include "data_backend_memfd.h"
+#include <algorithm>
 #include <fmt/format.h>
 #include <limits>
 #include <sys/stat.h>
@@ -30,6 +31,7 @@
 #include "logger/logger.h"
 #include "numa/numa_policy.h"
 #include "trans/buffer.h"
+#include "trans/device.h"
 
 namespace UC::Cache2 {
 
@@ -38,6 +40,10 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr auto kConnectBackoff = std::chrono::milliseconds(10);
+
+/* Upper bound on a single receive wait, so a huge setup budget cannot overflow
+ * the millisecond count handed to the socket. */
+constexpr int64_t kMaxReceiveMs = 3600 * 1000;
 
 /* Deterministic across processes, unlike std::hash. */
 uint64_t HashName(const std::string& name)
@@ -124,8 +130,17 @@ Status MemfdDataBackend::ImportPeer(size_t rank, uint64_t handle)
         std::this_thread::sleep_for(kConnectBackoff);
     }
     int32_t fd = -1;
-    auto status = peer.RecvFd(fd);
-    if (status.Failure()) { return status; }
+    /* Bound the receive by whatever is left of the setup budget. A spent budget
+     * still gets one bounded attempt, so a fast peer is not lost to scheduling. */
+    const auto remainingMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline_ - Clock::now()).count();
+    const auto bounded = std::clamp<int64_t>(remainingMs, 0, kMaxReceiveMs);
+    auto status = peer.RecvFd(fd, static_cast<int32_t>(bounded));
+    if (status.Failure()) {
+        UC_ERROR("memfd fd receive failed: owner={} device={} rank={} name={} status={}",
+                 ownerRank_, deviceId_, rank, name, status);
+        return status;
+    }
     struct stat info{};
     const bool statFailed = ::fstat(fd, &info) != 0;
     if (statFailed || static_cast<size_t>(info.st_size) < rankStride_) {
@@ -232,12 +247,21 @@ Status MemfdDataBackend::PlaceAndRegister(size_t rank)
 
 Status MemfdDataBackend::RegisterSegment(Segment& segment)
 {
+    /* Registration acts on the process's current device context, which nothing
+     * else here establishes; without it a standalone store could register the
+     * segment against the wrong device, or get an unusable SDMA alias. */
+    Trans::Device device;
+    auto status = device.Setup(deviceId_);
+    if (status.Failure()) {
+        UC_ERROR("memfd device setup failed: device={} status={}", deviceId_, status);
+        return status;
+    }
     /* Registration itself is unconditional: the device has to be able to reach
      * this host memory whichever copy path runs. Only the device-visible alias
      * is SDMA-specific, so it is fetched on demand and stays nullptr otherwise. */
     void* deviceAddr = nullptr;
     void** aliasOut = requireHostDeviceAddress_ ? &deviceAddr : nullptr;
-    auto status = Trans::Buffer::RegisterHostBuffer(segment.mem->Addr(), rankStride_, aliasOut);
+    status = Trans::Buffer::RegisterHostBuffer(segment.mem->Addr(), rankStride_, aliasOut);
     if (status.Failure()) {
         UC_ERROR("memfd host register failed: device={} bytes={} status={}", deviceId_, rankStride_,
                  status);

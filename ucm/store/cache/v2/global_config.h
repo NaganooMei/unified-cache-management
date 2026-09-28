@@ -55,6 +55,9 @@ struct Config {
     size_t waitingQueueDepth{8192};
     size_t runningQueueDepth{524288};
     size_t timeoutMs{30000};
+    /* Budget for the whole data-plane setup. Only bounds initialization; it has
+     * nothing to do with NUMA placement. */
+    size_t dataSetupTimeoutMs{600000};
     size_t streamNumber{4};
     /* Whether the user set cache_stream_number at all: SDMA Direct has a
      * different unconfigured default, so an explicit value has to win over it. */
@@ -102,6 +105,7 @@ struct Config {
         dict.GetNumber("waiting_queue_depth", config.waitingQueueDepth);
         dict.GetNumber("running_queue_depth", config.runningQueueDepth);
         dict.GetNumber("timeout_ms", config.timeoutMs);
+        dict.GetNumber("cache_data_setup_timeout_ms", config.dataSetupTimeoutMs);
         dict.GetNumber("cache_stream_number", config.streamNumber);
         config.streamNumberExplicit = dict.Contains("cache_stream_number");
         dict.Get("cache_sdma_direct", config.sdmaDirect);
@@ -192,6 +196,7 @@ struct Config {
         UC_INFO("Set {}::WaitingQueueDepth to {}.", ns, waitingQueueDepth);
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, timeoutMs);
+        UC_INFO("Set {}::DataSetupTimeoutMs to {}.", ns, dataSetupTimeoutMs);
         UC_INFO("Set {}::StreamNumber to {} (configured={}).", ns, EffectiveStreamNumber(),
                 streamNumber);
         UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, sdmaDirect);
