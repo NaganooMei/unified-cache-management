@@ -57,6 +57,7 @@ class MemfdDataBackend : public DataBackend {
     size_t ownerRank_{0};
     int32_t deviceId_{-1};
     bool requireHostDeviceAddress_{false};
+    Numa::Plan localPlacement_{};
     std::chrono::steady_clock::time_point deadline_{};
     FdSocket fdServer_{};
     std::thread fdThread_{};
