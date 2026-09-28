@@ -38,15 +38,15 @@ namespace UC::Cache2 {
 /* Generic backend for platforms without a vendor host-memory path
  * (ascend/ascend-a3/cuda/simu): one memfd segment per rank, imported over an
  * abstract Unix socket with SCM_RIGHTS. Every participant maps all segments, so
- * all slots are host-accessible and DeviceAddrOf stays nullptr. Where the
- * transfer mode needs a device address (Memfd SDMA Direct), the local segment is
- * also registered with the device and its device-visible alias is exposed
- * through HostMappedDeviceAddrOf -- the alias is for descriptors only, never for
- * CPU access. */
+ * all slots are host-accessible and DeviceAddrOf stays nullptr. Every segment is
+ * registered with the device so the device can reach it on any copy path; the
+ * device-visible alias is fetched only when the transfer mode needs it (Memfd
+ * SDMA Direct) and exposed through HostMappedDeviceAddrOf -- the alias is for
+ * descriptors only, never for CPU access. */
 class MemfdDataBackend : public DataBackend {
     struct Segment {
         std::unique_ptr<MemFd> mem{}; /* host mapping and fd; null until mapped */
-        void* deviceAddr{nullptr};    /* device-visible alias, nullptr if unregistered */
+        void* deviceAddr{nullptr};    /* device-visible alias, nullptr unless required */
         bool owner{false};
         bool registered{false};
     };

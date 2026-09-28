@@ -135,12 +135,10 @@ Status MemfdDataBackend::ImportPeer(size_t rank, uint64_t handle)
     if (status.Failure()) { return status; }
     auto& segment = segments_[rank];
     segment.mem = std::move(mem);
-    if (requireHostDeviceAddress_) {
-        /* The owner already placed and touched this segment; here it only gets
-         * registered in this process's device context. */
-        status = RegisterSegment(segment);
-        if (status.Failure()) { return status; }
-    }
+    /* The owner already placed and touched this segment; here it only gets
+     * registered in this process's device context. */
+    status = RegisterSegment(segment);
+    if (status.Failure()) { return status; }
     UC_INFO("memfd peer segment: owner={} device={} rank={} bytes={}", ownerRank_, deviceId_, rank,
             rankStride_);
     return Status::OK();
@@ -213,14 +211,17 @@ Status MemfdDataBackend::PlaceAndRegister(size_t rank)
             base[offset] = std::byte{0};
         }
     }
-    if (!requireHostDeviceAddress_) { return Status::OK(); }
     return RegisterSegment(segment);
 }
 
 Status MemfdDataBackend::RegisterSegment(Segment& segment)
 {
+    /* Registration itself is unconditional: the device has to be able to reach
+     * this host memory whichever copy path runs. Only the device-visible alias
+     * is SDMA-specific, so it is fetched on demand and stays nullptr otherwise. */
     void* deviceAddr = nullptr;
-    auto status = Trans::Buffer::RegisterHostBuffer(segment.mem->Addr(), rankStride_, &deviceAddr);
+    void** aliasOut = requireHostDeviceAddress_ ? &deviceAddr : nullptr;
+    auto status = Trans::Buffer::RegisterHostBuffer(segment.mem->Addr(), rankStride_, aliasOut);
     if (status.Failure()) {
         UC_ERROR("memfd host register failed: device={} bytes={} status={}", deviceId_, rankStride_,
                  status);
