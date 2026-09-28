@@ -12,7 +12,7 @@ develop 只用于核对兼容性和参考已有传输实现（已核对 `2d24ab3
 
 1. 在现有 Cache v2 中抽出公共 DataStrategy 接口和 HAL 实现，保留 connector、控制区、Buffer、Handle 和缓存算法。
 2. 增加普通内存 DataStrategy，通过构建时 PLATFORM 与 A5 HAL 实现隔离。
-3. 增加独立 NUMA 模块，由普通内存 DataStrategy 调用。
+3. 增加独立 NUMA 模块，HAL/Memfd DataStrategy 共用：检测到设备亲和性就使用亲和内存，否则随机打散分配。
 4. 支持配置 SDMA Direct stream 数。
 
 不要继续整理或迁移 codex/cache-rank-partition，不重写缓存算法，不附带增加预取、线程池或 Posix 优化。
@@ -25,9 +25,10 @@ develop 只用于核对兼容性和参考已有传输实现（已核对 `2d24ab3
 |---|---|
 | `setup.py`、`ucm/store/cache/CMakeLists.txt` | 沿用 PLATFORM → RUNTIME_ENVIRONMENT；显式选择平台源文件 |
 | `ucm/store/cache/v2/data_strategy.h` | 公共接口，不包含 HAL/ACL/CUDA 头；内部实现用 Impl 隐藏 |
-| `ucm/store/cache/v2/data/hal/data_strategy.cc` | 移入当前 A5 HAL 实现，保持行为 |
+| `ucm/store/cache/v2/data/hal/data_strategy.cc` | 移入当前 A5 HAL 实现，接入统一 NUMA 选择结果 |
 | `ucm/store/cache/v2/data/memfd/data_strategy.cc` | 新增普通内存实现 |
-| `ucm/store/cache/v2/numa/numa_policy.h/.cc` | 新增 NUMA 模块 |
+| `ucm/store/cache/v2/numa/numa_policy.h/.cc` | 新增自动 NUMA 选择与绑定模块，不提供用户 policy 开关 |
+| `ucm/shared/trans/ascend/hal/hal_memory.h/.cc` | 将 NUMA 选择结果传给 HAL 分配路径，具体参数核对目标 SDK |
 | `ucm/store/cache/v2/global_config.h`、`cache_buffer.h` | 解析新配置，组装 DataOptions，调用数据区初始化 |
 | `ucm/store/cache/v2/copy_stream.h`、Load/Dump 队列 | 接入所需传输模式、地址选择及 stream 数 |
 | `ucm/integration/vllm/` | 保留已有 unique ID、MLA dump 分工；补充新配置透传和设备 NUMA 节点提示 |
@@ -54,8 +55,7 @@ struct DataOptions {
     size_t slotsPerRank{0};
     size_t setupTimeoutMs{600000};   // 整次 Setup 总预算；0 表示不等待
     bool requireHostDeviceAddress{false}; // 由有效拷贝模式推导，不是用户开关
-    Numa::Options numa;
-    std::optional<int32_t> deviceNumaNode;
+    std::optional<int32_t> deviceNumaNode; // 设备层探测结果，未知为空；不是用户配置
 };
 class DataStrategy {
 public:
@@ -103,35 +103,37 @@ HostAccessible 表示 CPU/后端 I/O 是否可访问，不能拿它代替拷贝�
 - 失败/退出时停止 FD 服务，解除注册，再 munmap、close。调用方先等后端 I/O 和设备拷贝结束，再释放 Handle 和 Buffer。
 - 保持控制区改动最小；本轮不要求新增复杂的 rank 生命周期状态机或热恢复机制。若必须修改共享布局，应升级版本并拒绝新旧布局混用。
 
-## 5. NUMA 接口与配置
+## 5. NUMA 自动选择接口
 
-模块不依赖 torch、ACL、CUDA。connector/device 层将设备 ordinal 转为真实设备亲和节点；NUMA 模块结合 Linux allowed memory nodes 校验。
+不提供用户 policy、节点列表或开关。每个 worker 在创建本地数据段之前自动选择一次，HAL/Memfd 共用同一逻辑：
+
+| 探测结果 | 分配方式 | 当前部署对应关系 |
+|---|---|---|
+| 检测到设备 NUMA 亲和性 | 整个本地数据段放在亲和节点 | A5、A2、H100 |
+| 检测不到设备 NUMA 亲和性 | 每个 worker 随机选择一个可用 NUMA 节点，整个本地数据段放在该节点 | A3 |
+
+平台对应关系用于验收，执行时以实际探测结果为准，不按型号硬编码。随机打散的粒度是 worker，不是数据段内的页或块；允许多个 worker 随机选中同一节点，不要求严格均分。
 
 ```cpp
 namespace UC::Cache2::Numa {
-enum class Policy { Off, Auto, Bind };
-struct Options {
-    Policy policy{Policy::Off};
-    std::vector<int32_t> nodes;     // Bind 专用
-    bool verify{false};
-};
+enum class Placement { Affinity, Random }; // 内部选择结果，不是用户配置
 struct Plan {
-    Policy policy{Policy::Off};
-    std::optional<int32_t> node;    // 空表示系统默认放置
+    Placement placement;
+    int32_t node;
 };
-Expected<Plan> Resolve(const Options&, std::optional<int32_t> deviceNode, size_t myRank);
-Status BindBeforeTouch(void* base, size_t bytes, const Plan&);
+Expected<Plan> Resolve(std::optional<int32_t> deviceNode);
+Status BindBeforeTouch(void* base, size_t bytes, const Plan&); // Memfd 路径
 Status Verify(void* base, size_t bytes, const Plan&); // 有界采样并记录诊断
 }
 ```
 
-配置：`cache_numa_policy=off|auto|bind`（默认 off）、`cache_numa_nodes`（默认空）、`cache_numa_verify=false`。另加 `cache_data_setup_timeout_ms=600000` 传入 DataOptions。
+- connector/device 层将设备 ordinal 转为真实设备亲和节点，未知传空；NUMA 模块不依赖 torch、ACL、CUDA。已有 CPU 绑核逻辑按设备编号推算的节点不能冒充探测到的亲和性。
+- Resolve 获取在线、有内存且当前进程允许访问的 NUMA 节点。亲和节点有效且可用时直接选择；检测不到亲和性时在可用节点中等概率随机选择，只有一个则选择该节点。不同 worker 不使用相同固定随机种子，选定结果在该数据段生命周期内不变。
+- 已知亲和节点不可用、没有可用节点或绑定失败时明确报错，不能伪装成探测不到或静默退回系统默认分配。记录探测结果、选择方式和最终节点；Verify 只诊断，查询失败不影响服务。
+- Memfd：创建者在首次触页/注册之前按 Plan 绑定整个本地数据段。peer 只导入并注册，不重新选择节点、绑定或清零。
+- A5 HAL：同样先 Resolve，在 HAL 物理内存分配时落实目标节点；核对目标 SDK 的 NUMA 分配参数后扩展封装，不假设分配后 mbind 有效，也不把 deviceId 直接当 NUMA 节点。当前封装未暴露节点参数，需要补齐；实现受 SDK 限制时明确报告，不能跳过 A5 亲和分配。
 
-- Off：不绑定，不要求拓扑可用。
-- Auto：优先有效且允许的设备亲和节点；缺少拓扑或绑定权限时记录原因，降级为系统放置。
-- Bind：nodes 必填、有效且无重复；rank r 使用 nodes[r % nodes.size()]。绑定失败终止初始化。
-- nodes 只允许用于 Bind。BindBeforeTouch 不负责清零或注册；Verify 只诊断，查询失败不影响服务。
-- 只有数据段创建者执行绑定与触页。A5 HAL 本轮只支持 Off，显式要求其他策略则报 Unsupported。
+另加 `cache_data_setup_timeout_ms=600000` 传入 DataOptions；它仅控制初始化超时，与 NUMA 策略无关。
 
 ## 6. SDMA stream 数与地址选择
 
@@ -150,6 +152,6 @@ Status SetupSdmaDirect(int32_t deviceId, size_t streamNumber, bool useGdr);
 - 保留 unique ID、FA/WA 容量和 namespace、MLA dump 分工。当前 myRank=deviceId%rankCount 只适用于域内取模结果唯一的部署；同域重复 rank 必须在初始化 SlotMeta 前发现，不能覆盖已有分区。
 - 非 A5 切换到 v2 时核对 share_buffer_enable、cache_load_backend_only 等旧配置，不静默忽略。未覆盖的模式保留现有 cc 路径并明确选择条件；不能兼容分发时应显式报错并列出限制，不宣称已满足 develop 商用兼容性。同库保留旧/新核心时只能有一个导出的 MakeCacheStore。
 - 先在现有 v2 中隔离 HAL/公共接口，再补 Memfd、NUMA、SDMA；按这些边界组织可独立审查的提交，不重复迁移 connector 或核心。
-- 本地检查：平台源文件互斥、Linux 多进程 FD 共享与域隔离、地址接口、失败清理和超时、NUMA 降级、stream 数配置。
-- 远端验收：A5 原有行为不回退，A3/CUDA 数据正确，DP2TP8 与 FAWA 可运行；NUMA 和 stream 数分别做 A/B。
+- 本地检查：平台源文件互斥、Linux 多进程 FD 共享与域隔离、地址接口、失败清理和超时、NUMA 有/无亲和性的两条路径、stream 数配置。
+- 远端验收：A5 原有功能不回退；A5/A2/H100 验证亲和内存，A3 验证随机打散及数据正确；DP2TP8 与 FAWA 可运行，NUMA 和 stream 数分别做 A/B。
 - 交付时列出修改文件、配置样例、已运行测试、未运行测试及远端命令；没有硬件结果不要宣称验证通过。
