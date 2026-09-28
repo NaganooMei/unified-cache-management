@@ -13,7 +13,7 @@
 
 ## 当前文档
 
-- [基于稳定 A5 分支迁移 Develop Cache 的方案](features/active/cache-unification-develop-proposal.md)
+- [A5 Cache 扩展及后续合入 Develop 的方案](features/active/cache-unification-develop-proposal.md)
 - [Cache 统一实现任务书（供编码 Agent 使用）](features/active/cache-platform-datastrategy-design.md)
 - [Cache 内存按 Rank 划分、NUMA 绑定与 Lookup 首层预取](features/active/cache_rank_partitioned_memory_bandwidth.md)
 - [A5 Cache2 控制区布局：Bucket 与 SlotMeta](features/active/a5-cache2-control-layout.md)

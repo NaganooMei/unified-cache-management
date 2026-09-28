@@ -4,11 +4,13 @@
 
 ## 1. 任务与基线
 
-从最新 develop 新建 feature 分支及 worktree，参考稳定 feature_a5 的 connector 和 `ucm/store/cache/v2/` 实现。本文核对过的基线：A5 `9dc1189b`、develop `2d24ab39`；开始前重新 fetch 并检查后续改动，禁止整目录覆盖丢失修复。
+直接在现有 A5 开发分支 `lzx/feature-a5` 上实现，开始前同步最新 `upstream/feature_a5`。保留已有 connector 和 `ucm/store/cache/v2/`，不另建 develop 功能分支，也不先搬迁核心。本文核对过的 A5 基线为 `9dc1189b`；同步时保留本地改动，禁止整目录覆盖丢失修复。
+
+develop 只用于核对兼容性和参考已有传输实现（已核对 `2d24ab39`）。本轮完成 A5 上的功能扩展和验证，后续再单独处理合入 develop。
 
 只实现四项：
 
-1. 迁移 A5 connector 和 Cache v2 的必要改动，复用控制区、Buffer、Handle 和缓存算法。
+1. 在现有 Cache v2 中抽出公共 DataStrategy 接口和 HAL 实现，保留 connector、控制区、Buffer、Handle 和缓存算法。
 2. 增加普通内存 DataStrategy，通过构建时 PLATFORM 与 A5 HAL 实现隔离。
 3. 增加独立 NUMA 模块，由普通内存 DataStrategy 调用。
 4. 支持配置 SDMA Direct stream 数。
@@ -28,13 +30,13 @@
 | `ucm/store/cache/v2/numa/numa_policy.h/.cc` | 新增 NUMA 模块 |
 | `ucm/store/cache/v2/global_config.h`、`cache_buffer.h` | 解析新配置，组装 DataOptions，调用数据区初始化 |
 | `ucm/store/cache/v2/copy_stream.h`、Load/Dump 队列 | 接入所需传输模式、地址选择及 stream 数 |
-| `ucm/integration/vllm/` | 迁移 unique ID、MLA dump 分工；提供设备 NUMA 节点提示 |
+| `ucm/integration/vllm/` | 保留已有 unique ID、MLA dump 分工；补充新配置透传和设备 NUMA 节点提示 |
 
 平台选择规则：
 
 - `PLATFORM=ascend-a5`：编译 HAL DataStrategy。
 - `PLATFORM=ascend/ascend-a3/cuda/simu`：编译 Memfd DataStrategy；simu 使用现有模拟注册接口。
-- musa/maca：本轮保留 develop 原路径，不宣称支持新实现。
+- musa/maca：保留 A5 分支内已有的 `ucm/store/cache/cc/` 路径，不宣称支持新实现。
 
 两份实现提供同一 DataStrategy 接口；CMake 只能编译其中一份，不能递归 glob 同时选中。普通平台不得引入 HAL SDK 依赖。修改 PLATFORM 后必须重新构建，运行时不读取它切换实现。直接使用 CMake 则显式指定 RUNTIME_ENVIRONMENT。非空且非法的 PLATFORM 应报错。
 
@@ -133,7 +135,7 @@ Status Verify(void* base, size_t bytes, const Plan&); // 有界采样并记录�
 
 ## 6. SDMA stream 数与地址选择
 
-复用 develop 的传输适配，将接口改为：
+将 develop 已有的 SDMA Direct 适配接入 A5 的 Cache v2；A5 v2 当前只有普通 Setup，以下是需新增的接口，不是已有接口改名：
 
 ```cpp
 Status SetupSdmaDirect(int32_t deviceId, size_t streamNumber, bool useGdr);
@@ -146,8 +148,8 @@ Status SetupSdmaDirect(int32_t deviceId, size_t streamNumber, bool useGdr);
 ## 7. 约束与交付
 
 - 保留 unique ID、FA/WA 容量和 namespace、MLA dump 分工。当前 myRank=deviceId%rankCount 只适用于域内取模结果唯一的部署；同域重复 rank 必须在初始化 SlotMeta 前发现，不能覆盖已有分区。
-- 不静默忽略 share_buffer_enable、cache_load_backend_only 等旧配置；尚未覆盖的私有/多机/传输模式保留旧路径，列出未覆盖项。同库保留旧/新核心时只能有一个导出的 MakeCacheStore。
-- 先迁移核心并隔离平台实现，再补 Memfd、NUMA、SDMA；按这些边界组织可独立审查的提交。
+- 非 A5 切换到 v2 时核对 share_buffer_enable、cache_load_backend_only 等旧配置，不静默忽略。未覆盖的模式保留现有 cc 路径并明确选择条件；不能兼容分发时应显式报错并列出限制，不宣称已满足 develop 商用兼容性。同库保留旧/新核心时只能有一个导出的 MakeCacheStore。
+- 先在现有 v2 中隔离 HAL/公共接口，再补 Memfd、NUMA、SDMA；按这些边界组织可独立审查的提交，不重复迁移 connector 或核心。
 - 本地检查：平台源文件互斥、Linux 多进程 FD 共享与域隔离、地址接口、失败清理和超时、NUMA 降级、stream 数配置。
 - 远端验收：A5 原有行为不回退，A3/CUDA 数据正确，DP2TP8 与 FAWA 可运行；NUMA 和 stream 数分别做 A/B。
 - 交付时列出修改文件、配置样例、已运行测试、未运行测试及远端命令；没有硬件结果不要宣称验证通过。
