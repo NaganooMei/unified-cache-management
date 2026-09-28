@@ -266,7 +266,9 @@ private:
     }
     void BackendWaitStage()
     {
-        auto nameStatus = CpuAffinity::SetCurrentThreadName("ucm_c2_dump_wait");
+        /* pthread_setname_np takes at most 15 characters; "ucm_c2_dump_wait"
+         * is 16 and comes back ERANGE(34). */
+        auto nameStatus = CpuAffinity::SetCurrentThreadName("ucm_c2_dump_wt");
         if (nameStatus.Failure()) {
             UC_WARN("Failed({}) to set dump wait thread name.", nameStatus);
         }

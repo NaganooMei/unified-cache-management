@@ -137,7 +137,9 @@ public:
 private:
     void DispatchStage()
     {
-        auto nameStatus = CpuAffinity::SetCurrentThreadName("ucm_c2_load_disp");
+        /* pthread_setname_np takes at most 15 characters; "ucm_c2_load_disp"
+         * is 16 and comes back ERANGE(34). */
+        auto nameStatus = CpuAffinity::SetCurrentThreadName("ucm_c2_load_dsp");
         if (nameStatus.Failure()) {
             UC_WARN("Failed({}) to set load dispatch thread name.", nameStatus);
         }
