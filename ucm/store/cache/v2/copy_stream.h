@@ -140,11 +140,7 @@ public:
                 auto* pSrc = static_cast<void*>(static_cast<int8_t*>(src) + offset);
                 auto s = stream->DeviceToDeviceAsync(pSrc, dst[i], sizes[i]);
                 if (s.Failure()) {
-                    auto syncS = stream->Synchronized();
-                    if (syncS.Failure()) {
-                        UC_ERROR("Failed({}) to synchronize stream on device({}).", syncS,
-                                 deviceId_);
-                    }
+                    SyncAfterFailure(*stream);
                     return s;
                 }
             }
@@ -164,11 +160,7 @@ public:
                 auto* pDst = static_cast<void*>(static_cast<int8_t*>(dst) + offset);
                 auto s = stream->DeviceToDeviceAsync(src[i], pDst, sizes[i]);
                 if (s.Failure()) {
-                    auto syncS = stream->Synchronized();
-                    if (syncS.Failure()) {
-                        UC_ERROR("Failed({}) to synchronize stream on device({}).", syncS,
-                                 deviceId_);
-                    }
+                    SyncAfterFailure(*stream);
                     return s;
                 }
             }
@@ -181,13 +173,15 @@ public:
      * core: Trans::Stream's default implementation walks it fragment by
      * fragment, while SDMA Direct and IO aggregation override it to issue a
      * single batch. Which of the two happens is the stream's business, so there
-     * is nothing to branch on here. */
+     * is nothing to branch on here -- only the failure path still has to drain. */
     Status HostToDeviceScatterAsync(void* host, void** device,
                                     const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
-        return stream->HostToDeviceAsync(host, device, sizes);
+        auto s = stream->HostToDeviceAsync(host, device, sizes);
+        if (s.Failure()) [[unlikely]] { SyncAfterFailure(*stream); }
+        return s;
     }
 
     Status DeviceToHostGatherAsync(void** device, void* host,
@@ -195,7 +189,9 @@ public:
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
-        return stream->DeviceToHostAsync(device, host, sizes);
+        auto s = stream->DeviceToHostAsync(device, host, sizes);
+        if (s.Failure()) [[unlikely]] { SyncAfterFailure(*stream); }
+        return s;
     }
 
     Status WaitEvent(const Trans::Event& event) noexcept
@@ -223,6 +219,19 @@ public:
     }
 
 private:
+    /* Trans::Stream submits a batch fragment by fragment and returns on the
+     * first failure, so a failed copy can still have earlier fragments in
+     * flight. The caller releases its buffer slot as soon as it sees the error,
+     * and that slot can then be handed to another task while the device is
+     * still writing to it, so drain the stream before handing the error back. */
+    void SyncAfterFailure(Trans::Stream& stream) noexcept
+    {
+        auto s = stream.Synchronized();
+        if (s.Failure()) {
+            UC_ERROR("Failed({}) to synchronize stream on device({}).", s, deviceId_);
+        }
+    }
+
     std::shared_ptr<Trans::Stream> NextStream() noexcept
     {
         if (streamNumber_ == 0) [[unlikely]] { return nullptr; }
