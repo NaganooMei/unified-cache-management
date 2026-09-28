@@ -202,6 +202,11 @@ public:
         lastStreamNumber.store(streamNumber, std::memory_order_relaxed);
         return onSetup ? onSetup() : UC::Status::OK();
     }
+    UC::Status SetupIoAggregation(const int32_t deviceId, const bool useGdr)
+    {
+        (void)useGdr;
+        return Setup(deviceId, 1);
+    }
     UC::Status SetupSdmaDirect(const int32_t deviceId, const size_t streamNumber, const bool useGdr)
     {
         (void)useGdr;

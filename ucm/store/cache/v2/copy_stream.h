@@ -67,6 +67,33 @@ public:
         return Status::OK();
     }
 
+    /* IO aggregation keeps the cc core's behaviour: one aggregated stream
+     * instead of the rotating set. */
+    Status SetupIoAggregation(const int32_t deviceId, const bool useGdr)
+    {
+        if (useGdr) {
+            return Status::InvalidParam("GDR stream is incompatible with cache IO aggregation");
+        }
+        Trans::Device device;
+        auto s = device.Setup(deviceId);
+        if (s.Failure()) {
+            UC_ERROR("Failed({}) to setup device({}).", s, deviceId);
+            return s;
+        }
+        auto stream = device.MakeIoAggregationStream();
+        if (!stream) {
+            UC_ERROR("Cache IO aggregation is not available on device({}).", deviceId);
+            return Status::Unsupported();
+        }
+        streams_.clear();
+        streams_.push_back(std::move(stream));
+        deviceId_ = deviceId;
+        streamNumber_ = 1;
+        streamIndex_ = 0;
+        sdmaDirect_ = false;
+        return Status::OK();
+    }
+
     /* SDMA Direct shards a host segment straight into device fragments, so it
      * needs streamNumber descriptors ready for rotation and covers all of them
      * on wait and sync, exactly like the plain path. A platform whose runtime

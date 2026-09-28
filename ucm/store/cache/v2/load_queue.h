@@ -78,6 +78,7 @@ class LoadQ {
     int32_t deviceId_{-1};
     size_t streamNumber_{1};
     bool sdmaDirect_{false};
+    bool ioAggregation_{false};
     bool useGdr_{false};
     size_t localRankSize_{1};
     size_t nShardPerBlock_{0};
@@ -102,6 +103,7 @@ public:
         deviceId_ = config.deviceId;
         streamNumber_ = config.EffectiveStreamNumber();
         sdmaDirect_ = config.sdmaDirect;
+        ioAggregation_ = config.ioAggregation;
         useGdr_ = config.useGdr;
         localRankSize_ = config.localRankSize;
         nShardPerBlock_ = config.blockSize / config.shardSize;
@@ -241,8 +243,14 @@ private:
             UC_WARN("Failed({}) to set load h2d thread name.", nameStatus);
         }
         StreamT stream;
-        auto s = sdmaDirect_ ? stream.SetupSdmaDirect(deviceId_, streamNumber_, useGdr_)
-                             : stream.Setup(deviceId_, streamNumber_);
+        auto s = Status::OK();
+        if (ioAggregation_) {
+            s = stream.SetupIoAggregation(deviceId_, useGdr_);
+        } else if (sdmaDirect_) {
+            s = stream.SetupSdmaDirect(deviceId_, streamNumber_, useGdr_);
+        } else {
+            s = stream.Setup(deviceId_, streamNumber_);
+        }
         started.set_value(s);
         if (s.Failure()) [[unlikely]] { return; }
         running_.ConsumerLoop(stop_, &LoadQ::TransferOneTask, this, stream);

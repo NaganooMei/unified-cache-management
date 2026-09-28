@@ -73,6 +73,7 @@ class DumpQ {
     int32_t deviceId_{-1};
     size_t streamNumber_{1};
     bool sdmaDirect_{false};
+    bool ioAggregation_{false};
     bool useGdr_{false};
     std::vector<size_t> tensorSizes_{};
     SpscRingQueue<TaskPair> waiting_{};
@@ -94,6 +95,7 @@ public:
         deviceId_ = config.deviceId;
         streamNumber_ = config.EffectiveStreamNumber();
         sdmaDirect_ = config.sdmaDirect;
+        ioAggregation_ = config.ioAggregation;
         useGdr_ = config.useGdr;
         tensorSizes_ = config.tensorSizes;
         waiting_.Setup(config.waitingQueueDepth);
@@ -132,8 +134,14 @@ private:
             UC_WARN("Failed({}) to set dump d2h thread name.", nameStatus);
         }
         StreamT stream;
-        auto s = sdmaDirect_ ? stream.SetupSdmaDirect(deviceId_, streamNumber_, useGdr_)
-                             : stream.Setup(deviceId_, streamNumber_);
+        auto s = Status::OK();
+        if (ioAggregation_) {
+            s = stream.SetupIoAggregation(deviceId_, useGdr_);
+        } else if (sdmaDirect_) {
+            s = stream.SetupSdmaDirect(deviceId_, streamNumber_, useGdr_);
+        } else {
+            s = stream.Setup(deviceId_, streamNumber_);
+        }
         started.set_value(s);
         if (s.Failure()) [[unlikely]] { return; }
         waiting_.ConsumerLoop(stop_, &DumpQ::DispatchOneTask, this, stream);

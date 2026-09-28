@@ -13,6 +13,10 @@ add_library(cachestore SHARED ${UCM_CACHE_STORE_SOURCES})
 if(UCM_CACHE_STORE_BUILDS_CC)
     target_include_directories(cachestore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cc)
 endif()
+if(UCM_CACHE_STORE_BUILDS_CC AND UCM_CACHE_STORE_BUILDS_V2)
+    # Two cores in one library would export two entry points; v2 owns it.
+    target_compile_definitions(cachestore PRIVATE UCM_CACHE_STORE_BOTH_CORES=1)
+endif()
 target_link_libraries(cachestore PUBLIC storeintf trans infra_logger metrics)
 set_target_properties(cachestore PROPERTIES
     INSTALL_RPATH "$ORIGIN/../../shared/metrics"

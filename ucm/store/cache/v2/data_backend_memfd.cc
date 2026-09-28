@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <fmt/format.h>
 #include <limits>
+#include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -130,12 +131,20 @@ Status MemfdDataBackend::ImportPeer(size_t rank, uint64_t handle)
         std::this_thread::sleep_for(kConnectBackoff);
     }
     int32_t fd = -1;
-    /* Bound the receive by whatever is left of the setup budget. A spent budget
-     * still gets one bounded attempt, so a fast peer is not lost to scheduling. */
+    /* Wait for readability under whatever is left of the setup budget, then take
+     * the descriptor: RecvFd itself blocks, and a peer that connected but never
+     * sent would otherwise hang Setup with no way out. A spent budget still gets
+     * one immediate check, so a fast peer is not lost to scheduling. */
     const auto remainingMs =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline_ - Clock::now()).count();
     const auto bounded = std::clamp<int64_t>(remainingMs, 0, kMaxReceiveMs);
-    auto status = peer.RecvFd(fd, static_cast<int32_t>(bounded));
+    pollfd ready{peer.NativeHandle(), POLLIN, 0};
+    if (::poll(&ready, 1, static_cast<int>(bounded)) <= 0) {
+        UC_ERROR("memfd fd receive timed out: owner={} device={} rank={} name={}", ownerRank_,
+                 deviceId_, rank, name);
+        return Status::Timeout();
+    }
+    auto status = peer.RecvFd(fd);
     if (status.Failure()) {
         UC_ERROR("memfd fd receive failed: owner={} device={} rank={} name={} status={}",
                  ownerRank_, deviceId_, rank, name, status);

@@ -13,7 +13,6 @@
 #include <errno.h>
 #include <string>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include "status/status.h"
@@ -107,9 +106,9 @@ public:
         return Status::OK();
     }
 
-    /* timeoutMs bounds the receive: 0 or more replaces the blocking wait, a
-     * negative value keeps it. Returns Timeout when nothing arrives in time. */
-    Status RecvFd(int32_t& fdOut, int32_t timeoutMs = -1)
+    /* Blocks until a descriptor arrives. Callers that need a bound should wait
+     * for readability on NativeHandle() first. */
+    Status RecvFd(int32_t& fdOut)
     {
         fdOut = -1;
         char byte{};
@@ -121,21 +120,8 @@ public:
         msg.msg_control = control;
         msg.msg_controllen = sizeof(control);
         auto fd = sock_.load(std::memory_order_acquire);
-        if (timeoutMs >= 0) {
-            /* SO_RCVTIMEO reads zero as "no timeout at all", so clamp to 1ms. */
-            const auto bounded = std::max(timeoutMs, 1);
-            timeval tv{bounded / 1000, (bounded % 1000) * 1000};
-            if (::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
-                return Status::OsApiError("setsockopt(SO_RCVTIMEO) failed");
-            }
-        }
         auto received = ::recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
-        if (received <= 0) {
-            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                return Status::Timeout();
-            }
-            return Status::OsApiError("recvmsg failed");
-        }
+        if (received <= 0) { return Status::OsApiError("recvmsg failed"); }
         auto* cmsg = CMSG_FIRSTHDR(&msg);
         if (cmsg == nullptr || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
             cmsg->cmsg_len != CMSG_LEN(sizeof(int32_t)) || (msg.msg_flags & MSG_CTRUNC) != 0) {
@@ -145,6 +131,9 @@ public:
         if (fdOut < 0) { return Status::OsApiError("invalid descriptor"); }
         return Status::OK();
     }
+
+    /* Read-only descriptor, for callers that need to wait on readability. */
+    int32_t NativeHandle() const { return sock_.load(std::memory_order_acquire); }
 
     void Close()
     {
