@@ -13,7 +13,7 @@
 1. **隔离 DataStrategy 实现。** 同步最新 feature_a5 后直接继续开发，抽出公共接口和 HAL 实现，通过构建时 PLATFORM 选择。保留现有 Buffer、控制区、缓存协议，以及 connector 的 unique ID 和 MLA dump 按模均匀分工。
 2. **补普通内存 DataStrategy。** 非 A5 使用 memfd_create、ftruncate、mmap 创建共享数据内存，补齐 FD 传递、跨进程映射，以及传输路径需要的设备注册、Host/Device 地址和释放逻辑；A5 继续使用 HAL 数据实现。
 3. **独立设计 NUMA 模块。** 模块负责节点选择、绑定及放置验证，由普通内存 DataStrategy 在创建数据段时调用。顺序为映射、NUMA 绑定、首次触页、设备注册、发布可用状态。明确拓扑或权限不足时的降级行为。
-4. **支持配置 SDMA stream 数。** 参考 develop 已有 SDMA Direct 适配接入 v2，配置贯通 connector、store 和 stream 创建/使用逻辑。普通拷贝默认 4、SDMA Direct 默认 1，显式配置按指定数量执行；核对 Load/Dump 的分配与同步。
+4. **支持配置 SDMA stream 数。** 参考 develop 已有 SDMA Direct 适配接入 v2，配置贯通 connector、store 和 stream 创建/使用逻辑。普通拷贝默认 4、SDMA Direct 默认 16（Load/Dump 各 16 条），显式配置按指定数量执行；核对 Load/Dump 的分配与同步。
 
 ## 已确认的 rank 处理
 

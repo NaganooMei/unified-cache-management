@@ -141,7 +141,7 @@ Status Verify(void* base, size_t bytes, const Plan&); // 有界采样并记录�
 Status SetupSdmaDirect(int32_t deviceId, size_t streamNumber, bool useGdr);
 ```
 
-继续使用 cache_stream_number，范围 1..32。内部保留“用户是否显式配置”：未配置时普通拷贝为 4、SDMA Direct 为 1；显式设置时 SDMA 使用配置值。Load 和 Dump 各自创建 N 条 stream，轮转、事件等待及同步覆盖全部 N 条。IO aggregation 保持原有单聚合 stream 行为。
+继续使用 cache_stream_number，范围 1..32。内部保留“用户是否显式配置”：未配置时普通拷贝为 4、SDMA Direct 为 16；显式设置时 SDMA 使用配置值。Load 和 Dump 各自创建 N 条 stream（SDMA Direct 默认各 16 条），轮转、事件等待及同步覆盖全部 N 条。IO aggregation 保持原有单聚合 stream 行为。
 
 地址选择：普通 Memfd 拷贝使用 DataAt；Memfd SDMA Direct 使用 DeviceDataAt；A5 保持本地 Host、peer Device 路径。requireHostDeviceAddress 从传输模式推导。能力不支持或缺少所需地址时初始化报错，不静默切换模式。
 
