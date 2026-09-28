@@ -12,10 +12,10 @@ develop 只用于核对兼容性和参考已有传输实现（已核对 `2d24ab3
 
 1. 在现有 Cache v2 中抽出公共 DataStrategy 接口和 HAL 实现，保留 connector、控制区、Buffer、Handle 和缓存算法。
 2. 增加普通内存 DataStrategy，通过构建时 PLATFORM 与 A5 HAL 实现隔离。
-3. 增加独立 NUMA 模块，HAL/Memfd DataStrategy 共用：检测到设备亲和性就使用亲和内存，否则随机打散分配。
+3. 增加独立 NUMA 模块，HAL/Memfd DataStrategy 共用：检测到设备亲和性就使用亲和内存，否则按本机 worker rank 在可用节点间轮转分配。
 4. 支持配置 SDMA Direct stream 数。
 
-不要继续整理或迁移 codex/cache-rank-partition，不重写缓存算法，不附带增加预取、线程池或 Posix 优化。
+不整体迁移 codex/cache-rank-partition；只复用其 NUMA 探测、按 rank 选节点及绑定逻辑。不重写缓存算法，不附带增加预取、线程池或 Posix 优化。
 
 ## 2. 文件与构建
 
@@ -31,7 +31,7 @@ develop 只用于核对兼容性和参考已有传输实现（已核对 `2d24ab3
 | `ucm/shared/trans/ascend/hal/hal_memory.h/.cc` | 将 NUMA 选择结果传给 HAL 分配路径，具体参数核对目标 SDK |
 | `ucm/store/cache/v2/global_config.h`、`cache_buffer.h` | 解析新配置，组装 DataOptions，调用数据区初始化 |
 | `ucm/store/cache/v2/copy_stream.h`、Load/Dump 队列 | 接入所需传输模式、地址选择及 stream 数 |
-| `ucm/integration/vllm/` | 保留已有 unique ID、MLA dump 分工；补充新配置透传和设备 NUMA 节点提示 |
+| `ucm/integration/vllm/` | 保留已有 unique ID、MLA dump 分工；透传设备 NUMA 探测结果和本机 worker rank |
 
 平台选择规则：
 
@@ -56,6 +56,7 @@ struct DataOptions {
     size_t setupTimeoutMs{600000};   // 整次 Setup 总预算；0 表示不等待
     bool requireHostDeviceAddress{false}; // 由有效拷贝模式推导，不是用户开关
     std::optional<int32_t> deviceNumaNode; // 设备层探测结果，未知为空；不是用户配置
+    std::optional<size_t> fallbackNumaRank; // connector 推导的本机 worker rank，不是 myRank
 };
 class DataStrategy {
 public:
@@ -110,30 +111,34 @@ HostAccessible 表示 CPU/后端 I/O 是否可访问，不能拿它代替拷贝�
 | 探测结果 | 分配方式 | 当前部署对应关系 |
 |---|---|---|
 | 检测到设备 NUMA 亲和性 | 整个本地数据段放在亲和节点 | A5、A2、H100 |
-| 检测不到设备 NUMA 亲和性 | 每个 worker 随机选择一个可用 NUMA 节点，整个本地数据段放在该节点 | A3 |
+| 检测不到设备 NUMA 亲和性 | 选择 nodes[本机 worker rank % nodes.size()]，整个本地数据段放在该节点 | A3 |
 
-平台对应关系用于验收，执行时以实际探测结果为准，不按型号硬编码。随机打散的粒度是 worker，不是数据段内的页或块；允许多个 worker 随机选中同一节点，不要求严格均分。
+平台对应关系用于验收，执行时以实际探测结果为准，不按型号硬编码。分配粒度是 worker，采用确定性轮转，不在段内按页或块打散。走轮转路径的 worker 若可用节点列表相同且本机 rank 连续，各节点分配到的 worker 数相差不超过 1。
 
 ```cpp
 namespace UC::Cache2::Numa {
-enum class Placement { Affinity, Random }; // 内部选择结果，不是用户配置
+enum class Placement { Affinity, RankRoundRobin }; // 内部选择结果，不是用户配置
 struct Plan {
     Placement placement;
     int32_t node;
 };
-Expected<Plan> Resolve(std::optional<int32_t> deviceNode);
+Expected<Plan> Resolve(std::optional<int32_t> deviceNode,
+                       std::optional<size_t> fallbackNumaRank);
 Status BindBeforeTouch(void* base, size_t bytes, const Plan&); // Memfd 路径
 Status Verify(void* base, size_t bytes, const Plan&); // 有界采样并记录诊断
 }
 ```
 
 - connector/device 层将设备 ordinal 转为真实设备亲和节点，未知传空；NUMA 模块不依赖 torch、ACL、CUDA。已有 CPU 绑核逻辑按设备编号推算的节点不能冒充探测到的亲和性。
-- Resolve 获取在线、有内存且当前进程允许访问的 NUMA 节点。亲和节点有效且可用时直接选择；检测不到亲和性时在可用节点中等概率随机选择，只有一个则选择该节点。不同 worker 不使用相同固定随机种子，选定结果在该数据段生命周期内不变。
+- Resolve 获取在线、有内存且当前进程允许访问的 NUMA 节点，按节点 ID 升序排列。亲和节点有效且可用时优先选择；检测不到亲和性时使用 nodes[fallbackNumaRank % nodes.size()]。缺少 fallbackNumaRank 时明确报错，不默认填 0；选定结果在数据段生命周期内不变。
+- connector 沿用内部字段 cache_detected_numa_node、cache_fallback_numa_rank。后者是本机跨 DP/PP/TP 的 worker 编号，不使用控制区 myRank 或设备 ordinal 代替。单机模型并行组沿用 rank-partition 公式：localDpRank × (PP × TP) + modelParallelRank；跨机部署应由实际本机 worker 拓扑计算。FA/WA 使用同一 worker 编号。
 - 已知亲和节点不可用、没有可用节点或绑定失败时明确报错，不能伪装成探测不到或静默退回系统默认分配。记录探测结果、选择方式和最终节点；Verify 只诊断，查询失败不影响服务。
 - Memfd：创建者在首次触页/注册之前按 Plan 绑定整个本地数据段。peer 只导入并注册，不重新选择节点、绑定或清零。
 - A5 HAL：同样先 Resolve，在 HAL 物理内存分配时落实目标节点；核对目标 SDK 的 NUMA 分配参数后扩展封装，不假设分配后 mbind 有效，也不把 deviceId 直接当 NUMA 节点。当前封装未暴露节点参数，需要补齐；实现受 SDK 限制时明确报告，不能跳过 A5 亲和分配。
 
 另加 `cache_data_setup_timeout_ms=600000` 传入 DataOptions；它仅控制初始化超时，与 NUMA 策略无关。
+
+复用参考：`codex/cache-rank-partition@25b2b596` 的 `device.py::get_numa_node`、`ucm_connector.py::_configure_numa_placement`、`shm_numa_layout.h::RankNode` 及 `shm_numa.h`。沿用探测与取模算法；新入口统一处理无亲和性场景，不照搬旧 connector 仅对 NPU 非 MLA 设置 fallback rank 的限制，也不迁入旧版按段拆分多节点的分支。A5 HAL 适配和有界 Verify 仍按本文补齐。
 
 ## 6. SDMA stream 数与地址选择
 
@@ -153,5 +158,5 @@ Status SetupSdmaDirect(int32_t deviceId, size_t streamNumber, bool useGdr);
 - 非 A5 切换到 v2 时核对 share_buffer_enable、cache_load_backend_only 等旧配置，不静默忽略。未覆盖的模式保留现有 cc 路径并明确选择条件；不能兼容分发时应显式报错并列出限制，不宣称已满足 develop 商用兼容性。同库保留旧/新核心时只能有一个导出的 MakeCacheStore。
 - 先在现有 v2 中隔离 HAL/公共接口，再补 Memfd、NUMA、SDMA；按这些边界组织可独立审查的提交，不重复迁移 connector 或核心。
 - 本地检查：平台源文件互斥、Linux 多进程 FD 共享与域隔离、地址接口、失败清理和超时、NUMA 有/无亲和性的两条路径、stream 数配置。
-- 远端验收：A5 原有功能不回退；A5/A2/H100 验证亲和内存，A3 验证随机打散及数据正确；DP2TP8 与 FAWA 可运行，NUMA 和 stream 数分别做 A/B。
+- 远端验收：A5 原有功能不回退；A5/A2/H100 验证亲和内存，A3 验证按本机 worker rank 轮转及数据正确；DP2TP8 与 FAWA 可运行，NUMA 和 stream 数分别做 A/B。
 - 交付时列出修改文件、配置样例、已运行测试、未运行测试及远端命令；没有硬件结果不要宣称验证通过。

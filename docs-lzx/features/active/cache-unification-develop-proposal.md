@@ -12,14 +12,14 @@
 
 1. **隔离 DataStrategy 实现。** 同步最新 feature_a5 后直接继续开发，抽出公共接口和 HAL 实现，通过构建时 PLATFORM 选择。保留现有 Buffer、控制区、缓存协议，以及 connector 的 unique ID 和 MLA dump 按模均匀分工。
 2. **补普通内存 DataStrategy。** 非 A5 使用 memfd_create、ftruncate、mmap 创建共享数据内存，补齐 FD 传递、跨进程映射，以及传输路径需要的设备注册、Host/Device 地址和释放逻辑；A5 继续使用 HAL 数据实现。
-3. **统一自动 NUMA 分配。** HAL 和普通内存 DataStrategy 共用节点选择逻辑：检测到设备 NUMA 亲和性就使用亲和内存，检测不到则每个 worker 随机选择一个可用节点，整个本地数据段放在该节点；不提供用户 policy 配置。按当前部署约定，A5/A2/H100 对应亲和分配，A3 对应随机打散；最终以实际探测结果为准。普通内存先绑定再触页、注册；A5 在 HAL 分配时落实同一选择结果。
+3. **统一自动 NUMA 分配。** HAL 和普通内存 DataStrategy 共用节点选择逻辑：检测到设备 NUMA 亲和性就使用亲和内存，检测不到则按 rank-partition 的方式选择 `nodes[本机 worker rank % nodes.size()]`，整个本地数据段放在该节点；不提供用户 policy 配置。按当前部署约定，A5/A2/H100 对应亲和分配，A3 对应确定性轮转；最终以实际探测结果为准。普通内存先绑定再触页、注册；A5 在 HAL 分配时落实同一选择结果。
 4. **支持配置 SDMA stream 数。** 参考 develop 已有 SDMA Direct 适配接入 v2，配置贯通 connector、store 和 stream 创建/使用逻辑。普通拷贝默认 4、SDMA Direct 默认 16（Load/Dump 各 16 条），显式配置按指定数量执行；核对 Load/Dump 的分配与同步。
 
 ## 已确认的 rank 处理
 
 feature_a5@3bf8dec4 的实现位于 ucm/store/cache/v2，已使用 myRank = deviceId % rankCount，并分别向 DataStrategy 传入 deviceId 和 myRank。
 
-按 DP 隔离控制区且 rankCount=8 时，设备 0..7 和 8..15 都映射到各自控制区的 rank 0..7，可覆盖这种 DP2×TP8 部署。扩展时验证同一域内取模结果唯一即可；若每个 worker 的可见 deviceId 都是 0，则需额外适配。当前不单独重做 rank 接口。
+按 DP 隔离控制区且 rankCount=8 时，设备 0..7 和 8..15 都映射到各自控制区的 rank 0..7，可覆盖这种 DP2×TP8 部署。扩展时验证同一域内取模结果唯一即可；若每个 worker 的可见 deviceId 都是 0，则需额外适配。控制区 myRank 保持不变；NUMA fallback 单独传入本机跨 DP/PP/TP 的 worker rank，不能用 myRank 替代。
 
 ## 实施与验证
 
@@ -29,4 +29,4 @@ feature_a5@3bf8dec4 的实现位于 ucm/store/cache/v2，已使用 myRank = devi
 
 本地做代码和协议检查；设备注册、HAL、NUMA 放置、拷贝及端到端性能在 GPU/NPU 服务器验证。本次未实施或运行硬件验证。
 
-codex/cache-rank-partition 不再作为实现基线，也不继续整理或整体迁移；仅保留为历史问题和回归测试参考。
+codex/cache-rank-partition 不作为实现基线，不整体迁移；定向复用其 NUMA 探测、按本机 worker rank 取模选节点及绑定逻辑，其余作为历史问题和回归测试参考。
