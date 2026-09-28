@@ -1,8 +1,8 @@
 # 基于稳定 A5 分支迁移 Develop Cache 的方案
 
-更新日期：2026-09-24。
+更新日期：2026-09-28。
 
-状态：方案已确认，等待 feature_a5 稳定可用后实施；当前只维护方案。
+状态：A5 已比较稳定，进入迁移接口设计阶段；尚未开始实现。详细约定见 [DataStrategy、PLATFORM 和 NUMA 接口设计](cache-platform-datastrategy-design.md)。
 
 ## 目标
 
@@ -23,7 +23,7 @@ feature_a5@3bf8dec4 的实现位于 ucm/store/cache/v2，已使用 myRank = devi
 
 ## 实施与验证
 
-等待 A5 稳定 → 对照最新 develop 迁移 connector/Cache → 补普通内存 DataStrategy → 接入 NUMA 和 SDMA stream 配置 → 完成兼容性与性能验证。
+以稳定 A5 提交为基线 → 按接口文档对照最新 develop 迁移 connector/Cache → 通过构建时 PLATFORM 隔离 HAL/Memfd DataStrategy → 接入 NUMA 和 SDMA stream 配置 → 完成兼容性与性能验证。
 
 商用迁移重点核对：私有/共享模式、容量及 FA/WA 拆分、DP/TP/PP 与多机部署、已有传输路径、初始化和失败清理。MLA dump 均匀分工与数据段实际均匀分布分别验证。
 
