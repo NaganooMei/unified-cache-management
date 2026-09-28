@@ -23,28 +23,32 @@
  * */
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 #include "data_backend.h"
+#include "ipc/fd_socket.h"
+#include "ipc/mem_fd.h"
 
 namespace UC::Cache2 {
 
 /* Generic backend for platforms without a vendor host-memory path
- * (ascend/ascend-a3/cuda/simu): one memfd segment per rank, imported over a
- * Unix socket with SCM_RIGHTS. Every participant maps all segments, so all
- * slots are host-accessible and DeviceAddrOf stays nullptr. Where the transfer
- * mode needs a device address (Memfd SDMA Direct), the local segment is also
- * registered with the device and its device-visible alias is exposed through
- * HostMappedDeviceAddrOf -- the alias is for descriptors only, never for CPU
- * access. */
+ * (ascend/ascend-a3/cuda/simu): one memfd segment per rank, imported over an
+ * abstract Unix socket with SCM_RIGHTS. Every participant maps all segments, so
+ * all slots are host-accessible and DeviceAddrOf stays nullptr. Where the
+ * transfer mode needs a device address (Memfd SDMA Direct), the local segment is
+ * also registered with the device and its device-visible alias is exposed
+ * through HostMappedDeviceAddrOf -- the alias is for descriptors only, never for
+ * CPU access. */
 class MemfdDataBackend : public DataBackend {
     struct Segment {
-        void* addr{nullptr};       /* host-visible mapping */
-        void* deviceAddr{nullptr}; /* device-visible alias, nullptr if unmapped */
-        int fd{-1};
+        std::unique_ptr<MemFd> mem{}; /* host mapping and fd; null until mapped */
+        void* deviceAddr{nullptr};    /* device-visible alias, nullptr if unregistered */
         bool owner{false};
+        bool registered{false};
     };
 
     std::string domainId_{};
@@ -53,8 +57,9 @@ class MemfdDataBackend : public DataBackend {
     size_t ownerRank_{0};
     int32_t deviceId_{-1};
     bool requireHostDeviceAddress_{false};
-    std::thread fdServer_{};
-    bool serving_{false};
+    std::chrono::steady_clock::time_point deadline_{};
+    FdSocket fdServer_{};
+    std::thread fdThread_{};
 
 public:
     explicit MemfdDataBackend(const std::string& domainId);
@@ -72,13 +77,19 @@ public:
     void Reset() override;
 
 private:
-    /* memfd_create -> ftruncate -> mmap, then NUMA bind -> first touch ->
-     * device registration, in that order. */
+    /* memfd_create -> ftruncate -> mmap, without MAP_POPULATE. */
     Status CreateLocalSegment(size_t rank);
+    /* First touch, then device registration. NUMA binding runs between them once
+     * Numa::BindBeforeTouch is wired: registering pins pages, so it must stay
+     * last. */
     Status PlaceAndRegister(size_t rank);
-    Status StartFdServer();
-    void StopFdServer();
+    Status RegisterSegment(Segment& segment);
+    /* memfd name, and the abstract socket a peer uses to fetch the fd. */
+    std::string SegmentName(size_t rank) const;
     std::string SocketName(size_t rank) const;
+    Status StartFdServer();
+    void AcceptLoop(size_t peerCount);
+    void StopFdServer();
 };
 
 }  // namespace UC::Cache2
