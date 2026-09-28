@@ -1,6 +1,6 @@
 # Cache 统一实现任务书（供编码 Agent 使用）
 
-更新：2026-09-28。本文是实现要求，不是已完成的代码说明。
+更新：2026-09-28。代码检视基线为 `lzx/feature-a5@c947b04f`。当前先验证推理服务；四项替换兼容性问题已记录并暂缓处理，见 [Cache v2 替换检视与暂缓事项](cache-v2-replacement-review.md)。验证状态见 §8，其余部分是设计约定与验收要求。
 
 ## 1. 任务与基线
 
@@ -23,11 +23,11 @@ develop 只用于核对兼容性和参考已有传输实现（已核对 `2d24ab3
 
 | 文件 | 修改内容 |
 |---|---|
-| `setup.py`、根 `CMakeLists.txt`、`ucm/store/cache/CMakeLists.txt` | PLATFORM → RUNTIME_ENVIRONMENT → backend 工厂选择；调整各平台 v2 构建入口 |
+| `setup.py`、根 `CMakeLists.txt`、`ucm/store/cache/CMakeLists.txt` | PLATFORM → RUNTIME_ENVIRONMENT → 核心及 backend 选择；A5/A2/A3/CUDA 已切至 v2，见下方平台矩阵 |
 | `ucm/store/cache/v2/data_strategy.h` | 保留初始化编排和 backend_；传递 options，扩展设备别名访问 |
-| `ucm/store/cache/v2/data_backend.h` | 扩展 BackendOptions 和 HostDeviceAddrOf；保持公共接口无 SDK 类型 |
+| `ucm/store/cache/v2/data_backend.h` | 扩展 BackendOptions 和 HostMappedDeviceAddrOf（基类带默认实现，非纯虚，现有后端零改动）；保持公共接口无 SDK 类型 |
 | `ucm/store/cache/v2/data_backend_ascend.h/.cc` | 保留已有 HAL 实现，接入统一 NUMA 选择结果 |
-| `ucm/store/cache/v2/data_backend_memfd.h/.cc` | 新增 MemfdDataBackend：FD 服务、映射、注册和释放 |
+| `ucm/store/cache/v2/data_backend_memfd.h/.cc` | 新增 MemfdDataBackend：FD 服务、映射、注册和释放；注册须产出 host 段的设备别名并覆盖 HostMappedDeviceAddrOf |
 | `ucm/store/cache/v2/data_backend_posix.h/.cc`、`posix_shm.h` | 保留 #1462 的 named SHM 实现及测试，不作为本轮普通平台默认后端 |
 | `ucm/store/cache/v2/numa/numa_policy.h/.cc` | 新增自动 NUMA 选择与绑定模块，不提供用户 policy 开关 |
 | `ucm/shared/trans/ascend/hal/hal_memory.h/.cc` | 将 NUMA 选择结果传给 HAL 分配路径，具体参数核对目标 SDK |
@@ -41,9 +41,25 @@ develop 只用于核对兼容性和参考已有传输实现（已核对 `2d24ab3
 - `PLATFORM=ascend/ascend-a3/cuda/simu`：工厂选择 MemfdDataBackend；simu 使用现有模拟注册接口。
 - musa/maca：保留 A5 分支内已有的 `ucm/store/cache/cc/` 路径，不宣称支持新实现。
 
-现状注意：#1462 将根 CMake 的 `set(UCM_RUNTIME_ASCEND_HAL ON)` 注释掉了，目前 A5 默认落到 POSIX 后端；cache/CMake 也尚未让 ascend/A3/CUDA 走 v2。实施时必须落实上述目标矩阵，不能把当前配置误认为已完成平台隔离。
+平台矩阵落实（2026-09-28，`c947b04f`）：
+
+- ascend-a5：仅编译 v2，HAL 开关已恢复，使用 AscendHalDataBackend。
+- ascend / ascend-a3 / cuda：仅编译 v2，使用 MemfdDataBackend。
+- simu：同时编译 cc、v2，使用 v2 的 `MakeCacheStore` 入口及 MemfdDataBackend。
+- musa / maca：保留 cc。
+
+根 CMake 的 `UCM_CACHE_STORE_BUILDS_CC` / `_V2` 同时控制核心编译和测试筛选。两个核心同库时通过 `UCM_CACHE_STORE_BOTH_CORES` 隐藏 cc 入口，v2 始终导出入口；不再依赖 v2 的 `UCM_BUILD_TESTS` 守卫。先前关于平台切换回退、必须保留该守卫的记录已过时。
+
+另：**ascend-a5 现在要求 HAL SDK 存在**（`trans/ascend` 用 `find_path(... REQUIRED)` 找 `ascend_hal.h`），缺失会在 configure 阶段直接失败。
 
 多个 backend 类可以共存，但工厂默认选择必须唯一；HAL 源码及 SDK 依赖只在 A5 启用，不再要求“两份同名 DataStrategy 只能编译一份”。修改 PLATFORM 后重新构建，运行时不据此切换；直接 CMake 使用 RUNTIME_ENVIRONMENT，非法非空 PLATFORM 报错。
+
+**host 段注册与 `ASCEND_SUPPORTS_REGISTER_PIN`：** Memfd 后端注册 host 段时落到 `ucm/shared/trans/ascend/ascend_buffer.cc` 的 `Buffer::RegisterHostBuffer`，该函数由根 CMake 选项 `ASCEND_SUPPORTS_REGISTER_PIN`（**默认 ON**，要求 CANN ≥ 8.5）在两条 API 间二选一：
+
+- **ON**：`aclrtHostRegisterV2(host, size, ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED)` + `aclrtHostGetDevicePointer(host, &device, 0)`，分两步；
+- **OFF**：`aclrtHostRegister(host, size, ACL_HOST_REGISTER_MAPPED, &device)`，一次调用直接返回。
+
+两条路**都**返回设备别名，差别只在能否 pin —— V1 的 API 形态里根本没有 pin 参数。注意 V2 分支当前把 V2 与 PINNED 捆死，没有“V2 但不 pin”的选项。A3 上 SDMA Direct 的 host 段是 mmap 内存，正属于必须 pin 的一类，因此该选项已由 OFF 改为**默认 ON**；构建环境必须满足 CANN ≥ 8.5，否则 V2 接口不存在会直接编译失败。影响面仅限 ascend / ascend-a3 / ascend-a5（`ucm/shared/trans/ascend/` 只在 ascend family 下加入），simu/cuda/maca 不受影响。这是任务书此前遗漏的构建开关，实施时必须落实。
 
 ## 3. DataStrategy / DataBackend 接口
 
@@ -73,13 +89,13 @@ struct BackendOptions {
 class DataBackend {
 public:
     virtual Status Setup(const BackendOptions& options) = 0;
-    virtual void* HostDeviceAddrOf(size_t rank) const { return nullptr; }
+    virtual void* HostMappedDeviceAddrOf(size_t rank) const { return nullptr; }
     // 析构、禁止复制及其他现有方法声明保持不变，此处省略。
 };
 class DataStrategy {
 public:
     Status Setup(CtrlLayout& ctrl, const DataOptions& options);
-    void* HostDeviceDataAt(size_t slotIdx) const; // 新增：Host 内存的设备别名
+    void* HostMappedDeviceDataAt(size_t slotIdx) const; // 新增：Host 内存的设备别名
     // 保留 HostAccessibleOf / DataAt / DeviceDataAt、backend_ 及其他现有成员。
 };
 }
@@ -93,7 +109,7 @@ public:
 - Setup 后地址查询不做连接、懒映射或注册；未初始化、越界或不具备相应访问能力时返回 false/nullptr。
 - CtrlLayout 由 Buffer 持有，生命周期长于 DataStrategy。Setup 不可重复调用；失败清理本次资源并返回错误。
 
-| 数据 | HostAccessibleOf | DataAt | DeviceDataAt | 新增 HostDeviceDataAt |
+| 数据 | HostAccessibleOf | DataAt | DeviceDataAt | 新增 HostMappedDeviceDataAt |
 |---|---|---|---|---|
 | A5 本地段 | true | Host 地址 | nullptr | nullptr |
 | A5 peer 段 | false | nullptr | 设备地址 | nullptr |
@@ -101,6 +117,12 @@ public:
 | 现有 POSIX SHM 段 | true | 本进程 Host 地址 | nullptr | 默认 nullptr |
 
 保留 #1462 原有 HostAddrOf/DeviceAddrOf 互斥语义；设备别名通过新增接口独立提供。HostAccessible 表示 CPU/后端 I/O 能否访问，不能代替拷贝模式判断；Host 地址与设备别名不保证数值相同。
+
+别名是**第三类地址**：既不是 Host 地址（`DataAt`），也不是设备段地址（`DeviceDataAt`），而是同一块 host 内存的设备可见视图（device-visible mapped pointer）。它与 host 地址指向同一块物理页，但属于两个地址空间，用途严格分开：host 地址给 CPU 与 `aclrtMemcpy`，别名只给 FFTS SDMA descriptor。
+
+**为什么不能复用 `DeviceDataAt` 承载别名：** `HostAccessibleOf` 定义为 `DataAt != nullptr`，调用方逻辑是“host 可达就用 `DataAt`、不可达才查 `DeviceDataAt`”。Memfd 段是 host 可达的，若 `DeviceDataAt` 同时返回别名，这个二选一判断即失效。旧 `cc` 路径（`ucm/store/cache/cc/trans_buffer.cc`）正是把别名直接塞进 `DeviceDataAt`，但它没有这个互斥约定，v2 不沿用。
+
+**基类带默认实现：** `HostMappedDeviceAddrOf` 在 `DataBackend` 中写成 `{ return nullptr; }` 而非纯虚，现有 `AscendHalDataBackend` 与 `PosixShmDataBackend` 一行都不用改，行为正好与上表一致；只有新增的 `MemfdDataBackend` 覆盖它。`DataStrategy` 侧的同名对偶 `HostMappedDeviceDataAt(slotIdx)` 按 `DataAt`/`DeviceDataAt` 同款做 rank 换算与段内偏移，只是把 `backend_->HostMappedDeviceAddrOf(rank)` 换成取别名那一行。
 
 ## 4. MemfdDataBackend 实现流程
 
@@ -111,7 +133,7 @@ public:
 具体要求：
 
 - 本地段大小由 slotsPerRank × slotSize 计算；页对齐填充不增加逻辑 slot。不要再次拆分 connector 已拆分的 FA/WA 容量。
-- 绑定前禁止 MAP_POPULATE 或提前清零。设备注册复用 Trans::Buffer 的平台接口，必要时获取设备别名。
+- 绑定前禁止 MAP_POPULATE 或提前清零。**设备注册对所有拷贝路径都要做** —— 设备必须能访问该段 host 内存，不是只有 SDMA 才需要。注册走 `Trans::Buffer::RegisterHostBuffer`；它顺带返回的 device 指针才是**设备别名**，那个只有 SDMA 一类的传输模式需要（不需要时传 `nullptr` 取，别名保持空），由 `HostMappedDeviceAddrOf` 暴露。**顺序必须是 NUMA 绑定 → first touch → 注册**：注册会 pin 页，若先注册再触页，页会被锁在错误的节点上。dev-sandbox 验证过的形态是 `mmap → mlock → aclrtHostRegisterV2(MAPPED|PINNED)`。是否 pin 由 §2 的 `ASCEND_SUPPORTS_REGISTER_PIN` 决定。
 - BindLocal 完成本地映射、NUMA、触页、注册并启动 FD 服务，成功后才允许 ExportLocal 发布。构造函数接收 domainId，与现有 POSIX backend 一样负责域隔离。
 - ExportLocal 发布校验域/rank 的 uint64_t token；可参考 POSIX 的确定性名称 hash，不能把进程 fd 当共享 handle。ImportPeer 校验 token 后，通过派生的 Unix socket 使用 **SCM_RIGHTS 接收真实 FD**，检查 rank、布局和 fstat 长度。
 - socket 名由 domainId 和 rank 派生并限制长度；HAL 继续导入驱动 handle，POSIX 继续按名称 shm_open，三者不能混用。连接和接收共用剩余 deadline，超时返回错误。
@@ -163,16 +185,33 @@ Status Verify(void* base, size_t bytes, const Plan&); // 有界采样并记录�
 Status SetupSdmaDirect(int32_t deviceId, size_t streamNumber, bool useGdr);
 ```
 
-继续使用 cache_stream_number，范围 1..32。内部保留“用户是否显式配置”：未配置时普通拷贝为 4、SDMA Direct 为 16；显式设置时 SDMA 使用配置值。Load 和 Dump 各自创建 N 条 stream（SDMA Direct 默认各 16 条），轮转、事件等待及同步覆盖全部 N 条。IO aggregation 保持原有单聚合 stream 行为。
+继续使用 cache_stream_number，范围 1..32。内部保留“用户是否显式配置”：未配置时普通拷贝为 4、SDMA Direct 为 16；显式设置时 SDMA 使用配置值。Load 和 Dump 各自创建 N 条 stream（SDMA Direct 默认各 16 条），轮转、事件等待及同步覆盖全部 N 条。IO aggregation 保持原有单聚合 stream 行为，**已在 v2 落实**：`CopyStream::SetupIoAggregation` 建单条聚合 stream，Load/Dump 按 `ioAggregation → sdmaDirect → 普通` 的顺序选择，且与 SDMA Direct 互斥（与 cc 一致）。
 
-地址选择：普通 Memfd 拷贝使用 DataAt；Memfd SDMA Direct 使用新增 HostDeviceDataAt；A5 保持本地 Host、peer Device 路径。requireHostDeviceAddress 从传输模式推导。能力不支持或缺少所需地址时初始化报错，不静默切换模式。
+地址选择：普通 Memfd 拷贝使用 DataAt；Memfd SDMA Direct 使用新增 HostMappedDeviceDataAt；A5 保持本地 Host、peer Device 路径。requireHostDeviceAddress 从传输模式推导。能力不支持或缺少所需地址时初始化报错，不静默切换模式。
+
+**为什么必须用别名：** host 侧地址由 `FftsSdmaDispatcher::BuildSdmaCtx` 原样拆成高低 32 位写入 SDMA descriptor，不做任何转换，填 raw host VA 就是错的；`AscendSdmaDirectStream` 的参数契约（`hostDevicePtr`）本就要求调用方传设备可见地址，注册与取映射是调用方的责任。参考已完成的 `docs-lzx/features/completed/sdma-direct/`（平台 `ascend-a3`，Load/Dump 取 `TransBuffer::Handle::DeviceData()`，后端存储用 `Data()`）以及 dev-sandbox 的 `ffts_direct_h2d_plan.md`、`ffts_direct_h2d_io_num_odirect.md`。
 
 ## 7. 约束与交付
 
 - 保留 unique ID、FA/WA 容量和 namespace、MLA dump 分工。当前 myRank=deviceId%rankCount 只适用于域内取模结果唯一的部署；同域重复 rank 必须在初始化 SlotMeta 前发现，不能覆盖已有分区。
-- 非 A5 切换到 v2 时核对 share_buffer_enable、cache_load_backend_only 等旧配置，不静默忽略。未覆盖的模式保留现有 cc 路径并明确选择条件；不能兼容分发时应显式报错并列出限制，不宣称已满足 develop 商用兼容性。同库保留旧/新核心时只能有一个导出的 MakeCacheStore。
+- **旧配置的取舍（2026-09-28 定）**：`cache_io_aggregation` 已接入 v2（见 §6）。`share_buffer_enable`、`cache_load_backend_only` 这两个 cc 模式 **v2 不建模，直接不读** —— 连接器默认就会设 `share_buffer_enable`（MLA 置 true），若按"不支持即报错"处理会让 MLA 在 v2 上直接起不来，因此本次选择忽略。这是对"不支持即报错"原则的**有意放宽**；日后要收紧，只需在 `Config::Validate()` 里补回校验。其它未覆盖的模式仍按原要求处理：保留 cc 路径并明确选择条件，不能兼容分发时显式报错并列出限制，不宣称已满足 develop 商用兼容性。
+- **同库只能有一个导出的 `MakeCacheStore`**，且这条已由构建落实：根 CMake 的 `UCM_CACHE_STORE_BUILDS_CC` / `_V2` 决定编哪些核心，`cache/CMakeLists.txt` 在两个核心同库时定义 `UCM_CACHE_STORE_BOTH_CORES`，**此时 cc 侧让位、由 v2 提供入口**。仅 cc、仅 v2、cc+v2 三种组合都恰好导出一个。
 - 保留 #1463 独立 Cache pipeline。通过 pipeline/Store API 独立启动时，调用方也须传入设备亲和提示或本机 worker rank；不能假设一定经过 vLLM connector，不强制要求下层 store_backend。
 - 先扩展既有 backend 接口并接入 Memfd，再补 NUMA、SDMA；按这些边界组织提交，不重复拆分核心。#1462 的 POSIX 测试保留为该 backend 的测试，另加 Memfd 多进程 FD/ready/清理测试，不把 POSIX shm_unlink 断言套到 Memfd 上。
 - 本地检查：平台工厂选择和 HAL 依赖隔离、Linux 多进程 FD 共享与域隔离、地址/设备别名接口、失败清理和超时、NUMA 两条路径、stream 数配置、独立 Cache pipeline。
 - 远端验收：A5 原有功能不回退；A5/A2/H100 验证亲和内存，A3 验证按本机 worker rank 轮转及数据正确；DP2TP8 与 FAWA 可运行，NUMA 和 stream 数分别做 A/B。
 - 交付时列出修改文件、配置样例、已运行测试、未运行测试及远端命令；没有硬件结果不要宣称验证通过。
+
+## 8. 验证状态（2026-09-28）
+
+当前检视基线为 `c947b04f`。批量拷贝分派及失败后同步已通过本地 mock 检查；本轮未运行 Linux 多进程、GPU/NPU 测试，也未重新核对该提交的远端 CI。用户决定先验证推理服务，四项已知问题暂缓整改，见 [检视记录](cache-v2-replacement-review.md)。
+
+历史记录：此前实现已推到 `origin/lzx/feature-a5`，并记录 `push-check` 的 `cpp_gtest`、`cpp-linter`、`py-linter`、`toolkit-package` 通过。该记录未绑定本轮提交，不能据此认定当前版本已完成全部验收。
+
+**仍未验证**（需要 A5 / A3 真机）：
+
+- SDMA Direct 的 stream 数、`SetupSdmaDirect`、shard 级下发；
+- NUMA 亲和路径与轮转路径的实际落点（`mbind` 生效情况、`Verify` 采样）；
+- A5 HAL 后端与 HAL 侧的 NUMA 节点落实（`hal_memory` 封装尚未暴露节点参数）；
+- 双机 NUMA 的本机 rank 重置行为（参考分支也未覆盖该用例）；
+- memfd 的多进程 FD / ready / 清理测试尚未编写（§7 要求）；POSIX 后端自 `simu` 起被 memfd 取代默认地位后，其专属测试实际已不再覆盖它。

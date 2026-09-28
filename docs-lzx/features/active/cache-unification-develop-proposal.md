@@ -2,7 +2,7 @@
 
 更新日期：2026-09-28。
 
-状态：本地 `lzx/feature-a5` 已同步 upstream 至 `00291f98`（#1462、#1463）。上游已拆分 DataBackend，本方案的 Memfd、NUMA 和 SDMA 扩展尚未实现。详细约定见 [Cache 统一实现任务书（供编码 Agent 使用）](cache-platform-datastrategy-design.md)。
+状态：检视基线为 `lzx/feature-a5@c947b04f`，上游基线为 `00291f98`（#1462、#1463）。A5/A2/A3/CUDA 已切换到 cache/v2，IO aggregation 分派及失败同步已修复；完整兼容替代尚未完成。当前先验证推理服务，四项已知问题暂缓整改，见 [Cache v2 替换检视与暂缓事项](cache-v2-replacement-review.md)。详细约定见 [Cache 统一实现任务书（供编码 Agent 使用）](cache-platform-datastrategy-design.md)。
 
 ## 目标
 
@@ -11,7 +11,7 @@
 ## 要做的工作
 
 1. **沿用上游 DataBackend 架构。** 保留统一 DataStrategy 的创建、发布、导入及 ready 屏障流程，平台差异放在 backend。保留 Buffer、控制区、缓存协议，以及 connector 的 unique ID 和 MLA dump 分工，不重复拆两套 DataStrategy。
-2. **新增 MemfdDataBackend。** 用户确认保留 memfd_create 要求；在 #1462 接口下补 FD 传递、跨进程映射、注册和释放。已有 PosixShmDataBackend 保留作测试/参考；目标平台选择为 A5 → HAL、ascend/A3/CUDA/simu → Memfd。当前上游注释了 A5 HAL 开关且部分平台仍构建旧核心，需要显式修正构建入口。设备别名用新增接口提供，保留原有 Host/Device 地址互斥语义。
+2. **新增 MemfdDataBackend。** 用户确认保留 memfd_create 要求；在 #1462 接口下补 FD 传递、跨进程映射、注册和释放。已有 PosixShmDataBackend 保留作测试/参考；当前已落实 A5 → v2/HAL、ascend/A3/CUDA → v2/Memfd。simu 同时编译两种核心、入口使用 v2/Memfd；musa/maca 保留 cc。设备别名用新增接口提供，保留原有 Host/Device 地址互斥语义。
 3. **统一自动 NUMA 分配。** DataStrategy 生成分配计划，HAL/Memfd backend 执行：检测到设备亲和性就使用亲和内存，检测不到则选择 `nodes[本机 worker rank % nodes.size()]`，整个本地数据段放在该节点；不提供用户 policy 配置。A5/A2/H100 对应亲和分配，A3 对应确定性轮转，最终以实际探测结果为准。Memfd 先绑定再触页、注册；A5 在 HAL 分配时落实目标节点。
 4. **支持配置 SDMA stream 数。** 参考 develop 已有 SDMA Direct 适配接入 v2，配置贯通 connector、store 和 stream 创建/使用逻辑。普通拷贝默认 4、SDMA Direct 默认 16（Load/Dump 各 16 条），显式配置按指定数量执行；核对 Load/Dump 的分配与同步。
 
