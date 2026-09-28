@@ -35,6 +35,12 @@
 #include "type/dictionary.h"
 #include "ucmstore_v1.h"
 
+/* Defined by the build for platforms whose runtime can drive SDMA Direct; the
+ * fallback keeps this header usable on its own. */
+#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
+#endif
+
 namespace UC::Cache2 {
 
 struct Config {
@@ -50,6 +56,13 @@ struct Config {
     size_t runningQueueDepth{524288};
     size_t timeoutMs{30000};
     size_t streamNumber{4};
+    /* Whether the user set cache_stream_number at all: SDMA Direct has a
+     * different unconfigured default, so an explicit value has to win over it. */
+    bool streamNumberExplicit{false};
+    /* Platform default: the runtimes that can drive SDMA Direct enable it, and
+     * cache_sdma_direct overrides either way. */
+    bool sdmaDirect{UCM_RUNTIME_ASCEND_SDMA_DIRECT};
+    bool useGdr{false};
     size_t localRankSize{8};
     /* Connector-derived hints, never user configuration. deviceNumaNode is the
      * accelerator's real NUMA affinity, absent when topology does not expose
@@ -57,6 +70,15 @@ struct Config {
      * used only when there is no affinity. */
     std::optional<int32_t> detectedNumaNode{};
     std::optional<int64_t> fallbackNumaRank{};
+
+    /* SDMA Direct needs one descriptor per stream, so its unconfigured default
+     * is higher than the plain path's; an explicit cache_stream_number wins. */
+    size_t EffectiveStreamNumber() const noexcept
+    {
+        constexpr size_t kDefaultSdmaDirectStreams = 16;
+        if (sdmaDirect && !streamNumberExplicit) { return kDefaultSdmaDirectStreams; }
+        return streamNumber;
+    }
 
     static Config From(const Detail::Dictionary& dict)
     {
@@ -81,6 +103,9 @@ struct Config {
         dict.GetNumber("running_queue_depth", config.runningQueueDepth);
         dict.GetNumber("timeout_ms", config.timeoutMs);
         dict.GetNumber("cache_stream_number", config.streamNumber);
+        config.streamNumberExplicit = dict.Contains("cache_stream_number");
+        dict.Get("cache_sdma_direct", config.sdmaDirect);
+        dict.Get("use_gdr", config.useGdr);
         dict.GetNumber("local_rank_size", config.localRankSize);
         if (dict.Contains("cache_detected_numa_node")) {
             int32_t numaNode = 0;
@@ -121,9 +146,16 @@ struct Config {
             return Status::InvalidParam("invalid queue depth({},{})", waitingQueueDepth,
                                         runningQueueDepth);
         }
-        if (streamNumber < 1 || streamNumber > 32) {
-            return Status::InvalidParam("invalid stream number({})", streamNumber);
+        if (EffectiveStreamNumber() < 1 || EffectiveStreamNumber() > 32) {
+            return Status::InvalidParam("invalid stream number({})", EffectiveStreamNumber());
         }
+#if !UCM_RUNTIME_ASCEND_SDMA_DIRECT
+        if (sdmaDirect) {
+            return Status::InvalidParam(
+                "cache SDMA Direct is not available on this platform; set "
+                "cache_sdma_direct=false");
+        }
+#endif
         if (localRankSize == 0) {
             return Status::InvalidParam("invalid local rank size({})", localRankSize);
         }
@@ -160,7 +192,10 @@ struct Config {
         UC_INFO("Set {}::WaitingQueueDepth to {}.", ns, waitingQueueDepth);
         UC_INFO("Set {}::RunningQueueDepth to {}.", ns, runningQueueDepth);
         UC_INFO("Set {}::TimeoutMs to {}.", ns, timeoutMs);
-        UC_INFO("Set {}::StreamNumber to {}.", ns, streamNumber);
+        UC_INFO("Set {}::StreamNumber to {} (configured={}).", ns, EffectiveStreamNumber(),
+                streamNumber);
+        UC_INFO("Set {}::CacheSdmaDirect to {}.", ns, sdmaDirect);
+        UC_INFO("Set {}::UseGdr to {}.", ns, useGdr);
         UC_INFO("Set {}::LocalRankSize to {}.", ns, localRankSize);
         if (detectedNumaNode.has_value()) {
             UC_INFO("Set {}::DetectedNumaNode to {}.", ns, *detectedNumaNode);

@@ -72,6 +72,8 @@ class DumpQ {
     StoreV1* backend_{nullptr};
     int32_t deviceId_{-1};
     size_t streamNumber_{1};
+    bool sdmaDirect_{false};
+    bool useGdr_{false};
     std::vector<size_t> tensorSizes_{};
     SpscRingQueue<TaskPair> waiting_{};
     SpscRingQueue<DumpCtx> dumping_{};
@@ -90,7 +92,9 @@ public:
         buffer_ = buffer;
         backend_ = config.storeBackend;
         deviceId_ = config.deviceId;
-        streamNumber_ = config.streamNumber;
+        streamNumber_ = config.EffectiveStreamNumber();
+        sdmaDirect_ = config.sdmaDirect;
+        useGdr_ = config.useGdr;
         tensorSizes_ = config.tensorSizes;
         waiting_.Setup(config.waitingQueueDepth);
         if (backend_ != nullptr) {
@@ -128,7 +132,8 @@ private:
             UC_WARN("Failed({}) to set dump d2h thread name.", nameStatus);
         }
         StreamT stream;
-        auto s = stream.Setup(deviceId_, streamNumber_);
+        auto s = sdmaDirect_ ? stream.SetupSdmaDirect(deviceId_, streamNumber_, useGdr_)
+                             : stream.Setup(deviceId_, streamNumber_);
         started.set_value(s);
         if (s.Failure()) [[unlikely]] { return; }
         waiting_.ConsumerLoop(stop_, &DumpQ::DispatchOneTask, this, stream);
@@ -184,8 +189,11 @@ private:
             auto& pinned = ctx.bufferHandles.back();
             const auto hostAccessible = pinned.HostAccessible();
             if (pinned.GetState() != SlotState::Ready) {
+                /* SDMA Direct feeds device descriptors, so the host side has to
+                 * be the device-visible alias rather than the CPU address. */
+                void* hostDst = sdmaDirect_ ? pinned.HostMappedData() : pinned.Data();
                 auto s = hostAccessible
-                             ? stream.DeviceToHostGatherAsync(shard.addrs.data(), pinned.Data(),
+                             ? stream.DeviceToHostGatherAsync(shard.addrs.data(), hostDst,
                                                               tensorSizes_)
                              : stream.DeviceToDeviceGatherAsync(shard.addrs.data(),
                                                                 pinned.DeviceData(), tensorSizes_);

@@ -34,10 +34,13 @@
 namespace UC::Cache2 {
 
 class CopyStream {
+    static constexpr size_t kMaxStreamNumber = 32;
+
     int32_t deviceId_{-1};
     size_t streamNumber_{0};
     size_t streamIndex_{0};
     std::vector<std::shared_ptr<Trans::Stream>> streams_;
+    bool sdmaDirect_{false};
 
 public:
     Status Setup(const int32_t deviceId, const size_t streamNumber)
@@ -61,6 +64,42 @@ public:
         deviceId_ = deviceId;
         streamNumber_ = streamNumber;
         streamIndex_ = 0;
+        return Status::OK();
+    }
+
+    /* SDMA Direct shards a host segment straight into device fragments, so it
+     * needs streamNumber descriptors ready for rotation and covers all of them
+     * on wait and sync, exactly like the plain path. A platform whose runtime
+     * cannot make such a stream reports it here rather than silently falling
+     * back to fragment-by-fragment copies. */
+    Status SetupSdmaDirect(const int32_t deviceId, const size_t streamNumber, const bool useGdr)
+    {
+        if (useGdr) {
+            return Status::InvalidParam("GDR stream is incompatible with cache SDMA Direct");
+        }
+        if (streamNumber == 0 || streamNumber > kMaxStreamNumber) {
+            return Status::InvalidParam("invalid sdma direct stream number({})", streamNumber);
+        }
+        Trans::Device device;
+        auto s = device.Setup(deviceId);
+        if (s.Failure()) {
+            UC_ERROR("Failed({}) to setup device({}).", s, deviceId);
+            return s;
+        }
+        streams_.clear();
+        streams_.reserve(streamNumber);
+        for (size_t i = 0; i < streamNumber; ++i) {
+            auto stream = device.MakeSdmaDirectStream();
+            if (!stream) {
+                UC_ERROR("Cache SDMA Direct is not available on device({}).", deviceId);
+                return Status::Unsupported();
+            }
+            streams_.push_back(std::move(stream));
+        }
+        deviceId_ = deviceId;
+        streamNumber_ = streamNumber;
+        streamIndex_ = 0;
+        sdmaDirect_ = true;
         return Status::OK();
     }
 
@@ -114,6 +153,18 @@ public:
                                     const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
+        if (sdmaDirect_) {
+            /* One shard-level dispatch: the SDMA stream builds the descriptors
+             * for the whole fragment list itself. */
+            auto s = stream->HostToDeviceAsync(src, dst, sizes);
+            if (s.Failure()) {
+                auto syncS = stream->Synchronized();
+                if (syncS.Failure()) {
+                    UC_ERROR("Failed({}) to synchronize stream on device({}).", syncS, deviceId_);
+                }
+            }
+            return s;
+        }
         size_t offset = 0;
         for (size_t i = 0; i < sizes.size(); ++i) {
             if (sizes[i] != 0 && dst[i] != nullptr) {
@@ -137,6 +188,17 @@ public:
                                    const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
+        if (sdmaDirect_) {
+            /* One shard-level dispatch; see HostToDeviceScatterAsync. */
+            auto s = stream->DeviceToHostAsync(src, dst, sizes);
+            if (s.Failure()) {
+                auto syncS = stream->Synchronized();
+                if (syncS.Failure()) {
+                    UC_ERROR("Failed({}) to synchronize stream on device({}).", syncS, deviceId_);
+                }
+            }
+            return s;
+        }
         size_t offset = 0;
         for (size_t i = 0; i < sizes.size(); ++i) {
             if (sizes[i] != 0 && src[i] != nullptr) {
