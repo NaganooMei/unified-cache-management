@@ -31,6 +31,7 @@
 #include <fmt/format.h>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -42,6 +43,20 @@
 #include "status/status.h"
 
 namespace UC::Cache2 {
+
+/* Everything needed to set up the data plane for one worker. Assembled from
+ * configuration plus connector-derived hints; not a user-facing knob set. */
+struct DataOptions {
+    std::string domainId{};                   /* connector uniqueId; do not widen scope here */
+    int32_t deviceId{-1};                     /* device ordinal */
+    size_t myRank{0};                         /* control-plane partition index */
+    size_t slotSize{0};
+    size_t slotsPerRank{0};
+    size_t setupTimeoutMs{600000};            /* whole-Setup budget; 0 means no wait */
+    bool requireHostDeviceAddress{false};     /* derived from the copy mode, not a switch */
+    std::optional<int32_t> deviceNumaNode{};  /* device-layer probe; empty when unknown */
+    std::optional<size_t> fallbackNumaRank{}; /* local worker rank, NOT myRank */
+};
 
 class DataStrategy {
     size_t slotSize_{};
@@ -217,6 +232,18 @@ public:
         if (nSlotsPerRank_ == 0 || backend_ == nullptr) { return nullptr; }
         const size_t rank = slotIdx / nSlotsPerRank_;
         void* base = backend_->DeviceAddrOf(rank);
+        if (base == nullptr) { return nullptr; }
+        return static_cast<std::byte*>(base) + (slotIdx % nSlotsPerRank_) * slotSize_;
+    }
+
+    // Returns the device-visible alias of a host-accessible slot, or nullptr
+    // when the backend provides none. Only for transfer modes that need a device
+    // address (Memfd SDMA Direct); never use it for CPU access.
+    void* HostMappedDeviceDataAt(size_t slotIdx) const
+    {
+        if (nSlotsPerRank_ == 0 || backend_ == nullptr) { return nullptr; }
+        const size_t rank = slotIdx / nSlotsPerRank_;
+        void* base = backend_->HostMappedDeviceAddrOf(rank);
         if (base == nullptr) { return nullptr; }
         return static_cast<std::byte*>(base) + (slotIdx % nSlotsPerRank_) * slotSize_;
     }
