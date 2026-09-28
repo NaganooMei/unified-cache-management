@@ -212,12 +212,12 @@ public:
         (void)useGdr;
         return Setup(deviceId, streamNumber);
     }
-    UC::Status DeviceToHostAsync(void* src[], void* dst, const std::vector<size_t>& sizes)
+    UC::Status DeviceToHostGatherAsync(void* src[], void* dst, const std::vector<size_t>& sizes)
     {
         gathers.push_back(GatherCall{std::vector<void*>(src, src + sizes.size()), dst, sizes});
         return onGather ? onGather(gathers.back()) : UC::Status::OK();
     }
-    UC::Status DeviceToDeviceAsync(void* src[], void* dst, const std::vector<size_t>& sizes)
+    UC::Status DeviceToDeviceGatherAsync(void* src[], void* dst, const std::vector<size_t>& sizes)
     {
         d2dGathers.push_back(GatherCall{std::vector<void*>(src, src + sizes.size()), dst, sizes});
         return UC::Status::OK();

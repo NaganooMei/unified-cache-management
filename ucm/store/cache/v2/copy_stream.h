@@ -129,7 +129,8 @@ public:
 
     /* Trans::Stream has no batch form for device-to-device, so this walks the
      * fragments itself. */
-    Status DeviceToDeviceAsync(void* src, void** dst, const std::vector<size_t>& sizes) noexcept
+    Status DeviceToDeviceScatterAsync(void* src, void** dst,
+                                      const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
@@ -152,7 +153,8 @@ public:
         return Status::OK();
     }
 
-    Status DeviceToDeviceAsync(void** src, void* dst, const std::vector<size_t>& sizes) noexcept
+    Status DeviceToDeviceGatherAsync(void** src, void* dst,
+                                     const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
@@ -180,14 +182,16 @@ public:
      * fragment, while SDMA Direct and IO aggregation override it to issue a
      * single batch. Which of the two happens is the stream's business, so there
      * is nothing to branch on here. */
-    Status HostToDeviceAsync(void* host, void** device, const std::vector<size_t>& sizes) noexcept
+    Status HostToDeviceScatterAsync(void* host, void** device,
+                                    const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         return stream->HostToDeviceAsync(host, device, sizes);
     }
 
-    Status DeviceToHostAsync(void** device, void* host, const std::vector<size_t>& sizes) noexcept
+    Status DeviceToHostGatherAsync(void** device, void* host,
+                                   const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
         if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
