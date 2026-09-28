@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <vector>
 #include "logger/logger.h"
@@ -50,6 +51,12 @@ struct Config {
     size_t timeoutMs{30000};
     size_t streamNumber{4};
     size_t localRankSize{8};
+    /* Connector-derived hints, never user configuration. deviceNumaNode is the
+     * accelerator's real NUMA affinity, absent when topology does not expose
+     * one; fallbackNumaRank is this worker's index within its own machine,
+     * used only when there is no affinity. */
+    std::optional<int32_t> detectedNumaNode{};
+    std::optional<int64_t> fallbackNumaRank{};
 
     static Config From(const Detail::Dictionary& dict)
     {
@@ -75,6 +82,16 @@ struct Config {
         dict.GetNumber("timeout_ms", config.timeoutMs);
         dict.GetNumber("cache_stream_number", config.streamNumber);
         dict.GetNumber("local_rank_size", config.localRankSize);
+        if (dict.Contains("cache_detected_numa_node")) {
+            int32_t numaNode = 0;
+            dict.GetNumber("cache_detected_numa_node", numaNode);
+            config.detectedNumaNode = numaNode;
+        }
+        if (dict.Contains("cache_fallback_numa_rank")) {
+            int64_t numaRank = 0;
+            dict.GetNumber("cache_fallback_numa_rank", numaRank);
+            config.fallbackNumaRank = numaRank;
+        }
         return config;
     }
     Status Validate() const
@@ -110,6 +127,12 @@ struct Config {
         if (localRankSize == 0) {
             return Status::InvalidParam("invalid local rank size({})", localRankSize);
         }
+        if (detectedNumaNode.has_value() && *detectedNumaNode < 0) {
+            return Status::InvalidParam("invalid detected numa node({})", *detectedNumaNode);
+        }
+        if (fallbackNumaRank.has_value() && *fallbackNumaRank < 0) {
+            return Status::InvalidParam("invalid fallback numa rank({})", *fallbackNumaRank);
+        }
         return Status::OK();
     }
     void Show() const
@@ -139,6 +162,12 @@ struct Config {
         UC_INFO("Set {}::TimeoutMs to {}.", ns, timeoutMs);
         UC_INFO("Set {}::StreamNumber to {}.", ns, streamNumber);
         UC_INFO("Set {}::LocalRankSize to {}.", ns, localRankSize);
+        if (detectedNumaNode.has_value()) {
+            UC_INFO("Set {}::DetectedNumaNode to {}.", ns, *detectedNumaNode);
+        }
+        if (fallbackNumaRank.has_value()) {
+            UC_INFO("Set {}::FallbackNumaRank to {}.", ns, *fallbackNumaRank);
+        }
     }
 };
 

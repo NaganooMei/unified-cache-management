@@ -156,6 +156,10 @@ public:
         dataOptions.myRank = myRank_;
         dataOptions.slotSize = slotSize_;
         dataOptions.slotsPerRank = slotsPerRank_;
+        dataOptions.deviceNumaNode = cfg.detectedNumaNode;
+        if (cfg.fallbackNumaRank.has_value()) {
+            dataOptions.fallbackNumaRank = static_cast<size_t>(*cfg.fallbackNumaRank);
+        }
         return data_.Setup(layout, dataOptions);
     }
 

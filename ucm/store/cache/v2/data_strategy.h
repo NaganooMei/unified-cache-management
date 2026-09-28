@@ -41,6 +41,7 @@
 #include "data_backend_memfd.h"
 #include "data_backend_posix.h"
 #include "logger/logger.h"
+#include "numa/numa_policy.h"
 #include "status/status.h"
 
 namespace UC::Cache2 {
@@ -189,13 +190,20 @@ public:
         }
         auto backend = MakeBackend(options.domainId);
         const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+        auto placement = Numa::Resolve(options.deviceNumaNode, options.fallbackNumaRank);
+        if (!placement) {
+            UC_ERROR("cache2 numa placement failed: owner={} device={} status={}", myRank,
+                     options.deviceId, placement.Error());
+            return {placement.Error().Underlying(),
+                    fmt::format("numa placement failed: {}", placement.Error())};
+        }
         BackendOptions backendOptions;
         backendOptions.deviceId = options.deviceId;
         backendOptions.rankCount = nRanks;
         backendOptions.rankBytes = slotSize * nSlotsPerRank;
+        backendOptions.localPlacement = placement.Value();
         backendOptions.requireHostDeviceAddress = options.requireHostDeviceAddress;
         backendOptions.deadline = deadline;
-        /* localPlacement is filled once NUMA Resolve runs ahead of BindLocal. */
         Status status = Status::OK();
         try {
             status = backend->Setup(backendOptions);
