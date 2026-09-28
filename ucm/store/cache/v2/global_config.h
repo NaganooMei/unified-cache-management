@@ -68,11 +68,6 @@ struct Config {
     bool useGdr{false};
     /* Keeps the cc core's single-stream aggregation instead of rotating copies. */
     bool ioAggregation{false};
-    /* cc modes cache.v2 does not implement yet. They are refused rather than
-     * silently ignored, so a deployment never runs with a different memory model
-     * than the one it asked for. */
-    bool shareBufferEnable{false};
-    bool loadBackendOnly{false};
     size_t localRankSize{8};
     /* Connector-derived hints, never user configuration. deviceNumaNode is the
      * accelerator's real NUMA affinity, absent when topology does not expose
@@ -118,8 +113,6 @@ struct Config {
         dict.Get("cache_sdma_direct", config.sdmaDirect);
         dict.Get("use_gdr", config.useGdr);
         dict.Get("cache_io_aggregation", config.ioAggregation);
-        dict.Get("share_buffer_enable", config.shareBufferEnable);
-        dict.Get("cache_load_backend_only", config.loadBackendOnly);
         dict.GetNumber("local_rank_size", config.localRankSize);
         if (dict.Contains("cache_detected_numa_node")) {
             int32_t numaNode = 0;
@@ -173,16 +166,6 @@ struct Config {
         if (ioAggregation && sdmaDirect) {
             return Status::InvalidParam(
                 "cache IO aggregation is incompatible with cache SDMA Direct");
-        }
-        if (shareBufferEnable) {
-            return Status::InvalidParam(
-                "cache.v2 does not implement share_buffer_enable yet; unset it, or use a "
-                "platform that still ships the cc core");
-        }
-        if (loadBackendOnly) {
-            return Status::InvalidParam(
-                "cache.v2 does not implement cache_load_backend_only yet; unset it, or use a "
-                "platform that still ships the cc core");
         }
         if (localRankSize == 0) {
             return Status::InvalidParam("invalid local rank size({})", localRankSize);
