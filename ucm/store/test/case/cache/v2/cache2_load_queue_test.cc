@@ -230,12 +230,12 @@ public:
         (void)useGdr;
         return Setup(deviceId, streamNumber);
     }
-    UC::Status HostToDeviceScatterAsync(void* src, void* dst[], const std::vector<size_t>& sizes)
+    UC::Status HostToDeviceAsync(void* src, void* dst[], const std::vector<size_t>& sizes)
     {
         scatters.push_back(ScatterCall{src, std::vector<void*>(dst, dst + sizes.size()), sizes});
         return onScatter ? onScatter(scatters.back()) : UC::Status::OK();
     }
-    UC::Status DeviceToDeviceScatterAsync(void* src, void* dst[], const std::vector<size_t>& sizes)
+    UC::Status DeviceToDeviceAsync(void* src, void* dst[], const std::vector<size_t>& sizes)
     {
         d2dScatters.push_back(ScatterCall{src, std::vector<void*>(dst, dst + sizes.size()), sizes});
         return UC::Status::OK();

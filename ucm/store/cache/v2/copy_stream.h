@@ -40,11 +40,6 @@ class CopyStream {
     size_t streamNumber_{0};
     size_t streamIndex_{0};
     std::vector<std::shared_ptr<Trans::Stream>> streams_;
-    /* Some streams only implement the batch form and answer Unsupported to the
-     * per-fragment one, so the scatter/gather paths must hand the whole fragment
-     * list over in one call. That is a property of the stream, not of a
-     * particular transfer mode, so SDMA Direct and IO aggregation both set it. */
-    bool batchCopy_{false};
 
 public:
     Status Setup(const int32_t deviceId, const size_t streamNumber)
@@ -68,7 +63,6 @@ public:
         deviceId_ = deviceId;
         streamNumber_ = streamNumber;
         streamIndex_ = 0;
-        batchCopy_ = false;
         return Status::OK();
     }
 
@@ -95,7 +89,6 @@ public:
         deviceId_ = deviceId;
         streamNumber_ = 1;
         streamIndex_ = 0;
-        batchCopy_ = true;
         return Status::OK();
     }
 
@@ -131,14 +124,15 @@ public:
         deviceId_ = deviceId;
         streamNumber_ = streamNumber;
         streamIndex_ = 0;
-        batchCopy_ = true;
         return Status::OK();
     }
 
-    Status DeviceToDeviceScatterAsync(void* src, void* dst[],
-                                      const std::vector<size_t>& sizes) noexcept
+    /* Trans::Stream has no batch form for device-to-device, so this walks the
+     * fragments itself. */
+    Status DeviceToDeviceAsync(void* src, void** dst, const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
+        if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         size_t offset = 0;
         for (size_t i = 0; i < sizes.size(); ++i) {
             if (sizes[i] != 0 && dst[i] != nullptr) {
@@ -158,10 +152,10 @@ public:
         return Status::OK();
     }
 
-    Status DeviceToDeviceGatherAsync(void* src[], void* dst,
-                                     const std::vector<size_t>& sizes) noexcept
+    Status DeviceToDeviceAsync(void** src, void* dst, const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
+        if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
         size_t offset = 0;
         for (size_t i = 0; i < sizes.size(); ++i) {
             if (sizes[i] != 0 && src[i] != nullptr) {
@@ -181,73 +175,23 @@ public:
         return Status::OK();
     }
 
-    Status HostToDeviceScatterAsync(void* src, void* dst[],
-                                    const std::vector<size_t>& sizes) noexcept
+    /* The whole fragment list goes to the stream in one piece, as in the cc
+     * core: Trans::Stream's default implementation walks it fragment by
+     * fragment, while SDMA Direct and IO aggregation override it to issue a
+     * single batch. Which of the two happens is the stream's business, so there
+     * is nothing to branch on here. */
+    Status HostToDeviceAsync(void* host, void** device, const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
-        if (batchCopy_) {
-            /* One shard-level dispatch: this stream builds the whole fragment
-             * list itself. */
-            auto s = stream->HostToDeviceAsync(src, dst, sizes);
-            if (s.Failure()) {
-                auto syncS = stream->Synchronized();
-                if (syncS.Failure()) {
-                    UC_ERROR("Failed({}) to synchronize stream on device({}).", syncS, deviceId_);
-                }
-            }
-            return s;
-        }
-        size_t offset = 0;
-        for (size_t i = 0; i < sizes.size(); ++i) {
-            if (sizes[i] != 0 && dst[i] != nullptr) {
-                auto* pSrc = static_cast<void*>(static_cast<int8_t*>(src) + offset);
-                auto s = stream->HostToDeviceAsync(pSrc, dst[i], sizes[i]);
-                if (s.Failure()) {
-                    auto syncS = stream->Synchronized();
-                    if (syncS.Failure()) {
-                        UC_ERROR("Failed({}) to synchronize stream on device({}).", syncS,
-                                 deviceId_);
-                    }
-                    return s;
-                }
-            }
-            offset += sizes[i];
-        }
-        return Status::OK();
+        if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
+        return stream->HostToDeviceAsync(host, device, sizes);
     }
 
-    Status DeviceToHostGatherAsync(void* src[], void* dst,
-                                   const std::vector<size_t>& sizes) noexcept
+    Status DeviceToHostAsync(void** device, void* host, const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
-        if (batchCopy_) {
-            /* One shard-level dispatch; see HostToDeviceScatterAsync. */
-            auto s = stream->DeviceToHostAsync(src, dst, sizes);
-            if (s.Failure()) {
-                auto syncS = stream->Synchronized();
-                if (syncS.Failure()) {
-                    UC_ERROR("Failed({}) to synchronize stream on device({}).", syncS, deviceId_);
-                }
-            }
-            return s;
-        }
-        size_t offset = 0;
-        for (size_t i = 0; i < sizes.size(); ++i) {
-            if (sizes[i] != 0 && src[i] != nullptr) {
-                auto* pDst = static_cast<void*>(static_cast<int8_t*>(dst) + offset);
-                auto s = stream->DeviceToHostAsync(src[i], pDst, sizes[i]);
-                if (s.Failure()) {
-                    auto syncS = stream->Synchronized();
-                    if (syncS.Failure()) {
-                        UC_ERROR("Failed({}) to synchronize stream on device({}).", syncS,
-                                 deviceId_);
-                    }
-                    return s;
-                }
-            }
-            offset += sizes[i];
-        }
-        return Status::OK();
+        if (!stream) [[unlikely]] { return Status::Error("copy stream is not setup"); }
+        return stream->DeviceToHostAsync(device, host, sizes);
     }
 
     Status WaitEvent(const Trans::Event& event) noexcept
@@ -277,6 +221,7 @@ public:
 private:
     std::shared_ptr<Trans::Stream> NextStream() noexcept
     {
+        if (streamNumber_ == 0) [[unlikely]] { return nullptr; }
         auto& stream = streams_[streamIndex_];
         streamIndex_ = (streamIndex_ + 1) % streamNumber_;
         return stream;

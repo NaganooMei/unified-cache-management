@@ -316,11 +316,10 @@ private:
          * device-visible alias rather than the CPU address. */
         void* hostSrc =
             sdmaDirect_ ? task.bufferHandle->HostMappedData() : task.bufferHandle->Data();
-        auto s =
-            task.bufferHandle->HostAccessible()
-                ? stream.HostToDeviceScatterAsync(hostSrc, task.shard->addrs.data(), tensorSizes_)
-                : stream.DeviceToDeviceScatterAsync(task.bufferHandle->DeviceData(),
-                                                    task.shard->addrs.data(), tensorSizes_);
+        auto s = task.bufferHandle->HostAccessible()
+                     ? stream.HostToDeviceAsync(hostSrc, task.shard->addrs.data(), tensorSizes_)
+                     : stream.DeviceToDeviceAsync(task.bufferHandle->DeviceData(),
+                                                  task.shard->addrs.data(), tensorSizes_);
         Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_submit_ms"),
                              (NowTime::Now() - startTp) * 1e3);
         if (s.Failure()) [[unlikely]] {
