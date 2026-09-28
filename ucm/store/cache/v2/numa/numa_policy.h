@@ -50,8 +50,7 @@ struct Plan {
  * fabricates an affinity. fallbackNumaRank is the connector-derived local
  * worker rank, not the control-plane myRank; a missing one is an error, never
  * a silent 0. The result stays fixed for the segment's lifetime. */
-Expected<Plan> Resolve(std::optional<int32_t> deviceNode,
-                       std::optional<size_t> fallbackNumaRank);
+Expected<Plan> Resolve(std::optional<int32_t> deviceNode, std::optional<size_t> fallbackNumaRank);
 
 /* Binds the whole local segment to plan.node before its first touch and before
  * device registration. Registration pins pages, so binding afterwards would

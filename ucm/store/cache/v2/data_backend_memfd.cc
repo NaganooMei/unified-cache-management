@@ -72,8 +72,9 @@ Status MemfdDataBackend::Setup(const BackendOptions& options)
     requireHostDeviceAddress_ = options.requireHostDeviceAddress;
     localPlacement_ = options.localPlacement;
     deadline_ = options.deadline;
-    UC_INFO("memfd setup: device={} ranks={} rank_bytes={} rank_stride={} host_device={}", deviceId_,
-            options.rankCount, options.rankBytes, rankStride_, requireHostDeviceAddress_);
+    UC_INFO("memfd setup: device={} ranks={} rank_bytes={} rank_stride={} host_device={}",
+            deviceId_, options.rankCount, options.rankBytes, rankStride_,
+            requireHostDeviceAddress_);
     return Status::OK();
 }
 
@@ -108,8 +109,8 @@ Status MemfdDataBackend::ImportPeer(size_t rank, uint64_t handle)
     if (rank >= segments_.size()) { return Status::InvalidParam("rank({}) out of range", rank); }
     const auto name = SocketName(rank);
     if (handle != HashName(name)) {
-        return Status::InvalidParam("peer handle({}) does not match socket name of rank({})", handle,
-                                    rank);
+        return Status::InvalidParam("peer handle({}) does not match socket name of rank({})",
+                                    handle, rank);
     }
     FdSocket peer;
     for (;;) {
@@ -129,8 +130,8 @@ Status MemfdDataBackend::ImportPeer(size_t rank, uint64_t handle)
     const bool statFailed = ::fstat(fd, &info) != 0;
     if (statFailed || static_cast<size_t>(info.st_size) < rankStride_) {
         ::close(fd);
-        return Status::InvalidParam(
-            "peer fd of rank({}) is shorter than rank bytes({})", rank, rankStride_);
+        return Status::InvalidParam("peer fd of rank({}) is shorter than rank bytes({})", rank,
+                                    rankStride_);
     }
     auto mem = std::make_unique<MemFd>();
     status = mem->Adopt(fd, rankStride_);
@@ -190,8 +191,8 @@ Status MemfdDataBackend::CreateLocalSegment(size_t rank)
     auto mem = std::make_unique<MemFd>();
     auto status = mem->Create(name, rankStride_);
     if (status.Failure()) {
-        UC_ERROR("memfd create failed: owner={} device={} name={} bytes={} status={}", rank, deviceId_,
-                 name, rankStride_, status);
+        UC_ERROR("memfd create failed: owner={} device={} name={} bytes={} status={}", rank,
+                 deviceId_, name, rankStride_, status);
         return {status.Underlying(), fmt::format("memfd create failed: name={} bytes={} status={}",
                                                  name, rankStride_, status)};
     }
@@ -207,9 +208,10 @@ Status MemfdDataBackend::PlaceAndRegister(size_t rank)
      * to happen before registration (which pins them). The bind itself is
      * skipped only while no plan has been resolved yet. */
     if (localPlacement_.node < 0) {
-        UC_WARN("memfd segment has no NUMA plan, leaving placement to the kernel: device={} "
-                "rank={}",
-                deviceId_, rank);
+        UC_WARN(
+            "memfd segment has no NUMA plan, leaving placement to the kernel: device={} "
+            "rank={}",
+            deviceId_, rank);
     } else {
         auto bindStatus = Numa::BindBeforeTouch(segment.mem->Addr(), rankStride_, localPlacement_);
         if (bindStatus.Failure()) {

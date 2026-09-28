@@ -49,9 +49,9 @@ namespace UC::Cache2 {
 /* Everything needed to set up the data plane for one worker. Assembled from
  * configuration plus connector-derived hints; not a user-facing knob set. */
 struct DataOptions {
-    std::string domainId{};                   /* connector uniqueId; do not widen scope here */
-    int32_t deviceId{-1};                     /* device ordinal */
-    size_t myRank{0};                         /* control-plane partition index */
+    std::string domainId{}; /* connector uniqueId; do not widen scope here */
+    int32_t deviceId{-1};   /* device ordinal */
+    size_t myRank{0};       /* control-plane partition index */
     size_t slotSize{0};
     size_t slotsPerRank{0};
     size_t setupTimeoutMs{600000};            /* whole-Setup budget; 0 means no wait */

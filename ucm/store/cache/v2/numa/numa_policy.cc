@@ -164,8 +164,7 @@ NodeMask SingleNodeMask(size_t node)
 
 }  // namespace
 
-Expected<Plan> Resolve(std::optional<int32_t> deviceNode,
-                       std::optional<size_t> fallbackNumaRank)
+Expected<Plan> Resolve(std::optional<int32_t> deviceNode, std::optional<size_t> fallbackNumaRank)
 {
     auto available = AvailableNodes();
     if (!available) { return available.Error(); }
@@ -198,9 +197,7 @@ Status BindBeforeTouch(void* base, size_t bytes, const Plan& plan)
     if (base == nullptr || bytes == 0) {
         return Status::InvalidParam("cache2 numa: cannot bind an empty segment");
     }
-    if (plan.node < 0) {
-        return Status::InvalidParam("cache2 numa: plan carries no node");
-    }
+    if (plan.node < 0) { return Status::InvalidParam("cache2 numa: plan carries no node"); }
     const long pageSize = PageSize();
     if (pageSize <= 0) { return Status::Error("cache2 numa: sysconf(_SC_PAGESIZE) failed"); }
     if (reinterpret_cast<uintptr_t>(base) % static_cast<size_t>(pageSize) != 0) {
@@ -259,9 +256,10 @@ Status Verify(void* base, size_t bytes, const Plan& plan)
                 node, pages);
     }
     if (mismatches != 0) {
-        UC_WARN("cache2 numa placement differs from the request: expected_node={} "
-                "mismatched_pages={} sampled_pages={}",
-                plan.node, mismatches, samples);
+        UC_WARN(
+            "cache2 numa placement differs from the request: expected_node={} "
+            "mismatched_pages={} sampled_pages={}",
+            plan.node, mismatches, samples);
     }
     return Status::OK();
 }
