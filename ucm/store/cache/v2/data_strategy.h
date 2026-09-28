@@ -38,6 +38,7 @@
 #include "ctrl_layout.h"
 #include "data_backend.h"
 #include "data_backend_ascend.h"
+#include "data_backend_memfd.h"
 #include "data_backend_posix.h"
 #include "logger/logger.h"
 #include "status/status.h"
@@ -63,13 +64,16 @@ class DataStrategy {
     size_t nSlotsPerRank_{};
     std::unique_ptr<DataBackend> backend_;
 
+    /* One backend per platform: the A5 HAL path owns real device memory, every
+     * other ascend/cuda/simu platform gets memfd host segments. PosixShm stays
+     * as a test/reference backend and is no longer selected here. */
     static std::unique_ptr<DataBackend> MakeBackend(const std::string& uniqueId)
     {
 #if UCM_RUNTIME_ASCEND_HAL
         (void)uniqueId;
         return std::make_unique<AscendHalDataBackend>();
 #else
-        return std::make_unique<PosixShmDataBackend>(uniqueId);
+        return std::make_unique<MemfdDataBackend>(uniqueId);
 #endif
     }
 

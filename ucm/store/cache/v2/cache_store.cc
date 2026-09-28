@@ -86,6 +86,4 @@ public:
 
 }  // namespace UC::Cache2
 
-#ifndef UCM_BUILD_TESTS
 extern "C" UC::StoreV1* MakeCacheStore() { return new UC::Cache2::Store(); }
-#endif
