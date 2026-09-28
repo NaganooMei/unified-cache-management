@@ -34,6 +34,21 @@ elseif(RUNTIME_ENVIRONMENT STREQUAL "ascend-a5")
     set(UCM_RUNTIME_ASCEND_HAL ON)
 endif()
 
+# Which cache core each platform ships, and therefore which test suite can link.
+# The ascend family and cuda run cache.v2; musa/maca keep the cc core. simu
+# carries both, because the shared ucmstore.test binary runs the cc and v2
+# suites together and one library can only export a single MakeCacheStore
+# (v2/cache_store.cc hides its own while building tests).
+set(UCM_CACHE_STORE_BUILDS_CC ON)
+set(UCM_CACHE_STORE_BUILDS_V2 OFF)
+if(RUNTIME_ENVIRONMENT STREQUAL "ascend" OR RUNTIME_ENVIRONMENT STREQUAL "ascend-a3" OR
+   RUNTIME_ENVIRONMENT STREQUAL "ascend-a5" OR RUNTIME_ENVIRONMENT STREQUAL "cuda")
+    set(UCM_CACHE_STORE_BUILDS_CC OFF)
+    set(UCM_CACHE_STORE_BUILDS_V2 ON)
+elseif(RUNTIME_ENVIRONMENT STREQUAL "simu")
+    set(UCM_CACHE_STORE_BUILDS_V2 ON)
+endif()
+
 execute_process(COMMAND git rev-parse HEAD OUTPUT_VARIABLE UCM_COMMIT_ID OUTPUT_STRIP_TRAILING_WHITESPACE)
 add_compile_definitions(UCM_PROJECT_NAME="${PROJECT_NAME}")
 add_compile_definitions(UCM_PROJECT_VERSION="${PROJECT_VERSION}")
