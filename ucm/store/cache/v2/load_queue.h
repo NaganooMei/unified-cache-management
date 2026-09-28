@@ -137,9 +137,7 @@ public:
 private:
     void DispatchStage()
     {
-        /* pthread_setname_np takes at most 15 characters; "ucm_c2_load_disp"
-         * is 16 and comes back ERANGE(34). */
-        auto nameStatus = CpuAffinity::SetCurrentThreadName("ucm_c2_load_dsp");
+        auto nameStatus = CpuAffinity::SetCurrentThreadName("ucm_load_disp");
         if (nameStatus.Failure()) {
             UC_WARN("Failed({}) to set load dispatch thread name.", nameStatus);
         }
@@ -240,7 +238,7 @@ private:
     }
     void TransferStage(std::promise<Status>& started)
     {
-        auto nameStatus = CpuAffinity::SetCurrentThreadName("ucm_c2_load_h2d");
+        auto nameStatus = CpuAffinity::SetCurrentThreadName("ucm_load_h2d");
         if (nameStatus.Failure()) {
             UC_WARN("Failed({}) to set load h2d thread name.", nameStatus);
         }
