@@ -40,7 +40,11 @@ class CopyStream {
     size_t streamNumber_{0};
     size_t streamIndex_{0};
     std::vector<std::shared_ptr<Trans::Stream>> streams_;
-    bool sdmaDirect_{false};
+    /* Some streams only implement the batch form and answer Unsupported to the
+     * per-fragment one, so the scatter/gather paths must hand the whole fragment
+     * list over in one call. That is a property of the stream, not of a
+     * particular transfer mode, so SDMA Direct and IO aggregation both set it. */
+    bool batchCopy_{false};
 
 public:
     Status Setup(const int32_t deviceId, const size_t streamNumber)
@@ -64,6 +68,7 @@ public:
         deviceId_ = deviceId;
         streamNumber_ = streamNumber;
         streamIndex_ = 0;
+        batchCopy_ = false;
         return Status::OK();
     }
 
@@ -90,7 +95,7 @@ public:
         deviceId_ = deviceId;
         streamNumber_ = 1;
         streamIndex_ = 0;
-        sdmaDirect_ = false;
+        batchCopy_ = true;
         return Status::OK();
     }
 
@@ -126,7 +131,7 @@ public:
         deviceId_ = deviceId;
         streamNumber_ = streamNumber;
         streamIndex_ = 0;
-        sdmaDirect_ = true;
+        batchCopy_ = true;
         return Status::OK();
     }
 
@@ -180,9 +185,9 @@ public:
                                     const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
-        if (sdmaDirect_) {
-            /* One shard-level dispatch: the SDMA stream builds the descriptors
-             * for the whole fragment list itself. */
+        if (batchCopy_) {
+            /* One shard-level dispatch: this stream builds the whole fragment
+             * list itself. */
             auto s = stream->HostToDeviceAsync(src, dst, sizes);
             if (s.Failure()) {
                 auto syncS = stream->Synchronized();
@@ -215,7 +220,7 @@ public:
                                    const std::vector<size_t>& sizes) noexcept
     {
         auto stream = NextStream();
-        if (sdmaDirect_) {
+        if (batchCopy_) {
             /* One shard-level dispatch; see HostToDeviceScatterAsync. */
             auto s = stream->DeviceToHostAsync(src, dst, sizes);
             if (s.Failure()) {
