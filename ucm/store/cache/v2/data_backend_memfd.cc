@@ -33,11 +33,9 @@ MemfdDataBackend::MemfdDataBackend(const std::string& domainId) : domainId_(doma
 
 MemfdDataBackend::~MemfdDataBackend() { Reset(); }
 
-Status MemfdDataBackend::Setup(int32_t deviceId, size_t nRanks, size_t rankBytes)
+Status MemfdDataBackend::Setup(const BackendOptions& options)
 {
-    (void)deviceId;
-    (void)nRanks;
-    (void)rankBytes;
+    (void)options;
     return Status::Error(kNotImplemented);
 }
 

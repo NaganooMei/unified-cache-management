@@ -56,7 +56,7 @@ public:
 
     virtual const char* Name() const = 0;
     /* Prepares backend-wide state (device binding, geometry bookkeeping). */
-    virtual Status Setup(int32_t deviceId, size_t nRanks, size_t rankBytes) = 0;
+    virtual Status Setup(const BackendOptions& options) = 0;
     /* Creates and maps the local rank's segment. */
     virtual Status BindLocal(size_t rank) = 0;
     /* Returns the handle to publish for the local segment. */

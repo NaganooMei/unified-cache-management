@@ -165,13 +165,16 @@ public:
     // Returns a failure status after releasing resources acquired by this call.
     // Ranks must set up concurrently: peer imports and the all-ranks-ready
     // barrier share timeoutMs; zero allows one read attempt per peer.
-    Status Setup(CtrlLayout& ctrl, const std::string& uniqueId, int32_t deviceId, size_t myRank,
-                 size_t slotSize, size_t nSlotsPerRank, size_t timeoutMs = 600 * 1000)
+    Status Setup(CtrlLayout& ctrl, const DataOptions& options)
     {
+        const size_t myRank = options.myRank;
+        const size_t slotSize = options.slotSize;
+        const size_t nSlotsPerRank = options.slotsPerRank;
+        const size_t timeoutMs = options.setupTimeoutMs;
         if (nSlotsPerRank_ != 0) {
             return Status::Error("cache2 data strategy is already initialized");
         }
-        if (uniqueId.empty()) { return Status::InvalidParam("cache2 uniqueId is empty"); }
+        if (options.domainId.empty()) { return Status::InvalidParam("cache2 uniqueId is empty"); }
         const size_t totalSlots = ctrl.SlotCount();
         const size_t nRanks = nSlotsPerRank != 0 ? totalSlots / nSlotsPerRank : 0;
         if (nRanks == 0 || myRank >= nRanks) {
@@ -180,11 +183,18 @@ public:
                 "slots_per_rank={}",
                 myRank, nRanks, totalSlots, nSlotsPerRank);
         }
-        auto backend = MakeBackend(uniqueId);
+        auto backend = MakeBackend(options.domainId);
         const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+        BackendOptions backendOptions;
+        backendOptions.deviceId = options.deviceId;
+        backendOptions.rankCount = nRanks;
+        backendOptions.rankBytes = slotSize * nSlotsPerRank;
+        backendOptions.requireHostDeviceAddress = options.requireHostDeviceAddress;
+        backendOptions.deadline = deadline;
+        /* localPlacement is filled once NUMA Resolve runs ahead of BindLocal. */
         Status status = Status::OK();
         try {
-            status = backend->Setup(deviceId, nRanks, slotSize * nSlotsPerRank);
+            status = backend->Setup(backendOptions);
             if (status.Success()) { status = backend->BindLocal(myRank); }
             if (status.Success()) { status = PublishLocal(ctrl, myRank, *backend); }
             if (status.Success()) {
@@ -202,7 +212,7 @@ public:
         }
         if (status.Failure()) {
             UC_ERROR("cache2 data setup failed: backend={} owner={} device={} status={}",
-                     backend->Name(), myRank, deviceId, status);
+                     backend->Name(), myRank, options.deviceId, status);
             return status;
         }
         slotSize_ = slotSize;
