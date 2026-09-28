@@ -2,17 +2,17 @@
 
 更新日期：2026-09-28。
 
-状态：A5 已比较稳定，直接在现有 `lzx/feature-a5` 分支补齐平台能力；尚未开始实现。详细约定见 [Cache 统一实现任务书（供编码 Agent 使用）](cache-platform-datastrategy-design.md)。
+状态：本地 `lzx/feature-a5` 已同步 upstream 至 `00291f98`（#1462、#1463）。上游已拆分 DataBackend，本方案的 Memfd、NUMA 和 SDMA 扩展尚未实现。详细约定见 [Cache 统一实现任务书（供编码 Agent 使用）](cache-platform-datastrategy-design.md)。
 
 ## 目标
 
-直接保留 A5 分支已有的 connector、控制区/数据区分离和乐观无锁查找，在同一缓存核心上补齐普通内存、NUMA 和 SDMA 能力。平台内存差异集中在 DataStrategy；完成验证后再单独处理合入 develop。
+直接保留 A5 分支已有的 connector、控制区/数据区分离和乐观无锁查找，在同一缓存核心上补齐普通内存、NUMA 和 SDMA 能力。初始化由 DataStrategy 统一编排，平台内存差异集中在 DataBackend；完成验证后再单独处理合入 develop。
 
 ## 要做的工作
 
-1. **隔离 DataStrategy 实现。** 同步最新 feature_a5 后直接继续开发，抽出公共接口和 HAL 实现，通过构建时 PLATFORM 选择。保留现有 Buffer、控制区、缓存协议，以及 connector 的 unique ID 和 MLA dump 按模均匀分工。
-2. **补普通内存 DataStrategy。** 非 A5 使用 memfd_create、ftruncate、mmap 创建共享数据内存，补齐 FD 传递、跨进程映射，以及传输路径需要的设备注册、Host/Device 地址和释放逻辑；A5 继续使用 HAL 数据实现。
-3. **统一自动 NUMA 分配。** HAL 和普通内存 DataStrategy 共用节点选择逻辑：检测到设备 NUMA 亲和性就使用亲和内存，检测不到则按 rank-partition 的方式选择 `nodes[本机 worker rank % nodes.size()]`，整个本地数据段放在该节点；不提供用户 policy 配置。按当前部署约定，A5/A2/H100 对应亲和分配，A3 对应确定性轮转；最终以实际探测结果为准。普通内存先绑定再触页、注册；A5 在 HAL 分配时落实同一选择结果。
+1. **沿用上游 DataBackend 架构。** 保留统一 DataStrategy 的创建、发布、导入及 ready 屏障流程，平台差异放在 backend。保留 Buffer、控制区、缓存协议，以及 connector 的 unique ID 和 MLA dump 分工，不重复拆两套 DataStrategy。
+2. **新增 MemfdDataBackend。** 用户确认保留 memfd_create 要求；在 #1462 接口下补 FD 传递、跨进程映射、注册和释放。已有 PosixShmDataBackend 保留作测试/参考；目标平台选择为 A5 → HAL、ascend/A3/CUDA/simu → Memfd。当前上游注释了 A5 HAL 开关且部分平台仍构建旧核心，需要显式修正构建入口。设备别名用新增接口提供，保留原有 Host/Device 地址互斥语义。
+3. **统一自动 NUMA 分配。** DataStrategy 生成分配计划，HAL/Memfd backend 执行：检测到设备亲和性就使用亲和内存，检测不到则选择 `nodes[本机 worker rank % nodes.size()]`，整个本地数据段放在该节点；不提供用户 policy 配置。A5/A2/H100 对应亲和分配，A3 对应确定性轮转，最终以实际探测结果为准。Memfd 先绑定再触页、注册；A5 在 HAL 分配时落实目标节点。
 4. **支持配置 SDMA stream 数。** 参考 develop 已有 SDMA Direct 适配接入 v2，配置贯通 connector、store 和 stream 创建/使用逻辑。普通拷贝默认 4、SDMA Direct 默认 16（Load/Dump 各 16 条），显式配置按指定数量执行；核对 Load/Dump 的分配与同步。
 
 ## 已确认的 rank 处理
@@ -23,7 +23,9 @@ feature_a5@3bf8dec4 的实现位于 ucm/store/cache/v2，已使用 myRank = devi
 
 ## 实施与验证
 
-在现有 A5 开发分支同步最新 feature_a5 → 隔离 HAL/公共接口 → 补齐 Memfd → 接入 NUMA 和 SDMA stream 配置 → 验证 A5 和非 A5 平台 → 后续单独处理 develop 合入。不要求新建 develop 功能分支。
+在现有 A5 开发分支同步最新 feature_a5 → 扩展已有 DataBackend 接口并新增 Memfd backend → 接入 NUMA 和 SDMA stream 配置 → 验证 A5 和非 A5 平台 → 后续单独处理 develop 合入。不要求新建 develop 功能分支。
+
+保留 #1463 独立 Cache pipeline；独立 Store 调用也要传入 NUMA 需要的设备提示/本机 worker rank，不依赖 vLLM connector 必然存在。保留 POSIX backend 原测试，另补 Memfd 的 FD 传递、ready 屏障和清理测试。
 
 扩展时核对旧配置，不能静默忽略；合入 develop 前完成商用兼容验证，重点包括私有/共享模式、容量及 FA/WA 拆分、DP/TP/PP 与多机部署、已有传输路径、初始化和失败清理。MLA dump 均匀分工与数据段实际均匀分布分别验证。
 
