@@ -86,4 +86,9 @@ public:
 
 }  // namespace UC::Cache2
 
+/* simu compiles the cc and v2 cores into one library, because the shared
+ * ucmstore.test binary runs both suites. Only one of them may export
+ * MakeCacheStore, and cc's is unguarded, so v2 steps aside in test builds. */
+#ifndef UCM_BUILD_TESTS
 extern "C" UC::StoreV1* MakeCacheStore() { return new UC::Cache2::Store(); }
+#endif
