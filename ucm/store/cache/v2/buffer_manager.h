@@ -96,7 +96,8 @@ public:
     }
     void Prefetch(const Detail::BlockId* blocks, size_t num)
     {
-        buffer_.Touch(blocks, num);
+        // Match cache/cc: avoid scanning every cache shard for scheduler hotness hints.
+        // buffer_.Touch(blocks, num);
         if (backend_) { backend_->Prefetch(blocks, num); }
     }
 
