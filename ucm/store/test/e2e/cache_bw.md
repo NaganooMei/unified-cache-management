@@ -1,9 +1,47 @@
-# Cache2 bandwidth benchmark
+# Cache bandwidth benchmark
 
 `cache_bw.py` replaces `cache_fake_bw.py` and `cache_posix_bw.py` with one load
 benchmark. It uses no Fake backend, no `cache_load_backend_only`, and no CPU
 affinity code. Run it with a built/installed UCM and the matching Torch runtime.
 Logical devices `0 .. workers-1` participate in one local Cache domain.
+
+## Comparing with develop's legacy Cache
+
+The default `--cache-core v2` is for a5 and the new Cache. For develop's old
+`cache/cc` implementation, copy this script to `/tmp/cache_bw.py`, build/install
+develop in the same Python environment, and run:
+
+```bash
+python /tmp/cache_bw.py \
+  --mode cache-hit --cache-core legacy --model minimax-m2.7-tp8 \
+  --blocks 512 --layout layerwise --cache-capacity-gb 64 \
+  --cache-copy plain --cache-streams 4 \
+  --epochs 30 --warmup 3 --epoch-interval-ms 15
+```
+
+Run the same command against a5/new Cache with `--cache-core v2`. To measure
+Posix hits, use `--mode posix-hit --storage-backends /path/to/test-disk` with
+either core. The flag adapts benchmark configuration; the installed UCM library
+still determines which Cache implementation runs.
+
+`--cache-capacity-gb` always means the total capacity across this benchmark's
+workers. Legacy GQA translates 64 GiB / 8 workers into 8 GiB per private buffer,
+and uses `local_rank_size=1` as develop's GQA connector does. Its total capacity
+must be divisible by the worker count. Legacy MLA keeps one shared buffer with
+the specified total capacity and all workers in its dispatch domain.
+
+Legacy cache-hit needs `Cache|Empty` because its Cache requires a backend. Data
+is still prefilled into Cache; any backend read during measured or warmup loads
+fails the run rather than counting an Empty load as a Cache hit. Posix mode
+continues to use a separate Posix seed group and fresh `Cache|Posix` workers.
+Task shapes, prepared buffers, barriers, pauses, and C++ metrics timing are the
+same for both cores.
+
+Legacy Cache cannot use `--cache-numa-nodes`; omit it. Its allocation follows the
+old runtime implementation. Legacy SDMA always uses one stream; for SDMA on both
+cores use `--cache-copy sdma --cache-streams 1`. Plain copies support the stream
+count above. For a full A3 comparison using each version's defaults, omit the
+stream override and check the effective stream count in each startup log.
 
 ## Cache hits
 
@@ -14,7 +52,7 @@ python ucm/store/test/e2e/cache_bw.py \
   --cache-capacity-gb 32 --cache-copy sdma
 ```
 
-The pipeline is just `Cache`. Workers first dump one complete request into Cache,
+The v2 pipeline is just `Cache`. Workers first dump one complete request into Cache,
 then repeatedly load its keys. MLA dump blocks are striped across workers by
 absolute block index; GQA workers dump/load private keys. Prefill bandwidth is
 printed separately with `source=python_api` and excluded from load statistics. An undersized Cache is

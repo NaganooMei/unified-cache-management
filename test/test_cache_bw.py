@@ -294,6 +294,78 @@ class CacheBandwidthTest(unittest.TestCase):
         self.assertEqual(seed["block_size"], load["block_size"])
         self.assertFalse(seed["posix_gc_enable"])
 
+    def test_legacy_gqa_uses_equal_private_capacity_and_dispatch_domains(self):
+        args, workload = self.parse(
+            "cache-hit",
+            "--model",
+            "minimax-m2.7-tp8",
+            "--cache-core",
+            "legacy",
+            "--cache-capacity-gb",
+            "64",
+            "--cache-copy",
+            "plain",
+            "--cache-streams",
+            "4",
+        )
+        for rank in range(args.workers):
+            config = bw.store_config(args, workload, "run", rank)
+            self.assertEqual(config["device_id"], rank)
+            self.assertEqual(config["store_pipeline"], "Cache|Empty")
+            self.assertEqual(config["cache_buffer_capacity_gb"], 8)
+            self.assertEqual(config["local_rank_size"], 1)
+            self.assertEqual(config["cache_load_exclusive_buffer_number"], 128)
+            self.assertFalse(config["share_buffer_enable"])
+            self.assertEqual(config["cache_stream_number"], 4)
+            self.assertFalse(any("numa" in key for key in config))
+        plan = bw.describe(args, workload)
+        self.assertEqual(plan["cache_capacity_gib"], 64)
+        self.assertEqual(plan["cache_config_capacity_gib"], 8)
+        self.assertEqual(plan["pipeline"], "Cache|Empty")
+
+    def test_legacy_mla_keeps_shared_capacity_and_all_ranks(self):
+        args, workload = self.parse("cache-hit", "--cache-core", "legacy")
+        config = bw.store_config(args, workload, "run", 15)
+        self.assertEqual(config["cache_buffer_capacity_gb"], 32)
+        self.assertEqual(config["local_rank_size"], 16)
+        self.assertEqual(config["cache_load_exclusive_buffer_number"], 1024)
+        self.assertTrue(config["share_buffer_enable"])
+
+    def test_legacy_posix_preserves_seed_and_cold_load_backends(self):
+        args, workload = self.parse(
+            "posix-hit", "--model", "minimax-m2.7-tp8", "--cache-core", "legacy"
+        )
+        seed = bw.store_config(args, workload, "run", 3, seed=True)
+        load = bw.store_config(args, workload, "run", 3)
+        self.assertEqual(seed["store_pipeline"], "Posix")
+        self.assertNotIn("cache_buffer_capacity_gb", seed)
+        self.assertEqual(load["store_pipeline"], "Cache|Posix")
+        self.assertEqual(seed["storage_backends"], load["storage_backends"])
+        self.assertEqual(load["cache_buffer_capacity_gb"], 4)
+        self.assertNotEqual(seed["unique_id"], load["unique_id"])
+
+    def test_legacy_rejects_ineffective_or_unequal_configuration(self):
+        cases = [
+            ["--cache-numa-nodes", "0,0,2,2,4,4,6,6"],
+            ["--cache-capacity-gb", "65"],
+            ["--cache-copy", "sdma", "--cache-streams", "4"],
+            ["--cache-capacity-gb", "8", "--io-size", "2M", "--blocks", "1"],
+        ]
+        for case in cases:
+            with (
+                self.subTest(case=case),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                self.parse(
+                    "cache-hit",
+                    "--model",
+                    "minimax-m2.7-tp8",
+                    "--cache-core",
+                    "legacy",
+                    *case,
+                )
+
     def test_mla_ownership_is_disjoint_complete_and_shared_keys_match(self):
         args, _ = self.parse()
         pieces = [set(bw.owned_indexes(args, rank)) for rank in range(16)]
@@ -449,6 +521,18 @@ class CacheBandwidthTest(unittest.TestCase):
                 )
                 self.assertEqual(metrics.reads, 1 + warmup + args.epochs)
                 self.assertIn("source=cache_load_duration_ms", output.getvalue())
+
+    def test_cache_hit_rejects_backend_reads_including_empty_backend(self):
+        metrics = mock.Mock()
+        metrics.get_all_stats_and_clear.return_value = (
+            {"cache_load_backend_shards_total": 1},
+            {},
+            {},
+        )
+        with self.assertRaisesRegex(RuntimeError, "not fully resident"):
+            bw.collect_load_metrics(
+                metrics, BOUNDS, 1, 4096, 1000, expect_cache_hit=True
+            )
 
     def test_metrics_drain_merges_epilog_split_across_snapshots(self):
         metrics = mock.Mock()
