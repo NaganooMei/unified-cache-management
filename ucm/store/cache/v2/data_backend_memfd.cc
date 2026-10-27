@@ -68,8 +68,19 @@ constexpr size_t kHugeTlb1GBytes = 1ULL << 30;
 #ifndef UCM_RUNTIME_ASCEND_A5
 #define UCM_RUNTIME_ASCEND_A5 0
 #endif
+#ifndef UCM_RUNTIME_ASCEND_FAMILY
+#define UCM_RUNTIME_ASCEND_FAMILY 0
+#endif
+#ifndef UCM_RUNTIME_ASCEND_SDMA_DIRECT
+#define UCM_RUNTIME_ASCEND_SDMA_DIRECT 0
+#endif
 
 constexpr bool kRegisterHostMemory = UCM_RUNTIME_ASCEND_A5 == 0;
+/* The plain Ascend build (A2) follows the inherited kernel memory policy.
+ * Use build capabilities, not the configurable copy mode, so A3 keeps its
+ * placement even when cache_sdma_direct is explicitly disabled. */
+constexpr bool kSkipNumaBinding =
+    UCM_RUNTIME_ASCEND_FAMILY && !UCM_RUNTIME_ASCEND_SDMA_DIRECT && !UCM_RUNTIME_ASCEND_A5;
 
 /* Deterministic across processes, unlike std::hash. */
 uint64_t HashName(const std::string& name)
@@ -347,10 +358,13 @@ Status MemfdDataBackend::PlaceAndRegister(size_t rank)
 {
     auto& segment = segments_[rank];
     const auto bytes = segment.mem->Size();
-    /* Placement has to be settled before the pages are touched, and touching has
-     * to happen before registration (which pins them). The bind itself is
-     * skipped only while no plan has been resolved yet. */
-    if (localPlacement_.node < 0) {
+    /* Bind before first touch on platforms that enforce NUMA placement; A2
+     * leaves placement to the inherited kernel policy. Registration stays last
+     * because it pins the pages. */
+    if (kSkipNumaBinding) {
+        UC_INFO("memfd A2 NUMA binding disabled: device={} rank={} placement=kernel-policy",
+                deviceId_, rank);
+    } else if (localPlacement_.node < 0) {
         UC_WARN(
             "memfd segment has no NUMA plan, leaving placement to the kernel: device={} "
             "rank={}",
