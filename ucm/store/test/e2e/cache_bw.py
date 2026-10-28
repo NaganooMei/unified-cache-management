@@ -289,6 +289,7 @@ def store_config(args, workload, run_id, rank, *, seed=False):
         ),
         "unique_id": run_id + ("_seed" if seed else "_load"),
         "device_id": rank,
+        "io_direct": args.direct_io,
         "tensor_size_list": list(workload.tensor_sizes),
         "shard_size": workload.shard_size,
         "block_size": workload.block_size,
@@ -298,7 +299,6 @@ def store_config(args, workload, run_id, rank, *, seed=False):
         config.update(
             storage_backends=args.storage_backends,
             tensor_size=workload.shard_size if seed else 0,
-            io_direct=args.direct_io,
             posix_io_engine=args.posix_engine,
             posix_data_trans_concurrency=args.posix_concurrency,
             posix_lookup_concurrency=args.posix_lookup_concurrency,
@@ -843,7 +843,7 @@ def describe(args, workload):
             else "Posix seed -> fresh Cache|Posix workers"
         ),
         "posix_engine": args.posix_engine if args.mode == "posix-hit" else None,
-        "direct_io": args.direct_io if args.mode == "posix-hit" else None,
+        "direct_io": args.direct_io,
     }
 
 

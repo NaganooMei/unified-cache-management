@@ -294,6 +294,34 @@ class CacheBandwidthTest(unittest.TestCase):
         self.assertEqual(seed["block_size"], load["block_size"])
         self.assertFalse(seed["posix_gc_enable"])
 
+    def test_cache_hit_applies_direct_io_for_both_cache_cores(self):
+        for core in ("legacy", "v2"):
+            for direct_io in (True, False):
+                with self.subTest(core=core, direct_io=direct_io):
+                    args, workload = self.parse(
+                        "cache-hit",
+                        "--cache-core",
+                        core,
+                        "--model",
+                        "dsv4",
+                        "--workers",
+                        "1",
+                        "--worker-mode",
+                        "gqa",
+                        "--cache-capacity-gb",
+                        "16",
+                        "--cache-copy",
+                        "plain",
+                        "--cache-streams",
+                        "4",
+                        "--direct-io" if direct_io else "--no-direct-io",
+                    )
+                    config = bw.store_config(args, workload, "run", 0)
+                    self.assertIs(config["io_direct"], direct_io)
+                    self.assertFalse(config["share_buffer_enable"])
+                    self.assertEqual(config["cache_stream_number"], 4)
+                    self.assertIs(bw.describe(args, workload)["direct_io"], direct_io)
+
     def test_legacy_gqa_uses_equal_private_capacity_and_dispatch_domains(self):
         args, workload = self.parse(
             "cache-hit",
