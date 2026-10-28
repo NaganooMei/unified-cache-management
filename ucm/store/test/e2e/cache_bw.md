@@ -43,7 +43,9 @@ cores use `--cache-copy sdma --cache-streams 1`. Plain copies support the stream
 count above. For a full A3 comparison using each version's defaults, omit the
 stream override and check the effective stream count in each startup log.
 
-For an A5 single-worker comparison with direct IO and buffer sharing disabled:
+For a DeepSeek V4 FA comparison on A5 with one worker, four streams, direct IO
+disabled, and buffer sharing disabled, first copy this script to `/tmp/cache_bw.py`.
+Build/install develop, then run:
 
 ```bash
 python /tmp/cache_bw.py \
@@ -54,8 +56,21 @@ python /tmp/cache_bw.py \
   --epochs 50 --warmup 5 --epoch-interval-ms 15
 ```
 
-Install each branch's A5 build separately; use `--cache-core v2` for the new
-Cache. `--worker-mode gqa` disables buffer sharing without changing the V4 FA
+Build/install the PR branch's A5 build, then run the same workload with the new
+Cache:
+
+```bash
+python /tmp/cache_bw.py \
+  --mode cache-hit --cache-core v2 \
+  --model dsv4 --workers 1 --worker-mode gqa \
+  --blocks 512 --cache-capacity-gb 16 \
+  --no-direct-io --cache-copy plain --cache-streams 4 \
+  --epochs 50 --warmup 5 --epoch-interval-ms 15
+```
+
+Install each branch's A5 build separately; `--cache-core` adapts benchmark
+configuration and does not select the installed library.
+`--worker-mode gqa` disables buffer sharing without changing the V4 FA
 tensor layout. `--no-direct-io` also applies in cache-hit mode: legacy Cache
 uses `aclrtMallocHost`; the new A5 Cache uses memfd mappings without host
 registration. Confirm `register_host=false` in the new Cache's startup log.
