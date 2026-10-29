@@ -72,16 +72,21 @@ def test_installed_core_not_platform_environment(version, expected, monkeypatch)
     "platform", ["ascend", "ascend-a3", "ascend-a5", "cuda", "maca", "musa", "simu"]
 )
 @pytest.mark.parametrize("unit_tests", [False, True])
+@pytest.mark.parametrize("a5_core", [None, "cc", "v2"])
 def test_native_build_selects_cache_core_and_matching_tests(
-    platform, unit_tests, tmp_path
+    platform, unit_tests, a5_core, tmp_path, monkeypatch
 ):
+    if a5_core is None:
+        monkeypatch.delenv("UCM_A5_CACHE_CORE", raising=False)
+    else:
+        monkeypatch.setenv("UCM_A5_CACHE_CORE", a5_core)
     cmake = shutil.which("cmake")
     if cmake is None:
         pytest.skip("CMake is needed to check build selection")
     source = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     marker = "set(UCM_RUNTIME_ASCEND_FAMILY OFF)"
     selection = marker + source.split(marker, 1)[1].split("if(BUILD_UNIT_TESTS)", 1)[0]
-    core = "cc" if platform == "ascend-a5" else "v2"
+    core = (a5_core or "cc") if platform == "ascend-a5" else "v2"
     test_source = (ROOT / "ucm/store/test/CMakeLists.txt").read_text(encoding="utf-8")
     marker = "    get_target_property(CACHE_CORE cachestore UCM_CACHE_CORE)"
     filters = (

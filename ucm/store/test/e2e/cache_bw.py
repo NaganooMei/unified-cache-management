@@ -89,6 +89,8 @@ def parse_args(argv=None):
     parser.add_argument("--model", choices=MODEL_PROFILES, default="glm-5.1")
     parser.add_argument("--device", choices=("npu", "cuda"), default="npu")
     parser.add_argument("--workers", type=positive_int)
+    parser.add_argument("--dp-size", type=positive_int, default=1)
+    parser.add_argument("--tp-size", type=positive_int)
     parser.add_argument("--blocks", type=positive_int, default=512)
     parser.add_argument("--layers", type=positive_int)
     parser.add_argument(
@@ -130,6 +132,12 @@ def parse_args(argv=None):
     parser.add_argument("--posix-concurrency", type=positive_int, default=32)
     parser.add_argument("--posix-lookup-concurrency", type=positive_int, default=16)
     parser.add_argument(
+        "--max-storage-gb",
+        type=positive_int,
+        default=500,
+        help="Posix storage budget in decimal GB, including existing filesystem usage",
+    )
+    parser.add_argument(
         "--direct-io", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--timeout-ms", type=positive_int, default=60000)
@@ -165,7 +173,16 @@ def parse_args(argv=None):
 
 def resolve_workload(args):
     tensors, layers, workers, mode = MODEL_PROFILES[args.model]
-    args.workers = args.workers or workers
+    if args.tp_size is not None:
+        expected = args.dp_size * args.tp_size
+        if args.workers is not None and args.workers != expected:
+            raise ValueError("--workers must equal --dp-size * --tp-size")
+        args.workers = expected
+    else:
+        args.workers = args.workers or workers
+        if args.workers % args.dp_size:
+            raise ValueError("--workers must be divisible by --dp-size")
+        args.tp_size = args.workers // args.dp_size
     args.layers = args.layers or layers
     args.worker_mode = args.worker_mode or mode
     args.layout = args.layout or ("whole-block" if args.layers == 1 else "layerwise")
@@ -184,7 +201,43 @@ def resolve_workload(args):
 
 
 def reserved_slots(args):
-    return align_up(1024, args.workers)
+    return align_up(1024, args.tp_size) * args.dp_size
+
+
+def storage_plan(args, workload):
+    if args.mode != "posix-hit":
+        return 0, 0
+    copies = args.dp_size if workload.shared else args.workers
+    files = args.blocks * (args.warmup + args.epochs) * copies
+    data_bytes = workload.block_size * files
+    # Reserve metadata/directory space in addition to page-aligned file data.
+    return data_bytes, data_bytes + files * (64 << 10)
+
+
+def check_storage_space(args, workload):
+    _, estimate = storage_plan(args, workload)
+    limit = args.max_storage_gb * 1_000_000_000
+    for directory in args.storage_backends:
+        root = Path(directory).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(root)
+        if estimate > usage.free or usage.used + estimate > limit:
+            raise RuntimeError(
+                f"insufficient storage budget at {root}: used={usage.used} "
+                f"planned_with_metadata={estimate} free={usage.free} limit={limit}; "
+                "reduce --epochs/--warmup or remove old test data"
+            )
+        print(
+            f"Storage check: root={root} used={usage.used} "
+            f"planned_with_metadata={estimate} limit={limit}",
+            flush=True,
+        )
+        if os.name == "posix" and root.is_relative_to(Path("/dev/shm")):
+            print(
+                "Storage note: /dev/shm is normally tmpfs; this measures the "
+                "memory-filesystem Posix path. O_DIRECT does not make it a cold-disk test.",
+                flush=True,
+            )
 
 
 def validate(args, workload):
@@ -198,8 +251,8 @@ def validate(args, workload):
         raise ValueError("warmup and epoch interval must be non-negative")
     if args.cache_streams is not None and args.cache_streams > 32:
         raise ValueError("cache streams must be in [1, 32]")
-    if args.mode == "posix-hit" and args.posix_engine == "aio" and not args.direct_io:
-        raise ValueError("Posix aio requires --direct-io")
+    if args.cache_capacity_gb % args.dp_size:
+        raise ValueError("--cache-capacity-gb must be divisible by --dp-size")
     nodes = args.cache_numa_nodes
     args.cache_numa_nodes = (
         None if nodes is None else [int(node) for node in nodes.split(",")]
@@ -224,7 +277,7 @@ def validate(args, workload):
     reserved = reserved_slots(args)
     per_rank = slots // args.workers
     owned_blocks = (
-        math.ceil(args.blocks / args.workers) if workload.shared else args.blocks
+        math.ceil(args.blocks / args.tp_size) if workload.shared else args.blocks
     )
     if slots < 2 * reserved:
         raise ValueError("cache capacity is too small for Cache's reserved slots")
@@ -241,10 +294,14 @@ def validate(args, workload):
         raise ValueError(
             "cache capacity cannot keep one complete request resident; increase --cache-capacity-gb"
         )
+    if storage_plan(args, workload)[1] > args.max_storage_gb * 1_000_000_000:
+        raise ValueError(
+            "Posix seed data exceeds --max-storage-gb; reduce --epochs/--warmup"
+        )
 
 
 def block_ids(args, run_id, record, rank):
-    key_rank = 0 if args.worker_mode == "mla" else rank
+    key_rank = rank // args.tp_size if args.worker_mode == "mla" else rank
     return [
         hashlib.blake2b(
             f"{run_id}:{key_rank}:{record}:{block}".encode(), digest_size=16
@@ -255,7 +312,7 @@ def block_ids(args, run_id, record, rank):
 
 def owned_indexes(args, rank):
     return (
-        range(rank, args.blocks, args.workers)
+        range(rank % args.tp_size, args.blocks, args.tp_size)
         if args.worker_mode == "mla"
         else range(args.blocks)
     )
@@ -276,6 +333,7 @@ def sample_byte(block_id, shard):
 
 def store_config(args, workload, run_id, rank, *, seed=False):
     legacy = args.cache_core == "legacy"
+    domain_id = run_id + (f"_dp{rank // args.tp_size}" if args.dp_size > 1 else "")
     config = {
         "store_pipeline": (
             "Posix"
@@ -286,7 +344,7 @@ def store_config(args, workload, run_id, rank, *, seed=False):
                 else "Cache|Posix"
             )
         ),
-        "unique_id": run_id + ("_seed" if seed else "_load"),
+        "unique_id": domain_id + ("_seed" if seed else "_load"),
         "device_id": rank,
         "io_direct": args.direct_io,
         "tensor_size_list": list(workload.tensor_sizes),
@@ -306,17 +364,17 @@ def store_config(args, workload, run_id, rank, *, seed=False):
     if seed:
         return config
     config.update(
-        local_rank_size=args.workers,
+        local_rank_size=args.tp_size,
         share_buffer_enable=workload.shared,
-        cache_buffer_capacity_gb=args.cache_capacity_gb,
-        cache_load_exclusive_buffer_number=reserved_slots(args),
+        cache_buffer_capacity_gb=args.cache_capacity_gb // args.dp_size,
+        cache_load_exclusive_buffer_number=reserved_slots(args) // args.dp_size,
     )
     if legacy:
         if not workload.shared:
             # Legacy GQA has an independent buffer and dispatch domain per rank.
             config["local_rank_size"] = 1
-            config["cache_buffer_capacity_gb"] //= args.workers
-            config["cache_load_exclusive_buffer_number"] //= args.workers
+            config["cache_buffer_capacity_gb"] //= args.tp_size
+            config["cache_load_exclusive_buffer_number"] //= args.tp_size
     else:
         config.update(
             cache_fallback_numa_rank=rank,
@@ -800,7 +858,7 @@ def print_summary(args, workload, results):
 
 def describe(args, workload):
     records = args.warmup + args.epochs if args.mode == "posix-hit" else 1
-    copies = 1 if workload.shared else args.workers
+    data_bytes, peak_bytes = storage_plan(args, workload)
     config = store_config(args, workload, "preview", 0)
     return {
         "mode": args.mode,
@@ -809,6 +867,9 @@ def describe(args, workload):
         "scope": "FA-only (WA excluded)" if args.model == "dsv4" else "KV",
         "device": args.device,
         "workers": args.workers,
+        "dp_size": args.dp_size,
+        "tp_size": args.tp_size,
+        "share_buffer_enable": workload.shared,
         "layout": args.layout,
         "blocks_per_rank_load": args.blocks,
         "tensor_count_per_task_block": len(workload.tensor_sizes),
@@ -820,7 +881,9 @@ def describe(args, workload):
         * args.blocks
         * workload.shards,
         "unique_seed_records": records,
-        "seed_storage_bytes": workload.block_size * args.blocks * records * copies,
+        "seed_storage_bytes": data_bytes,
+        "storage_estimate_with_metadata_bytes": peak_bytes,
+        "storage_limit_bytes": args.max_storage_gb * 1_000_000_000,
         "cache_capacity_gib": args.cache_capacity_gb,
         "cache_config_capacity_gib": config["cache_buffer_capacity_gb"],
         "cache_local_rank_size": config["local_rank_size"],
@@ -851,6 +914,8 @@ def main(argv=None):
     print(json.dumps(describe(args, workload), indent=2), flush=True)
     if args.dry_run:
         return
+    if args.mode == "posix-hit":
+        check_storage_space(args, workload)
     context = multiprocessing.get_context("spawn")
     run_id = secrets.token_hex(12)
     results = create_results(context, args, workload)

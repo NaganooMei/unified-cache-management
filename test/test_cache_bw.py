@@ -237,6 +237,136 @@ class CacheBandwidthTest(unittest.TestCase):
         self.assertEqual(workload.shards, 78)
         self.assertEqual(args.workers, 16)
 
+    def test_dp4_tp1_keeps_four_independent_cache_domains(self):
+        for core, mode in (("legacy", "gqa"), ("v2", "mla")):
+            args, workload = self.parse(
+                "cache-hit",
+                "--model",
+                "dsv4",
+                "--dp-size",
+                "4",
+                "--tp-size",
+                "1",
+                "--cache-core",
+                core,
+                "--worker-mode",
+                mode,
+                "--cache-capacity-gb",
+                "64",
+            )
+            configs = [
+                bw.store_config(args, workload, "run", rank) for rank in range(4)
+            ]
+            self.assertEqual(args.workers, 4)
+            self.assertEqual(len({c["unique_id"] for c in configs}), 4)
+            self.assertEqual(
+                len({bw.block_ids(args, "run", 0, r)[0] for r in range(4)}), 4
+            )
+            for rank, config in enumerate(configs):
+                self.assertEqual(config["device_id"], rank)
+                self.assertEqual(config["local_rank_size"], 1)
+                self.assertEqual(config["cache_buffer_capacity_gb"], 16)
+                self.assertEqual(config["cache_load_exclusive_buffer_number"], 1024)
+                self.assertEqual(len(bw.owned_indexes(args, rank)), 512)
+
+    def test_dp2_tp2_shares_only_inside_each_dp(self):
+        args, workload = self.parse("cache-hit", "--dp-size", "2", "--tp-size", "2")
+        ids = [bw.block_ids(args, "run", 0, r) for r in range(4)]
+        self.assertEqual(ids[0], ids[1])
+        self.assertEqual(ids[2], ids[3])
+        self.assertTrue(set(ids[0]).isdisjoint(ids[2]))
+        for first in (0, 2):
+            pieces = [set(bw.owned_indexes(args, first + r)) for r in range(2)]
+            self.assertEqual(set.union(*pieces), set(range(512)))
+            self.assertFalse(pieces[0] & pieces[1])
+        configs = [bw.store_config(args, workload, "run", r) for r in range(4)]
+        self.assertEqual(configs[0]["unique_id"], configs[1]["unique_id"])
+        self.assertNotEqual(configs[0]["unique_id"], configs[2]["unique_id"])
+        self.assertEqual(configs[2]["local_rank_size"], 2)
+        self.assertEqual(configs[2]["cache_fallback_numa_rank"], 2)
+        self.assertEqual(configs[2]["cache_fallback_numa_rank_count"], 4)
+
+    def test_aio_allows_buffered_malloc_host_and_direct_shared_mmap(self):
+        plans = []
+        for core, worker_mode, direct in (
+            ("legacy", "gqa", False),
+            ("v2", "mla", True),
+        ):
+            args, workload = self.parse(
+                "posix-hit",
+                "--model",
+                "glm-5.2",
+                "--dp-size",
+                "1",
+                "--tp-size",
+                "8",
+                "--cache-core",
+                core,
+                "--worker-mode",
+                worker_mode,
+                "--cache-capacity-gb",
+                "64",
+                "--epochs",
+                "5",
+                "--warmup",
+                "1",
+                "--posix-engine",
+                "aio",
+                "--direct-io" if direct else "--no-direct-io",
+            )
+            for seed in (True, False):
+                config = bw.store_config(args, workload, "run", 3, seed=seed)
+                self.assertIs(config["io_direct"], direct)
+                self.assertEqual(config["posix_io_engine"], "aio")
+            config = bw.store_config(args, workload, "run", 3)
+            self.assertIs(config["share_buffer_enable"], core == "v2")
+            self.assertEqual(config["cache_buffer_capacity_gb"], 64 if direct else 8)
+            plans.append(bw.describe(args, workload))
+        self.assertEqual(
+            plans[0]["seed_storage_bytes"], 8 * plans[1]["seed_storage_bytes"]
+        )
+        self.assertEqual(
+            plans[0]["h2d_bytes_per_rank_request"],
+            plans[1]["h2d_bytes_per_rank_request"],
+        )
+
+    def test_storage_budget_rejects_oversized_seed_before_launch(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.parse(
+                "posix-hit",
+                "--model",
+                "glm-5.2",
+                "--workers",
+                "8",
+                "--worker-mode",
+                "gqa",
+                "--cache-core",
+                "legacy",
+                "--cache-capacity-gb",
+                "64",
+                "--epochs",
+                "20",
+            )
+        args, workload = self.small("posix-hit")
+        with tempfile.TemporaryDirectory() as directory:
+            args.storage_backends = [directory]
+            usage = mock.Mock(free=10**12, used=500_000_000_000)
+            with mock.patch.object(bw.shutil, "disk_usage", return_value=usage):
+                with self.assertRaisesRegex(RuntimeError, "storage budget"):
+                    bw.check_storage_space(args, workload)
+
+    def test_inconsistent_topology_and_capacity_are_rejected(self):
+        for options in (
+            ["--dp-size", "4", "--tp-size", "1", "--workers", "8"],
+            ["--dp-size", "3", "--workers", "8"],
+            ["--dp-size", "4", "--tp-size", "1", "--cache-capacity-gb", "65"],
+        ):
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                self.parse("cache-hit", "--model", "dsv4", *options)
+
     def test_glm_whole_block_and_single_layer(self):
         _, whole = self.parse(
             "cache-hit", "--layout", "whole-block", "--cache-capacity-gb", "64"
@@ -437,7 +567,6 @@ class CacheBandwidthTest(unittest.TestCase):
             ["--cache-streams", "33"],
             ["--epoch-interval-ms", "nan"],
             ["--cache-numa-nodes", "0,1"],
-            ["--posix-engine", "aio", "--no-direct-io"],
             ["--io-size", "0"],
             ["--tensor-sizes", "4K,garbage"],
             ["--cache-capacity-gb", "1", "--blocks", "100000"],
@@ -739,6 +868,7 @@ class CacheBandwidthTest(unittest.TestCase):
                 mock.patch.object(
                     bw, "run_group", side_effect=RuntimeError("seed failure")
                 ),
+                mock.patch.object(bw, "check_storage_space"),
                 contextlib.redirect_stdout(io.StringIO()),
                 self.assertRaisesRegex(RuntimeError, "seed failure"),
             ):
@@ -752,6 +882,7 @@ class CacheBandwidthTest(unittest.TestCase):
                 mock.patch.object(
                     bw, "run_group", side_effect=RuntimeError("seed failure")
                 ),
+                mock.patch.object(bw, "check_storage_space"),
                 contextlib.redirect_stdout(io.StringIO()),
                 self.assertRaisesRegex(RuntimeError, "seed failure"),
             ):
@@ -793,6 +924,7 @@ class CacheBandwidthTest(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             mock.patch.object(bw, "parse_args", return_value=(args, workload)),
             mock.patch.object(bw, "run_group", side_effect=run_group),
+            mock.patch.object(bw, "check_storage_space"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             args.storage_backends = [directory]
