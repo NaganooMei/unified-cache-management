@@ -117,8 +117,18 @@ python -c "from ucm.store.cache.capabilities import cache_core_version; print(ca
 ```
 
 版本应输出 `2`。启动日志应包含 `register_host=false`。
-记录实际页类型和 NUMA 分配；memfd 会按现有策略尝试大页并回退。
+记录实际页类型；memfd 会按现有策略尝试大页并回退。
 以下 `--worker-mode mla` 开启共享 key 和 owner 协调，`--direct-io` 开启 O_DIRECT。
+
+下面的 mmap 命令显式加了 `--no-cache-numa-bind`，跳过 UCM 的 NUMA 探测和 mbind，
+沿用进程/系统的内存策略。仍然触页，保留共享内存和原有注册策略，脚本不绑 CPU。
+实际内存仍受容器 cpuset、进程继承的内存策略及大页池分布影响。
+这个开关需要重新编译安装本分支的 C++ 库，不能只更新 Python 脚本。
+启动日志应出现 `NumaBind to false` 和 `memfd NUMA binding disabled`。
+
+程序默认仍启用绑定。不传 `--no-cache-numa-bind` 时，未指定节点就走 rank slice；
+指定 `--cache-numa-nodes` 则走 affinity。关闭绑定时不能同时指定节点。
+该开关只用于 v2；mallocHost 组保持旧 Cache 的分配方式。
 
 ### V4 DP4TP1，4 stream
 
@@ -129,6 +139,7 @@ python -c "from ucm.store.cache.capabilities import cache_core_version; print(ca
 # Cache 命中
 python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
   --mode cache-hit --cache-core v2 --model dsv4 \
+  --no-cache-numa-bind \
   --dp-size 4 --tp-size 1 --worker-mode mla \
   --blocks 512 --cache-capacity-gb 64 \
   --direct-io --cache-copy plain --cache-streams 4 \
@@ -137,6 +148,7 @@ python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
 # Posix 命中
 python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
   --mode posix-hit --cache-core v2 --model dsv4 \
+  --no-cache-numa-bind \
   --dp-size 4 --tp-size 1 --worker-mode mla \
   --blocks 512 --cache-capacity-gb 64 \
   --direct-io --cache-copy plain --cache-streams 4 \
@@ -156,6 +168,7 @@ python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
 # Cache 命中
 python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
   --mode cache-hit --cache-core v2 --model glm-5.2 \
+  --no-cache-numa-bind \
   --dp-size 1 --tp-size 8 --worker-mode mla \
   --blocks 512 --layout layerwise --cache-capacity-gb 64 \
   --direct-io --cache-copy plain --cache-streams 4 \
@@ -164,6 +177,7 @@ python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
 # Posix 命中
 python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
   --mode posix-hit --cache-core v2 --model glm-5.2 \
+  --no-cache-numa-bind \
   --dp-size 1 --tp-size 8 --worker-mode mla \
   --blocks 512 --layout layerwise --cache-capacity-gb 64 \
   --direct-io --cache-copy plain --cache-streams 4 \

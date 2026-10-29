@@ -91,14 +91,16 @@ protected:
     }
 
     /* Every rank polls its peers, so all participants must set up concurrently. */
-    std::vector<Status> SetupAllRanks(std::vector<DataStrategy>& strategies)
+    std::vector<Status> SetupAllRanks(std::vector<DataStrategy>& strategies, bool bindNuma = true)
     {
         std::vector<Status> statuses(strategies.size(), Status::OK());
         std::vector<std::thread> threads;
         for (size_t rank = 0; rank < strategies.size(); ++rank) {
-            threads.emplace_back([this, &strategies, &statuses, rank] {
-                statuses[rank] = strategies[rank].Setup(
-                    layout_, MakeOptions(uniqueId_, static_cast<int32_t>(rank), rank, 5000));
+            threads.emplace_back([this, &strategies, &statuses, rank, bindNuma] {
+                auto options = MakeOptions(uniqueId_, static_cast<int32_t>(rank), rank, 5000);
+                options.bindNuma = bindNuma;
+                if (!bindNuma) { options.fallbackNumaRank.reset(); }
+                statuses[rank] = strategies[rank].Setup(layout_, options);
             });
         }
         for (auto& thread : threads) { thread.join(); }
@@ -154,6 +156,19 @@ TEST_F(DataStrategyTest, SegmentsAreSharedAcrossRanks)
     /* Rank 1 writes its own slot; rank 0 observes it through its mapping. */
     FillSlot(peer.DataAt(kSlotsPerRank), 0xa5);
     EXPECT_TRUE(SlotIsFilled(owner.DataAt(kSlotsPerRank), 0xa5));
+#endif
+}
+
+TEST_F(DataStrategyTest, DisabledBindingNeedsNoNumaHintsAndStillSharesMemory)
+{
+#if UCM_RUNTIME_ASCEND_HAL
+    GTEST_SKIP() << "cross-rank host access requires the memfd backend";
+#else
+    std::vector<DataStrategy> ranks(kRankCount);
+    const auto statuses = SetupAllRanks(ranks, false);
+    for (const auto& status : statuses) { ASSERT_TRUE(status.Success()) << status.ToString(); }
+    FillSlot(ranks[0].DataAt(0), 0x5a);
+    EXPECT_TRUE(SlotIsFilled(ranks[1].DataAt(0), 0x5a));
 #endif
 }
 

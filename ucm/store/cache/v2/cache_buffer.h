@@ -165,6 +165,7 @@ public:
         dataOptions.slotSize = slotSize_;
         dataOptions.slotsPerRank = slotsPerRank_;
         dataOptions.setupTimeoutMs = cfg.dataSetupTimeoutMs;
+        dataOptions.bindNuma = cfg.numaBind;
         dataOptions.deviceNumaNode = cfg.detectedNumaNode;
         /* Derived from the transfer mode: only a path that puts the host
          * segment into a device descriptor needs its device-visible alias. */
@@ -172,7 +173,8 @@ public:
         if (cfg.fallbackNumaRank.has_value()) {
             dataOptions.fallbackNumaRank = static_cast<size_t>(*cfg.fallbackNumaRank);
         }
-        if (!cfg.detectedNumaNode.has_value() && !cfg.fallbackNumaRank.has_value()) {
+        if (cfg.numaBind && !cfg.detectedNumaNode.has_value() &&
+            !cfg.fallbackNumaRank.has_value()) {
             // Older standalone callers know only their local Cache domain.
             // vLLM supplies machine-wide hints above, including local DP workers.
             dataOptions.fallbackNumaRank = myRank_;

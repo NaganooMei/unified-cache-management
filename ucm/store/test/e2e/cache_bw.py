@@ -123,6 +123,12 @@ def parse_args(argv=None):
     )
     parser.add_argument("--cache-streams", type=positive_int)
     parser.add_argument(
+        "--cache-numa-bind",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="v2: bind before touching memory; disable to inherit process/kernel policy",
+    )
+    parser.add_argument(
         "--cache-numa-nodes", help="one NUMA node per worker; omitted: rank slicing"
     )
     parser.add_argument(
@@ -254,6 +260,10 @@ def validate(args, workload):
     if args.cache_capacity_gb % args.dp_size:
         raise ValueError("--cache-capacity-gb must be divisible by --dp-size")
     nodes = args.cache_numa_nodes
+    if not args.cache_numa_bind and (args.cache_core != "v2" or nodes is not None):
+        raise ValueError(
+            "--no-cache-numa-bind requires --cache-core v2 and no --cache-numa-nodes"
+        )
     args.cache_numa_nodes = (
         None if nodes is None else [int(node) for node in nodes.split(",")]
     )
@@ -377,6 +387,7 @@ def store_config(args, workload, run_id, rank, *, seed=False):
             config["cache_load_exclusive_buffer_number"] //= args.tp_size
     else:
         config.update(
+            cache_numa_bind=args.cache_numa_bind,
             cache_fallback_numa_rank=rank,
             cache_fallback_numa_rank_count=args.workers,
         )
@@ -892,7 +903,11 @@ def describe(args, workload):
         "numa_nodes": (
             "legacy runtime allocation; no NUMA override or CPU affinity"
             if args.cache_core == "legacy"
-            else args.cache_numa_nodes or "rank-slice; no CPU affinity"
+            else (
+                args.cache_numa_nodes or "rank-slice; no CPU affinity"
+                if args.cache_numa_bind
+                else "process/kernel policy; no mbind or CPU affinity"
+            )
         ),
         "warmup_requests": args.warmup,
         "measured_requests": args.epochs,

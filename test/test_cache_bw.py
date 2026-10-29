@@ -560,6 +560,31 @@ class CacheBandwidthTest(unittest.TestCase):
         self.assertEqual(config["cache_detected_numa_node"], 4)
         self.assertEqual(config["cache_load_exclusive_buffer_number"] % 3, 0)
 
+    def test_numa_bind_defaults_on_and_can_be_disabled_for_v2(self):
+        for mode in ("cache-hit", "posix-hit"):
+            for enabled in (True, False):
+                options = [] if enabled else ["--no-cache-numa-bind"]
+                args, workload = self.parse(mode, *options)
+                config = bw.store_config(args, workload, "run", 0)
+                self.assertIs(config["cache_numa_bind"], enabled)
+                self.assertTrue(config["share_buffer_enable"])
+                if not enabled:
+                    self.assertIn("no mbind", bw.describe(args, workload)["numa_nodes"])
+                if mode == "posix-hit":
+                    seed = bw.store_config(args, workload, "run", 0, seed=True)
+                    self.assertNotIn("cache_numa_bind", seed)
+
+    def test_disabled_binding_rejects_conflicting_numa_nodes_or_legacy(self):
+        for options in (
+            ["--cache-numa-nodes", ",".join(["0"] * 16)],
+            ["--cache-core", "legacy"],
+        ):
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                self.parse("cache-hit", "--no-cache-numa-bind", *options)
+
     def test_invalid_inputs_are_rejected_before_spawning(self):
         cases = [
             ["--epochs", "0"],

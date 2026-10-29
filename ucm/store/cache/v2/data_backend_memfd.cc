@@ -351,8 +351,8 @@ Status MemfdDataBackend::PlaceAndRegister(size_t rank)
      * Restricted containers may reject mbind; keep the inherited memory policy
      * in that case. Touching still precedes registration, which pins the pages. */
     if (localPlacement_.node < 0) {
-        UC_WARN(
-            "memfd segment has no NUMA plan, leaving placement to the kernel: device={} "
+        UC_INFO(
+            "memfd NUMA binding disabled, using process/kernel policy: device={} "
             "rank={}",
             deviceId_, rank);
     } else {

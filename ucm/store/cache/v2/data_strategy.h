@@ -58,6 +58,7 @@ struct DataOptions {
     std::optional<int32_t> deviceNumaNode{};       /* device-layer probe; empty when unknown */
     std::optional<size_t> fallbackNumaRank{};      /* local worker rank, NOT myRank */
     std::optional<size_t> fallbackNumaRankCount{}; /* all workers on this machine */
+    bool bindNuma{true};
 };
 
 class DataStrategy {
@@ -195,16 +196,18 @@ public:
         backendOptions.rankBytes = slotSize * nSlotsPerRank;
         backendOptions.requireHostDeviceAddress = options.requireHostDeviceAddress;
         backendOptions.deadline = deadline;
-        const size_t numaRankCount = options.fallbackNumaRankCount.value_or(nRanks);
-        auto placement =
-            Numa::Resolve(options.deviceNumaNode, options.fallbackNumaRank, numaRankCount);
-        if (!placement) {
-            UC_ERROR("cache2 numa placement failed: owner={} device={} status={}", myRank,
-                     options.deviceId, placement.Error());
-            return {placement.Error().Underlying(),
-                    fmt::format("numa placement failed: {}", placement.Error())};
+        if (options.bindNuma) {
+            const size_t numaRankCount = options.fallbackNumaRankCount.value_or(nRanks);
+            auto placement =
+                Numa::Resolve(options.deviceNumaNode, options.fallbackNumaRank, numaRankCount);
+            if (!placement) {
+                UC_ERROR("cache2 numa placement failed: owner={} device={} status={}", myRank,
+                         options.deviceId, placement.Error());
+                return {placement.Error().Underlying(),
+                        fmt::format("numa placement failed: {}", placement.Error())};
+            }
+            backendOptions.localPlacement = placement.Value();
         }
-        backendOptions.localPlacement = placement.Value();
         Status status = Status::OK();
         try {
             status = backend->Setup(backendOptions);

@@ -44,7 +44,17 @@ TEST(UCCache2CopyConfigTest, DefaultsFollowRuntime)
 
     EXPECT_EQ(config.bufferCapacity, 160ULL << 30);
     EXPECT_FALSE(config.ioAggregation);
+    EXPECT_TRUE(config.numaBind);
     EXPECT_EQ(config.sdmaDirect, bool(UCM_RUNTIME_ASCEND_SDMA_DIRECT));
+    EXPECT_TRUE(config.Validate().Success());
+}
+
+TEST(UCCache2CopyConfigTest, CanDisableNumaBinding)
+{
+    auto dict = MakeWorkerConfig();
+    dict.Set("cache_numa_bind", false);
+    const auto config = UC::Cache2::Config::From(dict);
+    EXPECT_FALSE(config.numaBind);
     EXPECT_TRUE(config.Validate().Success());
 }
 
