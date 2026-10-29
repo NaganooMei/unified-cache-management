@@ -5,14 +5,16 @@ benchmark. It uses no Fake backend, no `cache_load_backend_only`, and no CPU
 affinity code. Run it with a built/installed UCM and the matching Torch runtime.
 Logical devices `0 .. workers-1` participate in one local Cache domain.
 
-## Comparing with develop's legacy Cache
+## Comparing Cache implementations
 
-The default `--cache-core v2` is for a5 and the new Cache. For develop's old
-`cache/cc` implementation, copy this script to `/tmp/cache_bw.py`, build/install
-develop in the same Python environment, and run:
+`--cache-core v2` adapts the benchmark to Cache2; `--cache-core legacy` adapts it
+to `cache/cc`. Current develop builds `cache/cc` for `PLATFORM=ascend-a5` and
+Cache2 for other platforms. The personal `lzx/feature-a5` branch uses Cache2.
+Run the repository's script against the implementation installed in the same
+Python environment. For the legacy Cache, for example:
 
 ```bash
-python /tmp/cache_bw.py \
+python ucm/store/test/e2e/cache_bw.py \
   --mode cache-hit --cache-core legacy --model minimax-m2.7-tp8 \
   --blocks 512 --layout layerwise --cache-capacity-gb 64 \
   --cache-copy plain --cache-streams 4 \
@@ -43,39 +45,166 @@ cores use `--cache-copy sdma --cache-streams 1`. Plain copies support the stream
 count above. For a full A3 comparison using each version's defaults, omit the
 stream override and check the effective stream count in each startup log.
 
-For a DeepSeek V4 FA comparison on A5 with one worker, four streams, and buffer
-sharing disabled, first copy this script to `/tmp/cache_bw.py`.
-Build/install develop, then run with direct IO disabled:
+### A5: aclrtMallocHost versus memfd mmap
+
+These commands run directly from the server checkout; no script copy is needed.
+The examples use `/workspace/unified-cache-management` for the checkout and
+`/mnt/nvme0/ucm-cache-bw` for the test disk. Replace these paths with the actual
+checkout and writable storage mount on the test machine.
 
 ```bash
-python /tmp/cache_bw.py \
+cd /workspace/unified-cache-management
+mkdir -p /mnt/nvme0/ucm-cache-bw/v4 /mnt/nvme0/ucm-cache-bw/glm-tp8
+```
+
+Build/install each implementation before running its commands:
+
+- **aclrtMallocHost:** current develop's default A5 build selects `cache/cc`.
+  Use `--cache-core legacy --worker-mode gqa --no-direct-io` below. This selects
+  a private buffer with the driver host-memory allocator.
+- **memfd mmap:** in `ucm/store/cache/CMakeLists.txt`, change the A5 branch's
+  `set(CACHE_CORE cc)` to `set(CACHE_CORE v2)`. Keep the A5 macro definition and
+  rebuild/install with `PLATFORM=ascend-a5`; host registration stays disabled.
+  Use `--cache-core v2` below. Changing the script flag alone does not switch
+  the compiled Cache implementation.
+
+Run the following from the checkout root after selecting the implementation:
+
+```bash
+export PLATFORM=ascend-a5
+python -m pip install -v -e . --no-build-isolation
+python -c "from ucm.store.cache.capabilities import cache_core_version; print(cache_core_version())"
+```
+
+The version query must print `1` for legacy or `2` for Cache2. In the memfd
+startup log, confirm `register_host=false` and record the actual page backing
+and NUMA placement. memfd may select HugeTLB pages when available.
+
+Both groups use four plain copy streams and disable buffer sharing. The
+`--worker-mode gqa` flag selects private keys/buffers; it does not change the
+V4 FA or GLM MLA tensor layout. This keeps per-rank H2D bytes and aggregate
+Posix bytes the same across the two implementations. It does not test shared
+MLA ownership or the IO reduction from sharing across ranks. Switching cc/v2
+also changes Cache control/dispatch logic; these are full Cache-path comparisons,
+not isolated allocator timings.
+
+For Posix hits, both groups use `psync --no-direct-io`. This preserves the
+legacy mallocHost allocation and avoids changing buffered/direct IO at the
+same time as the Cache implementation. Results can include filesystem page-cache
+hits; they are not cold-disk measurements. Do not switch these commands to aio:
+aio requires direct IO. In Cache2, `--no-direct-io` does not change memfd allocation.
+
+#### V4 FA: one worker, four streams
+
+This profile transfers one complete packed FA record per block, not one model
+layer, and excludes WA. Each worker loads 512 blocks, about 1.52 GiB per task.
+The Cache capacity is 16 GiB.
+
+**aclrtMallocHost / legacy** — install the default A5 build first:
+
+```bash
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
   --mode cache-hit --cache-core legacy \
   --model dsv4 --workers 1 --worker-mode gqa \
   --blocks 512 --cache-capacity-gb 16 \
   --no-direct-io --cache-copy plain --cache-streams 4 \
   --epochs 50 --warmup 5 --epoch-interval-ms 15
+
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
+  --mode posix-hit --cache-core legacy \
+  --model dsv4 --workers 1 --worker-mode gqa \
+  --blocks 512 --cache-capacity-gb 16 \
+  --no-direct-io --cache-copy plain --cache-streams 4 \
+  --storage-backends /mnt/nvme0/ucm-cache-bw/v4 \
+  --posix-engine psync --posix-concurrency 32 \
+  --epochs 20 --warmup 3 --epoch-interval-ms 15
 ```
 
-Build/install the PR branch's A5 build, then run the same workload with the new
-Cache and direct IO enabled:
+**memfd mmap / Cache2** — select v2 and rebuild the A5 installation first:
 
 ```bash
-python /tmp/cache_bw.py \
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
   --mode cache-hit --cache-core v2 \
   --model dsv4 --workers 1 --worker-mode gqa \
   --blocks 512 --cache-capacity-gb 16 \
-  --direct-io --cache-copy plain --cache-streams 4 \
+  --no-direct-io --cache-copy plain --cache-streams 4 \
   --epochs 50 --warmup 5 --epoch-interval-ms 15
+
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
+  --mode posix-hit --cache-core v2 \
+  --model dsv4 --workers 1 --worker-mode gqa \
+  --blocks 512 --cache-capacity-gb 16 \
+  --no-direct-io --cache-copy plain --cache-streams 4 \
+  --storage-backends /mnt/nvme0/ucm-cache-bw/v4 \
+  --posix-engine psync --posix-concurrency 32 \
+  --epochs 20 --warmup 3 --epoch-interval-ms 15
 ```
 
-Install each branch's A5 build separately; `--cache-core` adapts benchmark
-configuration and does not select the installed library.
-`--worker-mode gqa` disables buffer sharing without changing the V4 FA
-tensor layout. In cache-hit mode, develop's `--no-direct-io` selects
-`aclrtMallocHost`; the new A5 Cache uses memfd mappings without host registration.
-Its `--direct-io` setting does not add disk IO to a pure Cache hit test.
-Confirm `register_host=false` in the new Cache's startup log.
-Each run uses logical NPU 0 and four copy streams.
+Each run uses logical NPU 0. The Posix command pre-seeds 23 distinct requests,
+requiring about **35 GiB** of free disk space for one run.
+
+#### GLM5.1: TP8-shaped workload, four streams per worker
+
+Eight spawned workers use logical NPUs 0–7. Every worker loads all 512 blocks,
+layer by layer: 78 tasks per request, three tensor views totaling 176 KiB per
+block/layer. This is about 88 MiB per task and 6.70 GiB per worker/request.
+The 64 GiB total Cache budget gives 8 GiB per worker in both groups.
+Because sharing is disabled here, each worker seeds/reads its own keys: the
+Posix bytes are eight full copies, rather than one shared MLA copy.
+
+**aclrtMallocHost / legacy** — install the default A5 build first:
+
+```bash
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
+  --mode cache-hit --cache-core legacy \
+  --model glm-5.1 --workers 8 --worker-mode gqa \
+  --blocks 512 --layout layerwise --cache-capacity-gb 64 \
+  --no-direct-io --cache-copy plain --cache-streams 4 \
+  --epochs 50 --warmup 5 --epoch-interval-ms 15
+
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
+  --mode posix-hit --cache-core legacy \
+  --model glm-5.1 --workers 8 --worker-mode gqa \
+  --blocks 512 --layout layerwise --cache-capacity-gb 64 \
+  --no-direct-io --cache-copy plain --cache-streams 4 \
+  --storage-backends /mnt/nvme0/ucm-cache-bw/glm-tp8 \
+  --posix-engine psync --posix-concurrency 32 \
+  --epochs 5 --warmup 1 --epoch-interval-ms 15
+```
+
+**memfd mmap / Cache2** — select v2 and rebuild the A5 installation first:
+
+```bash
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
+  --mode cache-hit --cache-core v2 \
+  --model glm-5.1 --workers 8 --worker-mode gqa \
+  --blocks 512 --layout layerwise --cache-capacity-gb 64 \
+  --no-direct-io --cache-copy plain --cache-streams 4 \
+  --epochs 50 --warmup 5 --epoch-interval-ms 15
+
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
+  --mode posix-hit --cache-core v2 \
+  --model glm-5.1 --workers 8 --worker-mode gqa \
+  --blocks 512 --layout layerwise --cache-capacity-gb 64 \
+  --no-direct-io --cache-copy plain --cache-streams 4 \
+  --storage-backends /mnt/nvme0/ucm-cache-bw/glm-tp8 \
+  --posix-engine psync --posix-concurrency 32 \
+  --epochs 5 --warmup 1 --epoch-interval-ms 15
+```
+
+The GLM Posix command pre-seeds six distinct requests across eight workers,
+requiring about **322 GiB** of free disk space for one run. For a first short
+run, change it to `--epochs 1 --warmup 0` (about 54 GiB). Cache-hit mode only
+prefills one resident request and does not pre-seed these disk files.
+Check `seed_storage_bytes` before launching; append `--dry-run` to inspect the
+plan without creating files or starting workers. The script creates its own
+`ucm-cache-bw-*` subdirectory below the specified disk path and removes it on
+normal exit unless `--keep-data` is set. Interrupted runs may leave data behind.
+
+Compare the C++-metrics `task_avg`, `task_p99~`, `bw`, and per-rank summaries.
+The `~` percentiles are histogram estimates. Request cost is the sum of Cache
+task durations, not model TTFT. These commands exercise KV layouts without
+loading model weights or running the forward pass.
 
 ## Cache hits
 
