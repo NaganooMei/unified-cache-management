@@ -186,6 +186,49 @@ python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
   --max-storage-gb 500
 ```
 
+## mmap 经 mallocHost 中转后 H2D
+
+在本分支按上面的 `UCM_A5_CACHE_CORE=v2` 重新编译安装。原有 v2 命令加上
+`--cache-staging-blocks 64` 即可启用；不传这个参数仍是原来的 mmap 直接 H2D。
+只支持 `--cache-core v2 --cache-copy plain`，Cache 命中和 Posix 命中都可以使用。
+
+路径为 `共享 Cache → CPU memcpy → 本 rank 的 mallocHost 中转区 → NPU`。
+中转区在启动时分配、逐块填充，满一批后等待全部 H2D stream 完成再复用；
+每层结束也会等待 H2D 完成。保持 4 条 stream，不增加 CPU 工作线程，暂不使用双缓冲。
+GLM 的 64 个中转 slot 每 rank 占 11 MiB，V4 则约 194 MiB；不改变原有 Cache 容量。
+这一步只改变 Load 的 H2D 来源，Dump 仍使用原路径。
+
+```bash
+# GLM：共享 mmap + mallocHost 中转，DP1TP8
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
+  --mode cache-hit --cache-core v2 --model glm-5.2 \
+  --no-cache-numa-bind --dp-size 1 --tp-size 8 --worker-mode mla \
+  --blocks 512 --layout layerwise --cache-capacity-gb 64 \
+  --direct-io --cache-copy plain --cache-streams 4 --cache-staging-blocks 64 \
+  --epochs 3 --warmup 1 --epoch-interval-ms 15 --verify
+
+# V4：mmap + mallocHost 中转，DP4TP1，FA-only
+python /workspace/unified-cache-management/ucm/store/test/e2e/cache_bw.py \
+  --mode cache-hit --cache-core v2 --model dsv4 \
+  --no-cache-numa-bind --dp-size 4 --tp-size 1 --worker-mode mla \
+  --blocks 512 --cache-capacity-gb 64 \
+  --direct-io --cache-copy plain --cache-streams 4 --cache-staging-blocks 64 \
+  --epochs 3 --warmup 1 --epoch-interval-ms 15 --verify
+```
+
+先用 `--verify` 验证数据；正式性能对比时各组都去掉 `--verify`，避免校验影响下一层的调度。
+和 mmap 直接 H2D 对比时，只去掉 `--cache-staging-blocks 64`，其余参数保持一致。
+Posix 场景在上面的 Posix 命令中添加同一参数，存储路径和轮数不变。
+也可把 64 改为 512，比较减小批次同步次数后的效果。
+
+`cache_load_duration_ms` 包含 CPU memcpy、中转区复用等待和 H2D 的完整耗时。
+`cache_load_staging_memcpy_ms` 为每个 shard 的 CPU 拷贝时间；
+`cache_load_staging_wait_ms` 为批次填满后的 H2D 等待时间，
+任务末尾的等待仍记录在 `cache_h2d_sync_ms`。
+逐轮输出的 `staging_memcpy`、`staging_wait` 是本 rank 整次请求的对应耗时之和，
+已包含在 `request_cost` 内。开启后脚本会核对 memcpy 样本数；旧库未重新编译、
+中转参数没有生效时会报错，不会输出一组标成中转但实际走原路径的数据。
+
 ## 空间与结果
 
 按上述 Posix 轮数，预埋数据量如下；两组按顺序运行，不要同时启动多个测试：

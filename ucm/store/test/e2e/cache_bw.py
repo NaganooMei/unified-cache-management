@@ -123,6 +123,12 @@ def parse_args(argv=None):
     )
     parser.add_argument("--cache-streams", type=positive_int)
     parser.add_argument(
+        "--cache-staging-blocks",
+        type=positive_int,
+        default=0,
+        help="v2/plain: reusable mallocHost H2D staging slots per rank; omitted: direct H2D",
+    )
+    parser.add_argument(
         "--cache-numa-bind",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -257,6 +263,12 @@ def validate(args, workload):
         raise ValueError("warmup and epoch interval must be non-negative")
     if args.cache_streams is not None and args.cache_streams > 32:
         raise ValueError("cache streams must be in [1, 32]")
+    if args.cache_staging_blocks and (
+        args.cache_core != "v2" or args.cache_copy != "plain"
+    ):
+        raise ValueError(
+            "--cache-staging-blocks requires --cache-core v2 --cache-copy plain"
+        )
     if args.cache_capacity_gb % args.dp_size:
         raise ValueError("--cache-capacity-gb must be divisible by --dp-size")
     nodes = args.cache_numa_nodes
@@ -388,6 +400,7 @@ def store_config(args, workload, run_id, rank, *, seed=False):
     else:
         config.update(
             cache_numa_bind=args.cache_numa_bind,
+            cache_load_staging_blocks=args.cache_staging_blocks,
             cache_fallback_numa_rank=rank,
             cache_fallback_numa_rank_count=args.workers,
         )
@@ -438,6 +451,8 @@ class LoadMetrics:
     duration_ms: float
     byte_count: int
     bucket_counts: tuple[int, ...]
+    staging_memcpy_ms: float = 0.0
+    staging_wait_ms: float = 0.0
 
     @property
     def count(self):
@@ -453,14 +468,24 @@ def collect_load_metrics(
     timeout_ms,
     *,
     expect_cache_hit=False,
+    expected_staging_shards=0,
 ):
     """Drain this request's C++ deltas, including a possibly unfinished epilog."""
     counts = [0] * len(bounds)
     total_ms = 0.0
+    staging_ms = [0.0, 0.0]
+    staging_shards = 0
     byte_count = 0
     deadline = time.monotonic() + timeout_ms / 1000
     while True:
         counters, _, histograms = metrics.get_all_stats_and_clear()
+        for index, name in enumerate(
+            ("cache_load_staging_memcpy_ms", "cache_load_staging_wait_ms")
+        ):
+            if name in histograms:
+                staging_ms[index] += float(histograms[name][1])
+                if index == 0:
+                    staging_shards += sum(histograms[name][0])
         if expect_cache_hit and counters.get("cache_load_backend_shards_total", 0) != 0:
             raise RuntimeError(
                 "cache-hit run submitted backend reads; prefilled data is not fully resident"
@@ -491,9 +516,14 @@ def collect_load_metrics(
                 f"bytes={byte_count}/{expected_bytes}; another workload may be active"
             )
         if count == expected_tasks and byte_count == expected_bytes:
+            if expected_staging_shards and staging_shards != expected_staging_shards:
+                raise RuntimeError(
+                    f"staging memcpy samples={staging_shards}/{expected_staging_shards}; "
+                    "rebuild/install the v2 Cache from this branch before enabling staging"
+                )
             if not math.isfinite(total_ms) or total_ms <= 0:
                 raise RuntimeError("invalid C++ load duration sum")
-            return LoadMetrics(total_ms, byte_count, tuple(counts))
+            return LoadMetrics(total_ms, byte_count, tuple(counts), *staging_ms)
         if time.monotonic() >= deadline:
             raise RuntimeError(
                 f"incomplete load metrics: tasks={count}/{expected_tasks} "
@@ -689,6 +719,9 @@ def load_worker(args, workload, run_id, rank, barrier, results):
             workload.shard_size * args.blocks * workload.shards,
             args.timeout_ms,
             expect_cache_hit=args.mode == "cache-hit",
+            expected_staging_shards=(
+                workload.shards * args.blocks if args.cache_staging_blocks else 0
+            ),
         )
         warmup = record < args.warmup
         epoch = record if warmup else record - args.warmup
@@ -798,6 +831,12 @@ def print_api_sample(phase, rank, epoch, costs, byte_count):
 
 
 def print_sample(phase, rank, epoch, sample, bounds, api_costs):
+    staging = (
+        f" staging_memcpy={sample.staging_memcpy_ms:.3f}ms"
+        f" staging_wait={sample.staging_wait_ms:.3f}ms"
+        if sample.staging_memcpy_ms or sample.staging_wait_ms
+        else ""
+    )
     print(
         f"phase={phase} rank={rank:02} epoch={epoch:03} source={LOAD_DURATION} tasks={sample.count} "
         f"task_avg={sample.duration_ms / sample.count:.3f}ms "
@@ -805,7 +844,7 @@ def print_sample(phase, rank, epoch, sample, bounds, api_costs):
         f"task_p99~={histogram_quantile(bounds, sample.bucket_counts, 0.99):.3f}ms "
         f"request_cost={sample.duration_ms:.3f}ms "
         f"bw={sample.byte_count / sample.duration_ms / 1e6:.3f}GB/s "
-        f"api_request_cost={sum(api_costs) * 1e3:.3f}ms",
+        f"api_request_cost={sum(api_costs) * 1e3:.3f}ms{staging}",
         flush=True,
     )
 
@@ -900,6 +939,9 @@ def describe(args, workload):
         "cache_local_rank_size": config["local_rank_size"],
         "cache_copy": args.cache_copy,
         "cache_streams": args.cache_streams,
+        "cache_staging_blocks": args.cache_staging_blocks,
+        "cache_staging_bytes_per_rank": args.cache_staging_blocks
+        * workload.payload_size,
         "numa_nodes": (
             "legacy runtime allocation; no NUMA override or CPU affinity"
             if args.cache_core == "legacy"

@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <sched.h>
@@ -81,7 +82,8 @@ struct Config {
      * missing key to one rank-local segment. GQA workers use rank-specific
      * keys and must keep allocating from their own segment. */
     bool shareBufferEnable{false};
-    bool numaBind{true}; /* false: inherit the process/kernel memory policy */
+    bool numaBind{true};         /* false: inherit the process/kernel memory policy */
+    size_t loadStagingBlocks{0}; /* 0: direct H2D; otherwise reuse a pinned host batch */
     /* Connector-derived hints, never user configuration. deviceNumaNode is the
      * accelerator's real NUMA affinity, absent when topology does not expose
      * one; fallbackNumaRank and fallbackNumaRankCount describe this worker's
@@ -136,6 +138,7 @@ struct Config {
         dict.GetNumber("local_rank_size", config.localRankSize);
         dict.Get("share_buffer_enable", config.shareBufferEnable);
         dict.Get("cache_numa_bind", config.numaBind);
+        dict.GetNumber("cache_load_staging_blocks", config.loadStagingBlocks);
         if (dict.Contains("cache_detected_numa_node")) {
             int32_t numaNode = 0;
             dict.GetNumber("cache_detected_numa_node", numaNode);
@@ -199,6 +202,14 @@ struct Config {
             return Status::InvalidParam(
                 "cache IO aggregation is incompatible with cache SDMA Direct");
         }
+        if (loadStagingBlocks != 0) {
+            if (sdmaDirect || ioAggregation || useGdr) {
+                return Status::InvalidParam("cache load staging requires the plain copy path");
+            }
+            if (loadStagingBlocks > std::numeric_limits<size_t>::max() / shardSize) {
+                return Status::InvalidParam("cache load staging size overflows");
+            }
+        }
         if (localRankSize == 0) {
             return Status::InvalidParam("invalid local rank size({})", localRankSize);
         }
@@ -253,6 +264,7 @@ struct Config {
         UC_INFO("Set {}::LocalRankSize to {}.", ns, localRankSize);
         UC_INFO("Set {}::ShareBufferEnable to {}.", ns, shareBufferEnable);
         UC_INFO("Set {}::NumaBind to {}.", ns, numaBind);
+        UC_INFO("Set {}::LoadStagingBlocks to {}.", ns, loadStagingBlocks);
         if (detectedNumaNode.has_value()) {
             UC_INFO("Set {}::DetectedNumaNode to {}.", ns, *detectedNumaNode);
         }

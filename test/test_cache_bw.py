@@ -585,6 +585,69 @@ class CacheBandwidthTest(unittest.TestCase):
             ):
                 self.parse("cache-hit", "--no-cache-numa-bind", *options)
 
+    def test_pinned_staging_keeps_shared_keys_streams_and_metric_timing(self):
+        args, workload = self.parse(
+            "cache-hit",
+            "--model",
+            "glm-5.2",
+            "--tp-size",
+            "8",
+            "--worker-mode",
+            "mla",
+            "--cache-capacity-gb",
+            "64",
+            "--cache-copy",
+            "plain",
+            "--cache-streams",
+            "4",
+            "--cache-staging-blocks",
+            "64",
+        )
+        config = bw.store_config(args, workload, "run", 0)
+        self.assertEqual(config["cache_load_staging_blocks"], 64)
+        self.assertEqual(config["cache_stream_number"], 4)
+        self.assertTrue(config["share_buffer_enable"])
+        self.assertEqual(config["local_rank_size"], 8)
+        self.assertEqual(
+            bw.describe(args, workload)["cache_staging_bytes_per_rank"], 11 << 20
+        )
+        self.assertEqual(self.parse()[0].cache_staging_blocks, 0)
+        for mode in ("cache-hit", "posix-hit"):
+            args.mode = mode
+            self.assertEqual(
+                bw.store_config(args, workload, "run", 3)["cache_load_staging_blocks"],
+                64,
+            )
+        self.assertNotIn(
+            "cache_load_staging_blocks",
+            bw.store_config(args, workload, "run", 0, seed=True),
+        )
+
+    def test_staging_rejects_legacy_non_plain_and_invalid_batch_size(self):
+        for options in (
+            ["--cache-core", "legacy", "--cache-copy", "plain"],
+            ["--cache-copy", "sdma"],
+            ["--cache-copy", "aggregation"],
+            [],
+        ):
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                self.parse("cache-hit", "--cache-staging-blocks", "64", *options)
+        for value in ("0", "-1"):
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                self.parse(
+                    "cache-hit",
+                    "--cache-staging-blocks",
+                    value,
+                    "--cache-copy",
+                    "plain",
+                )
+
     def test_invalid_inputs_are_rejected_before_spawning(self):
         cases = [
             ["--epochs", "0"],
@@ -728,6 +791,37 @@ class CacheBandwidthTest(unittest.TestCase):
             sample = bw.collect_load_metrics(metrics, BOUNDS, 2, 8192, 1000)
         self.assertEqual(sample, bw.LoadMetrics(2.0, 8192, tuple(counts)))
         sleep.assert_called_once_with(0.001)
+
+    def test_staging_costs_are_included_in_total_and_printed_separately(self):
+        metrics = mock.Mock()
+        counts = [0] * len(BOUNDS)
+        counts[BOUNDS.index(10.0)] = 1
+        metrics.get_all_stats_and_clear.return_value = (
+            {bw.LOAD_BYTES: 4096},
+            {},
+            {
+                bw.LOAD_DURATION: (counts, 8.0),
+                "cache_load_staging_memcpy_ms": ([1], 2.0),
+                "cache_load_staging_wait_ms": ([1], 1.5),
+            },
+        )
+        sample = bw.collect_load_metrics(
+            metrics, BOUNDS, 1, 4096, 1000, expected_staging_shards=1
+        )
+        self.assertEqual(sample.duration_ms, 8.0)
+        self.assertEqual(sample.staging_memcpy_ms, 2.0)
+        self.assertEqual(sample.staging_wait_ms, 1.5)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            bw.print_sample("load", 0, 0, sample, BOUNDS, [0.009])
+        self.assertIn("request_cost=8.000ms", output.getvalue())
+        self.assertIn("staging_memcpy=2.000ms staging_wait=1.500ms", output.getvalue())
+        metrics.get_all_stats_and_clear.return_value[2].pop(
+            "cache_load_staging_memcpy_ms"
+        )
+        with self.assertRaisesRegex(RuntimeError, "rebuild/install"):
+            bw.collect_load_metrics(
+                metrics, BOUNDS, 1, 4096, 1000, expected_staging_shards=1
+            )
 
     def test_metrics_missing_or_contaminated_never_fall_back_to_python(self):
         metrics = mock.Mock()

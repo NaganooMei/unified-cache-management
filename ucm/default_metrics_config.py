@@ -898,6 +898,16 @@ _HISTOGRAM_METRICS = [
         [0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500],
     ),
     (
+        "cache_load_staging_memcpy_ms",
+        "Per-shard CPU memcpy from shared Cache into pinned H2D staging memory (ms)",
+        [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100],
+    ),
+    (
+        "cache_load_staging_wait_ms",
+        "H2D stream drain before reusing a full pinned staging batch (ms)",
+        [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100],
+    ),
+    (
         "cache_h2d_sync_ms",
         (
             "Cache load residual H2D stream drain after the last shard submit (ms). "

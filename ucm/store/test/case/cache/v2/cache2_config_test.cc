@@ -82,6 +82,25 @@ TEST(UCCache2CopyConfigTest, ExplicitDisableKeepsPlainCopy)
     EXPECT_TRUE(config.Validate().Success());
 }
 
+TEST(UCCache2CopyConfigTest, PinnedLoadStagingIsOptInAndRequiresPlainCopy)
+{
+    auto dict = MakeWorkerConfig();
+    EXPECT_EQ(UC::Cache2::Config::From(dict).loadStagingBlocks, 0);
+    dict.Set("cache_sdma_direct", false);
+    dict.SetNumber("cache_load_staging_blocks", 64);
+    auto config = UC::Cache2::Config::From(dict);
+    EXPECT_EQ(config.loadStagingBlocks, 64);
+    EXPECT_TRUE(config.Validate().Success());
+    config.ioAggregation = true;
+    EXPECT_TRUE(config.Validate().Failure());
+    config.ioAggregation = false;
+    config.useGdr = true;
+    EXPECT_TRUE(config.Validate().Failure());
+    config.useGdr = false;
+    config.loadStagingBlocks = std::numeric_limits<size_t>::max();
+    EXPECT_TRUE(config.Validate().Failure());
+}
+
 TEST(UCCache2CopyConfigTest, AggregationRequestPreservesExplicitSdmaDisable)
 {
     auto dict = MakeWorkerConfig();

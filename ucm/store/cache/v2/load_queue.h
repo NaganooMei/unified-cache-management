@@ -26,6 +26,7 @@
 #include <atomic>
 #include <future>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -34,6 +35,7 @@
 #include "copy_stream.h"
 #include "ctrl_layout.h"
 #include "global_config.h"
+#include "load_staging.h"
 #include "logger/logger.h"
 #include "metrics_api.h"
 #include "status/status.h"
@@ -54,10 +56,10 @@ namespace UC::Cache2 {
  *    rank-interleaved order -> prealloc follow-up shard slots.
  *  - transfer_: per shard, wait until the slot is ready (backend wait for
  *    owned slots, state polling for others) -> H2D scatter. Only the last
- *    shard of a task carries the waiter and performs the single stream
- *    synchronize covering all pending H2D copies of the task.
+ *    shard of a task carries the waiter and drains all H2D streams. Optional
+ *    pinned staging also drains at batch boundaries before reusing its memory.
  */
-template <typename BufferT = Buffer, typename StreamT = CopyStream>
+template <typename BufferT = Buffer, typename StreamT = CopyStream, typename StagingT = LoadStaging>
 class LoadQ {
     using TaskPair = std::pair<TaskPtr, WaiterPtr>;
     using Handle = typename BufferT::Handle;
@@ -84,6 +86,9 @@ class LoadQ {
     bool shareBufferEnable_{false};
     size_t localRankSize_{1};
     size_t nShardPerBlock_{0};
+    size_t stagingBlocks_{0};
+    bool stagingSyncFailed_{false};
+    StagingT staging_;
     std::vector<size_t> tensorSizes_{};
     std::vector<ssize_t> cpuAffinityCores_{};
     SpscRingQueue<TaskPair> waiting_{};
@@ -111,6 +116,7 @@ public:
         shareBufferEnable_ = config.shareBufferEnable;
         localRankSize_ = config.localRankSize;
         nShardPerBlock_ = config.blockSize / config.shardSize;
+        stagingBlocks_ = config.loadStagingBlocks;
         tensorSizes_ = config.tensorSizes;
         cpuAffinityCores_ = config.cpuAffinityCores;
         waiting_.Setup(config.waitingQueueDepth);
@@ -272,10 +278,26 @@ private:
         } else {
             s = stream.Setup(deviceId_, streamNumber_, useGdr_);
         }
+        if (s.Success() && stagingBlocks_ != 0) {
+            const auto bytes = std::accumulate(tensorSizes_.begin(), tensorSizes_.end(), size_t{0});
+            s = staging_.Setup(deviceId_, bytes, stagingBlocks_);
+            if (s.Failure()) {
+                UC_ERROR("Failed({}) to allocate load staging buffer.", s);
+            } else {
+                UC_INFO("Load staging ready: device={} blocks={} block_bytes={} total_bytes={}",
+                        deviceId_, stagingBlocks_, bytes, bytes * stagingBlocks_);
+            }
+        }
         started.set_value(s);
         if (s.Failure()) [[unlikely]] { return; }
         BindCpuAffinity();
         running_.ConsumerLoop(stop_, &LoadQ::TransferOneTask, this, stream);
+        // Close can interrupt a task between shards. Drain before the staging
+        // allocation or pinned source handles can be released.
+        if (stagingBlocks_ != 0 && !holder_.empty()) {
+            stream.Synchronize();
+            holder_.clear();
+        }
     }
     void TransferOneTask(StreamT& stream, ShardTask&& task)
     {
@@ -341,11 +363,34 @@ private:
     }
     Status ScatterShard(StreamT& stream, ShardTask& task)
     {
-        const auto startTp = NowTime::Now();
+        auto startTp = NowTime::Now();
         /* SDMA Direct feeds device descriptors, so the host side has to be the
          * device-visible alias rather than the CPU address. */
         void* hostSrc =
             sdmaDirect_ ? task.bufferHandle->HostMappedData() : task.bufferHandle->Data();
+        if (stagingBlocks_ != 0) {
+            if (stagingSyncFailed_) { return Status::Error("load staging stream drain failed"); }
+            if (!task.bufferHandle->HostAccessible()) {
+                return Status::Error("load staging requires a host-accessible Cache slot");
+            }
+            if (staging_.Full()) {
+                const auto waitTp = NowTime::Now();
+                auto status = stream.Synchronize();
+                Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_staging_wait_ms"),
+                                     (NowTime::Now() - waitTp) * 1e3);
+                if (status.Failure()) {
+                    stagingSyncFailed_ = true;
+                    Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
+                    return status;
+                }
+                staging_.Reset();
+            }
+            const auto copyTp = NowTime::Now();
+            hostSrc = staging_.Copy(hostSrc);
+            Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_staging_memcpy_ms"),
+                                 (NowTime::Now() - copyTp) * 1e3);
+            startTp = NowTime::Now();
+        }
         auto s =
             task.bufferHandle->HostAccessible()
                 ? stream.HostToDeviceScatterAsync(hostSrc, task.shard->addrs.data(), tensorSizes_)
@@ -368,7 +413,9 @@ private:
         if (s.Failure()) [[unlikely]] {
             UC_ERROR("Failed({}) to sync stream for load task({}).", s, task.task->id);
             Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_h2d_errors_total"), 1.0);
+            if (stagingBlocks_ != 0) { stagingSyncFailed_ = true; }
         }
+        if (s.Success() && stagingBlocks_ != 0) { staging_.Reset(); }
         return s;
     }
     void FinishShard(StreamT& stream, ShardTask&& task, const Status& s)
@@ -382,8 +429,10 @@ private:
     }
     void ReleaseHolder(StreamT& stream)
     {
-        if (holder_.empty()) { return; }
-        stream.Synchronize();
+        if (holder_.empty() && stagingBlocks_ == 0) { return; }
+        const auto status = stream.Synchronize();
+        if (status.Failure() && stagingBlocks_ != 0) { stagingSyncFailed_ = true; }
+        if (status.Success() && stagingBlocks_ != 0) { staging_.Reset(); }
         holder_.clear();
     }
     void RecordShardResults(const std::vector<ShardTask>& tasks, const ShardTask* extra,

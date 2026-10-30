@@ -560,6 +560,12 @@ histogram:
   - name: "cache_h2d_submit_ms"
     documentation: "Cache load per-shard H2D async submit CPU cost after backend wait (ms). Submission only; NOT the actual transfer time (see cache_h2d_sync_ms)."
     buckets: [0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]
+  - name: "cache_load_staging_memcpy_ms"
+    documentation: "Per-shard CPU memcpy from shared Cache into pinned H2D staging memory (ms)"
+    buckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100]
+  - name: "cache_load_staging_wait_ms"
+    documentation: "H2D stream drain before reusing a full pinned staging batch (ms)"
+    buckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100]
   - name: "cache_h2d_sync_ms"
     documentation: "Cache load residual H2D stream drain after the last shard submit (ms). Large => H2D copy is the bottleneck; ~0 with large cache_shard_backend_wait_ms => storage read is the bottleneck."
     buckets: [0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]

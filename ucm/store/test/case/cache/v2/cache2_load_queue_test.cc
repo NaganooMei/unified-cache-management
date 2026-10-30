@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -279,6 +280,32 @@ public:
 
 using TestedQueue = UC::Cache2::LoadQ<FakeBuffer, FakeStream>;
 
+class FakeLoadStaging {
+    std::vector<char> data_;
+    size_t blockBytes_{0};
+    size_t used_{0};
+
+public:
+    static inline bool failSetup{false};
+    UC::Status Setup(int32_t, size_t blockBytes, size_t blocks)
+    {
+        if (failSetup) { return UC::Status::OutOfMemory(); }
+        blockBytes_ = blockBytes;
+        data_.resize(blockBytes * blocks);
+        return UC::Status::OK();
+    }
+    bool Full() const { return used_ * blockBytes_ == data_.size(); }
+    void Reset() { used_ = 0; }
+    void* Copy(const void* source)
+    {
+        auto* destination = data_.data() + used_++ * blockBytes_;
+        std::memcpy(destination, source, blockBytes_);
+        return destination;
+    }
+};
+
+using StagedQueue = UC::Cache2::LoadQ<FakeBuffer, FakeStream, FakeLoadStaging>;
+
 UC::Detail::TaskHandle NextBackendHandle()
 {
     static std::atomic<UC::Detail::TaskHandle> next{1};
@@ -350,6 +377,7 @@ protected:
     void SetUp() override
     {
         FakeStream::Reset();
+        FakeLoadStaging::failSetup = false;
         backendWaits_.store(0, std::memory_order_relaxed);
         UC::Metrics::GetAllStatsAndClear();
         config_.storeBackend = &backend_;
@@ -943,6 +971,129 @@ TEST_F(UCCache2LoadQueueTest, LoadWithoutBackendMissFails)
     EXPECT_EQ(FakeStream::scatters.size(), 0);
     auto stats = UC::Metrics::GetAllStatsAndClear();
     EXPECT_EQ(std::get<0>(stats).at("cache_load_failed_shards_total"), 1);
+}
+
+TEST_F(UCCache2LoadQueueTest, StagingDrainsBeforeReuseAndKeepsMultipleFragmentsCorrect)
+{
+    StagedQueue loadQ;
+    auto config = config_;
+    config.storeBackend = nullptr;
+    config.sdmaDirect = false;
+    config.ioAggregation = false;
+    config.streamNumber = 4;
+    config.tensorSizes = {1024, kShardSize - 1024};
+    config.loadStagingBlocks = 2;
+    ASSERT_TRUE(loadQ.Setup(config, &failureSet_, &buffer_).Success());
+    EXPECT_EQ(FakeStream::lastStreamNumber.load(), 4);
+    EXPECT_CALL(backend_, Load).Times(0);
+    EXPECT_CALL(backend_, Wait).Times(0);
+
+    std::array<std::array<char, kShardSize>, 5> output{};
+    UC::Detail::TaskDesc desc;
+    for (size_t i = 0; i < output.size(); ++i) {
+        const auto block = TypesHelper::MakeBlockIdRandomly();
+        const auto slot = buffer_.SetExisting(block, SlotState::Ready);
+        std::memset(gSlotBase + slot * kShardSize, int(i + 1), kShardSize);
+        desc.push_back({
+            block, 0, {output[i].data(), output[i].data() + 1024}
+        });
+    }
+    std::vector<FakeStream::ScatterCall> pending;
+    FakeStream::onScatter = [&](const auto& call) {
+        pending.push_back(call);
+        return UC::Status::OK();
+    };
+    // Read the source only at stream completion, like a real asynchronous DMA.
+    FakeStream::onSync = [&] {
+        for (auto& call : pending) {
+            size_t offset = 0;
+            for (size_t i = 0; i < call.sizes.size(); ++i) {
+                std::memcpy(call.dsts[i], static_cast<char*>(call.src) + offset, call.sizes[i]);
+                offset += call.sizes[i];
+            }
+        }
+        pending.clear();
+        return UC::Status::OK();
+    };
+    auto task = std::make_shared<Task>(Task::Type::LOAD, std::move(desc));
+    auto waiter = std::make_shared<UC::Latch>();
+    loadQ.Submit(task, waiter);
+    ASSERT_TRUE(waiter->WaitFor(kWaitMs));
+    loadQ.Close();
+    EXPECT_FALSE(failureSet_.Contains(task->id));
+    EXPECT_EQ(FakeStream::syncs.load(), 3);  // two full batches plus the task tail
+    ASSERT_EQ(FakeStream::scatters.size(), 5);
+    EXPECT_EQ(FakeStream::scatters[0].src, FakeStream::scatters[2].src);
+    EXPECT_NE(FakeStream::scatters[0].src, FakeStream::scatters[1].src);
+    for (size_t i = 0; i < output.size(); ++i) {
+        for (char value : output[i]) { ASSERT_EQ(value, char(i + 1)); }
+    }
+}
+
+TEST_F(UCCache2LoadQueueTest, StagingAllocationFailureIsReturnedDuringSetup)
+{
+    StagedQueue loadQ;
+    auto config = config_;
+    config.loadStagingBlocks = 2;
+    FakeLoadStaging::failSetup = true;
+    EXPECT_TRUE(loadQ.Setup(config, &failureSet_, &buffer_).Failure());
+    loadQ.Close();
+    EXPECT_TRUE(FakeStream::scatters.empty());
+}
+
+TEST_F(UCCache2LoadQueueTest, StagingWaitsForTheBackendToFillTheSharedSlot)
+{
+    StagedQueue loadQ;
+    auto config = config_;
+    config.loadStagingBlocks = 2;
+    ASSERT_TRUE(loadQ.Setup(config, &failureSet_, &buffer_).Success());
+    void* filled = nullptr;
+    EXPECT_CALL(backend_, Load).WillOnce(testing::Invoke([&](UC::Detail::TaskDesc desc) {
+        filled = desc[0].addrs[0];
+        return UC::Expected<UC::Detail::TaskHandle>(NextBackendHandle());
+    }));
+    EXPECT_CALL(backend_, Wait).WillOnce(testing::Invoke([&](UC::Detail::TaskHandle) {
+        std::memset(filled, 0x5a, kShardSize);
+        return UC::Status::OK();
+    }));
+    char observed = 0;
+    FakeStream::onScatter = [&](const auto& call) {
+        observed = *static_cast<char*>(call.src);
+        return UC::Status::OK();
+    };
+    auto task =
+        std::make_shared<Task>(Task::Type::LOAD, MakeDesc(TypesHelper::MakeBlockIdRandomly()));
+    auto waiter = std::make_shared<UC::Latch>();
+    loadQ.Submit(task, waiter);
+    ASSERT_TRUE(waiter->WaitFor(kWaitMs));
+    loadQ.Close();
+    EXPECT_EQ(observed, char(0x5a));
+    EXPECT_FALSE(failureSet_.Contains(task->id));
+    EXPECT_EQ(buffer_.MarkedReady(), 1);
+}
+
+TEST_F(UCCache2LoadQueueTest, StagingDrainFailureDoesNotOverwriteAnInFlightBatch)
+{
+    StagedQueue loadQ;
+    auto config = config_;
+    config.storeBackend = nullptr;
+    config.loadStagingBlocks = 1;
+    ASSERT_TRUE(loadQ.Setup(config, &failureSet_, &buffer_).Success());
+    UC::Detail::TaskDesc desc;
+    for (size_t i = 0; i < 2; ++i) {
+        const auto block = TypesHelper::MakeBlockIdRandomly();
+        const auto slot = buffer_.SetExisting(block, SlotState::Ready);
+        std::memset(gSlotBase + slot * kShardSize, int(i + 1), kShardSize);
+        desc.push_back({block, 0, {reinterpret_cast<void*>(0x1000)}});
+    }
+    FakeStream::onSync = [] { return UC::Status::Error("DMA drain failure"); };
+    auto task = std::make_shared<Task>(Task::Type::LOAD, std::move(desc));
+    auto waiter = std::make_shared<UC::Latch>();
+    loadQ.Submit(task, waiter);
+    ASSERT_TRUE(waiter->WaitFor(kWaitMs));
+    loadQ.Close();
+    EXPECT_TRUE(failureSet_.Contains(task->id));
+    ASSERT_EQ(FakeStream::scatters.size(), 1);
 }
 
 TEST_F(UCCache2LoadQueueTest, StageMetrics)
