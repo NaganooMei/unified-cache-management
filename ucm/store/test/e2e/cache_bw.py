@@ -22,7 +22,7 @@ import signal
 import tempfile
 import time
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Sizes are bytes per block, before storage alignment. MiniMax is TP8;
@@ -37,6 +37,32 @@ MODEL_PROFILES = {
 
 LOAD_DURATION = "cache_load_duration_ms"
 LOAD_BYTES = "cache_load_bytes_total"
+DIAGNOSTIC_HISTOGRAMS = (
+    "cache_load_get_target_duration_ms",
+    "cache_load_get_peer_duration_ms",
+    "cache_load_backend_call_duration_ms",
+    "cache_load_running_push_duration_ms",
+    "cache_load_slot_ready_wait_ms",
+)
+DIAGNOSTIC_COUNTERS = tuple(
+    f"cache_load_{name}_total"
+    for name in (
+        "get_retries",
+        "get_peer_key_miss",
+        "get_peer_unclaimed",
+        "get_pin_retries",
+        "get_claimed_retries",
+        "get_lock_retries",
+        "get_alloc_scans",
+        "get_alloc_failures",
+        "get_loading_claims",
+        "prealloc_created",
+        "prealloc_existing",
+        "prealloc_lock_failures",
+        "prealloc_alloc_failures",
+        "diagnostics_tasks",
+    )
+)
 
 
 def positive_int(text):
@@ -121,6 +147,11 @@ def parse_args(argv=None):
     )
     parser.add_argument("--cache-streams", type=positive_int)
     parser.add_argument(
+        "--get-diagnostics",
+        action="store_true",
+        help="v2: profile Get/retries/Prealloc and print per-rank metric deltas",
+    )
+    parser.add_argument(
         "--cache-numa-nodes", help="one NUMA node per worker; omitted: rank slicing"
     )
     parser.add_argument(
@@ -188,6 +219,8 @@ def reserved_slots(args):
 
 
 def validate(args, workload):
+    if args.get_diagnostics and args.cache_core != "v2":
+        raise ValueError("--get-diagnostics requires --cache-core v2")
     if args.workers > 128:
         raise ValueError("Cache2 supports at most 128 local ranks")
     if (
@@ -293,6 +326,7 @@ def store_config(args, workload, run_id, rank, *, seed=False):
         "shard_size": workload.shard_size,
         "block_size": workload.block_size,
         "timeout_ms": args.timeout_ms,
+        "cache_load_diagnostics": args.get_diagnostics and not seed,
     }
     if seed or args.mode == "posix-hit":
         config.update(
@@ -364,11 +398,79 @@ def setup_load_metrics(bounds):
     return ucmmetrics
 
 
+def diagnostic_buckets():
+    from ucm.default_metrics_config import get_default_metrics_config
+
+    definitions = {
+        item["name"]: tuple(float(x) for x in item["buckets"])
+        for item in get_default_metrics_config()["histogram"]
+        if item["name"] in DIAGNOSTIC_HISTOGRAMS
+    }
+    if (
+        len(definitions) != len(DIAGNOSTIC_HISTOGRAMS)
+        or len(set(definitions.values())) != 1
+    ):
+        raise RuntimeError("missing/inconsistent diagnostic histogram definitions")
+    bounds = next(iter(definitions.values()))
+    return bounds if math.isinf(bounds[-1]) else bounds + (math.inf,)
+
+
+@dataclass
+class DiagnosticMetrics:
+    counters: dict = field(default_factory=dict)
+    histograms: dict = field(default_factory=dict)
+
+    def merge(self, counters, histograms, bounds):
+        for name in DIAGNOSTIC_COUNTERS:
+            delta = float(counters.get(name, 0))
+            if not math.isfinite(delta) or delta < 0 or not delta.is_integer():
+                raise RuntimeError(f"invalid diagnostic counter: {name}")
+            self.counters[name] = self.counters.get(name, 0) + int(delta)
+        for name in DIAGNOSTIC_HISTOGRAMS:
+            if name not in histograms:
+                continue
+            buckets, total = histograms[name]
+            if (
+                len(buckets) != len(bounds)
+                or not math.isfinite(total)
+                or total < 0
+                or any(not math.isfinite(x) or x < 0 or int(x) != x for x in buckets)
+            ):
+                raise RuntimeError(f"invalid diagnostic histogram: {name}")
+            previous, previous_total = self.histograms.get(
+                name, ([0] * len(bounds), 0.0)
+            )
+            self.histograms[name] = (
+                [a + int(b) for a, b in zip(previous, buckets)],
+                previous_total + total,
+            )
+
+    def pack(self, bounds):
+        values = [self.counters.get(name, 0) for name in DIAGNOSTIC_COUNTERS]
+        for name in DIAGNOSTIC_HISTOGRAMS:
+            buckets, total = self.histograms.get(name, ([0] * len(bounds), 0.0))
+            values.extend([total, *buckets])
+        return values
+
+    @classmethod
+    def unpack(cls, values, bounds):
+        result = cls(dict(zip(DIAGNOSTIC_COUNTERS, values)), {})
+        offset = len(DIAGNOSTIC_COUNTERS)
+        for name in DIAGNOSTIC_HISTOGRAMS:
+            result.histograms[name] = (
+                list(values[offset + 1 : offset + 1 + len(bounds)]),
+                values[offset],
+            )
+            offset += 1 + len(bounds)
+        return result
+
+
 @dataclass(frozen=True)
 class LoadMetrics:
     duration_ms: float
     byte_count: int
     bucket_counts: tuple[int, ...]
+    diagnostics: object = None
 
     @property
     def count(self):
@@ -384,14 +486,19 @@ def collect_load_metrics(
     timeout_ms,
     *,
     expect_cache_hit=False,
+    diagnostics_bounds=(),
+    expected_gets=0,
 ):
     """Drain this request's C++ deltas, including a possibly unfinished epilog."""
+    diagnostics = DiagnosticMetrics() if diagnostics_bounds else None
     counts = [0] * len(bounds)
     total_ms = 0.0
     byte_count = 0
     deadline = time.monotonic() + timeout_ms / 1000
     while True:
         counters, _, histograms = metrics.get_all_stats_and_clear()
+        if diagnostics is not None:
+            diagnostics.merge(counters, histograms, diagnostics_bounds)
         if expect_cache_hit and counters.get("cache_load_backend_shards_total", 0) != 0:
             raise RuntimeError(
                 "cache-hit run submitted backend reads; prefilled data is not fully resident"
@@ -421,14 +528,37 @@ def collect_load_metrics(
                 f"unexpected load metrics: tasks={count}/{expected_tasks} "
                 f"bytes={byte_count}/{expected_bytes}; another workload may be active"
             )
-        if count == expected_tasks and byte_count == expected_bytes:
+        diagnostic_tasks = (
+            diagnostics.counters.get("cache_load_diagnostics_tasks_total", 0)
+            if diagnostics is not None
+            else expected_tasks
+        )
+        if diagnostic_tasks > expected_tasks:
+            raise RuntimeError(
+                "unexpected diagnostic tasks; another workload may be active"
+            )
+        if (
+            count == expected_tasks
+            and byte_count == expected_bytes
+            and diagnostic_tasks == expected_tasks
+        ):
+            if diagnostics is not None:
+                gets = sum(
+                    sum(diagnostics.histograms.get(name, ((), 0))[0])
+                    for name in DIAGNOSTIC_HISTOGRAMS[:2]
+                )
+                if gets != expected_gets:
+                    raise RuntimeError(
+                        f"Get samples={gets}/{expected_gets}; rebuild native Cache2"
+                    )
             if not math.isfinite(total_ms) or total_ms <= 0:
                 raise RuntimeError("invalid C++ load duration sum")
-            return LoadMetrics(total_ms, byte_count, tuple(counts))
+            return LoadMetrics(total_ms, byte_count, tuple(counts), diagnostics)
         if time.monotonic() >= deadline:
             raise RuntimeError(
                 f"incomplete load metrics: tasks={count}/{expected_tasks} "
-                f"bytes={byte_count}/{expected_bytes}; check metrics setup/shared library "
+                f"bytes={byte_count}/{expected_bytes} diagnostics={diagnostic_tasks}/{expected_tasks}; "
+                "check metrics setup/shared library (diagnostics require a native Cache2 rebuild) "
                 "and ensure no other consumer drains this process"
             )
         # Latch can become ready just before its metrics epilog finishes. Do not
@@ -443,17 +573,23 @@ class BenchmarkResults:
     duration_ms: object
     byte_counts: object
     bucket_counts: object
+    diagnostic_bounds: tuple = ()
+    diagnostic_values: object = None
 
 
 def create_results(context, args, workload):
     bounds = load_duration_buckets()
     requests = args.workers * args.epochs
+    diag_bounds = diagnostic_buckets() if args.get_diagnostics else ()
+    diag_width = len(DiagnosticMetrics().pack(diag_bounds))
     return BenchmarkResults(
         bounds,
         context.Array("d", requests * workload.shards, lock=False),
         context.Array("d", requests, lock=False),
         context.Array("Q", requests, lock=False),
         context.Array("Q", requests * len(bounds), lock=False),
+        diag_bounds,
+        context.Array("d", requests * diag_width, lock=False) if diag_bounds else None,
     )
 
 
@@ -464,6 +600,12 @@ def save_result(results, index, sample, api_costs):
     results.byte_counts[index] = sample.byte_count
     start = index * len(results.bounds)
     results.bucket_counts[start : start + len(results.bounds)] = sample.bucket_counts
+    if results.diagnostic_bounds:
+        if sample.diagnostics is None:
+            raise RuntimeError("missing Get diagnostics; rebuild native Cache2")
+        values = sample.diagnostics.pack(results.diagnostic_bounds)
+        start = index * len(values)
+        results.diagnostic_values[start : start + len(values)] = values
 
 
 def setup_device(args, rank):
@@ -620,6 +762,8 @@ def load_worker(args, workload, run_id, rank, barrier, results):
             workload.shard_size * args.blocks * workload.shards,
             args.timeout_ms,
             expect_cache_hit=args.mode == "cache-hit",
+            diagnostics_bounds=results.diagnostic_bounds,
+            expected_gets=args.blocks * workload.shards,
         )
         warmup = record < args.warmup
         epoch = record if warmup else record - args.warmup
@@ -631,6 +775,14 @@ def load_worker(args, workload, run_id, rank, barrier, results):
             results.bounds,
             costs,
         )
+        if sample.diagnostics is not None:
+            print_diagnostics(
+                "warmup" if warmup else "load",
+                rank,
+                epoch,
+                sample.diagnostics,
+                results.diagnostic_bounds,
+            )
         if not warmup:
             save_result(results, rank * args.epochs + epoch, sample, costs)
         barrier.wait()
@@ -717,6 +869,24 @@ def histogram_quantile(bounds, counts, quantile):
     return math.nan
 
 
+def print_diagnostics(phase, rank, epoch, sample, bounds):
+    for name in DIAGNOSTIC_HISTOGRAMS:
+        counts, total = sample.histograms.get(name, ([0] * len(bounds), 0.0))
+        count = sum(counts)
+        print(
+            f"phase={phase} rank={rank} epoch={epoch} metric={name} "
+            f"count={count:g} sum_ms={total:.6f} "
+            f"avg_ms={total / count if count else 0:.6f} "
+            f"p99_ms~={histogram_quantile(bounds, counts, 0.99) if count else 0:.6f}",
+            flush=True,
+        )
+    print(
+        f"phase={phase} rank={rank} epoch={epoch} diagnostic_counters="
+        + json.dumps(sample.counters, sort_keys=True),
+        flush=True,
+    )
+
+
 def print_api_sample(phase, rank, epoch, costs, byte_count):
     total = sum(costs)
     print(
@@ -793,6 +963,21 @@ def print_summary(args, workload, results):
             f"{histogram_quantile(results.bounds, counts, 0.99):>12.3f} "
             f"{byte_count / total_ms / 1e6:>14.3f} {api_ms / len(requests):>19.3f}"
         )
+    if results.diagnostic_bounds:
+        width = len(DiagnosticMetrics().pack(results.diagnostic_bounds))
+        for label, indexes in groups:
+            merged = DiagnosticMetrics()
+            for index in indexes:
+                sample = DiagnosticMetrics.unpack(
+                    results.diagnostic_values[index * width : (index + 1) * width],
+                    results.diagnostic_bounds,
+                )
+                merged.merge(
+                    sample.counters, sample.histograms, results.diagnostic_bounds
+                )
+            print_diagnostics(
+                "summary", label, "ALL", merged, results.diagnostic_bounds
+            )
     print(
         "~ task percentiles are histogram estimates; bandwidth = metric bytes / metric duration."
     )
@@ -843,6 +1028,7 @@ def describe(args, workload):
         ),
         "posix_engine": args.posix_engine if args.mode == "posix-hit" else None,
         "direct_io": args.direct_io,
+        "get_diagnostics": args.get_diagnostics,
     }
 
 

@@ -81,6 +81,7 @@ struct Config {
      * missing key to one rank-local segment. GQA workers use rank-specific
      * keys and must keep allocating from their own segment. */
     bool shareBufferEnable{false};
+    bool loadDiagnostics{false}; /* opt-in control-path instrumentation */
     /* Connector-derived hints, never user configuration. deviceNumaNode is the
      * accelerator's real NUMA affinity, absent when topology does not expose
      * one; fallbackNumaRank and fallbackNumaRankCount describe this worker's
@@ -134,6 +135,7 @@ struct Config {
         config.ioAggregation = config.ioAggregation && UCM_RUNTIME_ASCEND_IO_AGGREGATION;
         dict.GetNumber("local_rank_size", config.localRankSize);
         dict.Get("share_buffer_enable", config.shareBufferEnable);
+        dict.Get("cache_load_diagnostics", config.loadDiagnostics);
         if (dict.Contains("cache_detected_numa_node")) {
             int32_t numaNode = 0;
             dict.GetNumber("cache_detected_numa_node", numaNode);

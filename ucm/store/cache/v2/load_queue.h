@@ -82,6 +82,7 @@ class LoadQ {
     bool ioAggregation_{false};
     bool useGdr_{false};
     bool shareBufferEnable_{false};
+    bool loadDiagnostics_{false};
     size_t localRankSize_{1};
     size_t nShardPerBlock_{0};
     std::vector<size_t> tensorSizes_{};
@@ -109,6 +110,7 @@ public:
         ioAggregation_ = config.ioAggregation;
         useGdr_ = config.useGdr;
         shareBufferEnable_ = config.shareBufferEnable;
+        loadDiagnostics_ = config.loadDiagnostics;
         localRankSize_ = config.localRankSize;
         nShardPerBlock_ = config.blockSize / config.shardSize;
         tensorSizes_ = config.tensorSizes;
@@ -165,6 +167,7 @@ private:
     {
         const auto startTp = NowTime::Now();
         const auto nShard = task->desc.size();
+        LoadDiagnostics diagnostics(loadDiagnostics_, nShard);
         const auto indexes = RearrangeIndex(nShard, deviceId_, localRankSize_);
         std::vector<size_t> preallocRanks;
         if (shareBufferEnable_) { preallocRanks.reserve(nShard); }
@@ -174,14 +177,22 @@ private:
             const auto originalIndex = indexes[i];
             auto& shard = task->desc[originalIndex];
             ShardTask shardTask;
-            auto handle = shareBufferEnable_ ? buffer_->Get(shard.owner, shard.index, true,
-                                                            originalIndex % localRankSize_)
-                                             : buffer_->Get(shard.owner, shard.index, true);
+            const auto preferredRank =
+                shareBufferEnable_ ? originalIndex % localRankSize_ : kInvalid;
+            const auto getStart = diagnostics.Start();
+            auto handle =
+                buffer_->Get(shard.owner, shard.index, true, preferredRank, diagnostics.Stats());
+            const auto target = !shareBufferEnable_ || deviceId_ % localRankSize_ == preferredRank;
+            diagnostics.Observe(
+                target ? LoadDiagnostics::Kind::TargetGet : LoadDiagnostics::Kind::PeerGet,
+                getStart);
             if (shareBufferEnable_) { preallocRanks.push_back(handle.Segment()); }
             shardTask.fromCache = handle.GetState() == SlotState::Ready;
             if (!shardTask.fromCache) { ++waitShardCount; }
             if (handle.Owner() && !shardTask.fromCache) {
+                const auto backendStart = diagnostics.Start();
                 auto res = SubmitBackendLoad(task, shard, handle);
+                diagnostics.Observe(LoadDiagnostics::Kind::BackendCall, backendStart);
                 if (!res) [[unlikely]] {
                     handle.MarkFailed();
                     RecordLoadSourceShards(i + 1, waitShardCount);
@@ -198,14 +209,16 @@ private:
             shardTask.bufferHandle = std::move(handle);
             shardTask.waiter = (i + 1 < nShard) ? nullptr : waiter;
             shardTask.firstShard = i == 0;
+            const auto pushStart = diagnostics.Start();
             running_.Push(std::move(shardTask));
+            diagnostics.Observe(LoadDiagnostics::Kind::RunningPush, pushStart);
         }
         Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_backend_submit_duration_ms"),
                              (NowTime::Now() - startTp) * 1e3);
         Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_backend_shards_total"),
                              static_cast<double>(backendSubmitCount));
         RecordLoadSourceShards(nShard, waitShardCount);
-        PreallocNextShards(task, indexes, preallocRanks);
+        PreallocNextShards(task, indexes, preallocRanks, diagnostics.Stats());
     }
     Expected<Detail::TaskHandle> SubmitBackendLoad(const TaskPtr& task, const Detail::Shard& shard,
                                                    Handle& handle)
@@ -229,16 +242,17 @@ private:
         return res;
     }
     void PreallocNextShards(const TaskPtr& task, const std::vector<size_t>& indexes,
-                            const std::vector<size_t>& preallocRanks)
+                            const std::vector<size_t>& preallocRanks, BufferGetStats* stats)
     {
         for (size_t order = 0; order < indexes.size(); ++order) {
             const auto i = indexes[order];
             auto& shard = task->desc[i];
             if (shard.index + 1 != nShardPerBlock_) {
                 if (shareBufferEnable_) {
-                    buffer_->Prealloc(shard.owner, shard.index + 1, true, preallocRanks[order]);
+                    buffer_->Prealloc(shard.owner, shard.index + 1, true, preallocRanks[order],
+                                      stats);
                 } else {
-                    buffer_->Prealloc(shard.owner, shard.index + 1, true);
+                    buffer_->Prealloc(shard.owner, shard.index + 1, true, kInvalid, stats);
                 }
             }
         }
@@ -284,7 +298,12 @@ private:
             FinishShard(stream, std::move(task), Status::Error());
             return;
         }
+        const auto readyStart = loadDiagnostics_ ? NowTime::Now() : 0.0;
         auto s = WaitShardReady(task);
+        if (loadDiagnostics_ && task.backendTaskHandle == 0) {
+            Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_load_slot_ready_wait_ms"),
+                                 (NowTime::Now() - readyStart) * 1e3);
+        }
         if (s.Success() && task.firstShard && task.task->desc.prerequisiteHandle != 0) {
             // CopyStream applies the dependency to every rotating copy stream.
             s = stream.WaitEvent(Trans::Event{task.task->desc.prerequisiteHandle});

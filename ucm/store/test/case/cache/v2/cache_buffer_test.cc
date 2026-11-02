@@ -74,9 +74,10 @@ struct BufferTestAccess {
     }
 
     static size_t TryAcquireSlot(Buffer& buffer, const Detail::BlockId& blockId, size_t offset,
-                                 size_t attempts, bool& owner, size_t preferredRank = kInvalid)
+                                 size_t attempts, bool& owner, size_t preferredRank = kInvalid,
+                                 BufferGetStats* stats = nullptr)
     {
-        return buffer.TryAcquireSlot(blockId, offset, false, attempts, owner, preferredRank);
+        return buffer.TryAcquireSlot(blockId, offset, false, attempts, owner, preferredRank, stats);
     }
 
     static void Release(Buffer& buffer, size_t slot) { buffer.Release(slot); }
@@ -649,6 +650,72 @@ TEST(Cache2BufferOptimisticTest, PinnedHitPreventsSlotReconfigurationUntilReleas
     EXPECT_EQ(BufferTestAccess::FindSlot(buffer, newBlock, 0), slot);
 
     BufferTestAccess::Release(buffer, replacement);
+    ::operator delete(memory, std::align_val_t{64});
+}
+
+TEST(Cache2BufferDiagnosticsTest, DistinguishesMissingKeyFromUnclaimedPreallocation)
+{
+    constexpr size_t ranks = 2, slots = 4, buckets = 16, locks = 8;
+    auto bytes = BufferTestAccess::TotalSize(buckets, locks, ranks * slots);
+    auto* memory = ::operator new(bytes, std::align_val_t{64});
+    {
+        Buffer rank0, rank1;
+        BufferTestAccess::Init(rank0, memory, ranks, slots, buckets, locks);
+        BufferTestAccess::Attach(rank1, memory, ranks, slots, buckets, locks, 1);
+        auto block = MakeBlockId(9000);
+        BufferGetStats peerStats, targetStats, preallocStats;
+        bool owner = false;
+        EXPECT_EQ(BufferTestAccess::TryAcquireSlot(rank0, block, 0, 8, owner, 1, &peerStats),
+                  kInvalid);
+        EXPECT_EQ(peerStats.peerKeyMiss, 1);
+        EXPECT_EQ(peerStats.peerUnclaimed, 0);
+        rank1.Prealloc(block, 0, false, 1, &preallocStats);
+        EXPECT_EQ(preallocStats.preallocCreated, 1);
+        rank1.Prealloc(block, 0, false, 1, &preallocStats);
+        EXPECT_EQ(preallocStats.preallocExisting, 1);
+        EXPECT_EQ(BufferTestAccess::TryAcquireSlot(rank0, block, 0, 8, owner, 1, &peerStats),
+                  kInvalid);
+        EXPECT_EQ(peerStats.peerKeyMiss, 1);
+        EXPECT_EQ(peerStats.peerUnclaimed, 1);
+        EXPECT_EQ(peerStats.allocScans, 0);
+        auto target = rank1.Get(block, 0, false, 1, &targetStats);
+        EXPECT_TRUE(target.Owner());
+        EXPECT_EQ(targetStats.loadingClaims, 1);
+        EXPECT_EQ(targetStats.allocScans, 0);
+        // Peer Get may return before backend completion, once ownership is claimed.
+        auto peer = rank0.Get(block, 0, false, 1, &peerStats);
+        EXPECT_FALSE(peer.Owner());
+        EXPECT_EQ(peer.GetState(), CtrlLayout::SlotMeta::State::Loading);
+        EXPECT_EQ(peerStats.retries, 0);
+        EXPECT_EQ(peerStats.peerUnclaimed, 1);
+        target.MarkReady();
+    }
+    ::operator delete(memory, std::align_val_t{64});
+}
+
+TEST(Cache2BufferDiagnosticsTest, ColdAllocationAndReadyHitHaveDifferentCounters)
+{
+    constexpr size_t slots = 4, buckets = 16, locks = 8;
+    auto bytes = BufferTestAccess::TotalSize(buckets, locks, slots);
+    auto* memory = ::operator new(bytes, std::align_val_t{64});
+    {
+        Buffer buffer;
+        BufferTestAccess::Init(buffer, memory, 1, slots, buckets, locks);
+        auto block = MakeBlockId(9001);
+        BufferGetStats cold, warm;
+        {
+            auto handle = buffer.Get(block, 0, false, kInvalid, &cold);
+            EXPECT_TRUE(handle.Owner());
+            EXPECT_GT(cold.allocScans, 0);
+            EXPECT_EQ(cold.loadingClaims, 0);
+            handle.MarkReady();
+        }
+        auto handle = buffer.Get(block, 0, false, kInvalid, &warm);
+        EXPECT_FALSE(handle.Owner());
+        EXPECT_EQ(warm.allocScans, 0);
+        EXPECT_EQ(warm.retries, 0);
+        EXPECT_EQ(warm.loadingClaims, 0);
+    }
     ::operator delete(memory, std::align_val_t{64});
 }
 

@@ -18,6 +18,34 @@ consumers:
 
 # Counter metrics configuration
 counter:
+  - name: "cache_load_get_retries_total"
+    documentation: "Opt-in Cache2: Failed outer Get acquisition attempts; excludes successful attempts"
+  - name: "cache_load_get_peer_key_miss_total"
+    documentation: "Opt-in Cache2: Non-target rank lookup misses before a key is published"
+  - name: "cache_load_get_peer_unclaimed_total"
+    documentation: "Opt-in Cache2: Non-target rank observations of Loading with reference zero"
+  - name: "cache_load_get_pin_retries_total"
+    documentation: "Opt-in Cache2: Pin CAS failures or invalidated key/reference observations"
+  - name: "cache_load_get_claimed_retries_total"
+    documentation: "Opt-in Cache2: Pin spins observing a slot claimed for reuse"
+  - name: "cache_load_get_lock_retries_total"
+    documentation: "Opt-in Cache2: Target Get bucket TryLock failures"
+  - name: "cache_load_get_alloc_scans_total"
+    documentation: "Opt-in Cache2: CLOCK candidates examined by Get, excluding Prealloc"
+  - name: "cache_load_get_alloc_failures_total"
+    documentation: "Opt-in Cache2: Get allocation attempts that exhausted their scan budget"
+  - name: "cache_load_get_loading_claims_total"
+    documentation: "Opt-in Cache2: Get claims of idle Loading slots, normally created by Prealloc"
+  - name: "cache_load_prealloc_created_total"
+    documentation: "Opt-in Cache2: Next-shard slots newly created by Prealloc"
+  - name: "cache_load_prealloc_existing_total"
+    documentation: "Opt-in Cache2: Prealloc calls finding an existing next-shard key"
+  - name: "cache_load_prealloc_lock_failures_total"
+    documentation: "Opt-in Cache2: Prealloc calls skipped due to bucket TryLock failure"
+  - name: "cache_load_prealloc_alloc_failures_total"
+    documentation: "Opt-in Cache2: Prealloc calls exhausting the allocation scan budget"
+  - name: "cache_load_diagnostics_tasks_total"
+    documentation: "Opt-in Cache2: Load dispatcher tasks whose diagnostic metrics have been published"
   - name: "asu_lookup_requests_total"
     documentation: "AsuStore Lookup, prefix lookup and reverse lookup calls"
   - name: "asu_lookup_errors_total"
@@ -521,6 +549,21 @@ gauge:
 
 # Histogram metrics configuration
 histogram:
+  - name: "cache_load_get_target_duration_ms"
+    documentation: "Opt-in Cache2: Per-Get wall time on the selected rank (or private buffer); includes retries, excludes backend IO completion (ms)"
+    buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]
+  - name: "cache_load_get_peer_duration_ms"
+    documentation: "Opt-in Cache2: Per-Get wall time on a non-target rank; includes waiting for key publication or ownership claim (ms)"
+    buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]
+  - name: "cache_load_backend_call_duration_ms"
+    documentation: "Opt-in Cache2: Per cold owned shard synchronous backend Load submission, excluding Get and running queue push (ms)"
+    buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]
+  - name: "cache_load_running_push_duration_ms"
+    documentation: "Opt-in Cache2: Per-shard running queue Push wall time including queue-full waiting (ms)"
+    buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]
+  - name: "cache_load_slot_ready_wait_ms"
+    documentation: "Opt-in Cache2: Per-shard transfer state-poll wait when no backend task handle exists, including already-Ready cache hits; excludes Get (ms)"
+    buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]
   - name: "asu_lookup_duration_ms"
     documentation: "AsuStore lookup call duration including key conversion, query wait and result processing (ms)"
     buckets: [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 30000, 60000]
