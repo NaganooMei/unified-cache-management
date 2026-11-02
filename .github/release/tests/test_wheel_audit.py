@@ -133,6 +133,48 @@ def test_closure_does_not_defer_an_unresolved_direct_root() -> None:
 
 
 @pytest.mark.parametrize(
+    "hal_path", [None, "/usr/local/Ascend/devlib/libascend_hal.so"]
+)
+def test_a5_direct_hal_dependency_is_external_and_host_supplied(hal_path) -> None:
+    report = _report(
+        {
+            "libascendcl.so": "/usr/local/Ascend/lib64/libascendcl.so",
+            "libascend_hal.so": hal_path,
+        },
+        direct=["libcachestore.so"],
+        dependencies={
+            "libcachestore.so": ["libascendcl.so", "libascend_hal.so"],
+            "libascendcl.so": [],
+            "libascend_hal.so": [],
+        },
+    )
+    closure = wheel_audit.validate_external_library_closure(
+        report,
+        expected_patterns=["/usr/local/Ascend/*", "libascend_hal.so"],
+        deferred_sonames=wheel_audit.deferred_policy_for_distribution(
+            "naganoomei-uc-manager-cann921-a5"
+        ),
+    )
+    assert closure["external_library_roots"] == ["libascend_hal.so", "libascendcl.so"]
+    assert closure["external_libraries"] == ["libascend_hal.so", "libascendcl.so"]
+    assert closure["deferred_external_libraries"] == ["libascend_hal.so"]
+
+
+@pytest.mark.parametrize(
+    "distribution, expected",
+    [
+        ("uc-manager-cann921-a5", {"libascend_hal.so"}),
+        ("uc-manager-cann900-a2", {"libascend_hal.so"}),
+        ("uc-manager-cann921-a2", set()),
+        ("uc-manager-cann921-a3", set()),
+        ("uc-manager-cuda-cu130", set()),
+    ],
+)
+def test_host_driver_deferral_is_scoped_to_supported_backends(distribution, expected):
+    assert wheel_audit.deferred_policy_for_distribution(distribution) == expected
+
+
+@pytest.mark.parametrize(
     ("reported", "configured"),
     (("libcudart.so.12", "libcudart.so.13"), ("libcudart.so.13", "libcudart.so.12")),
 )

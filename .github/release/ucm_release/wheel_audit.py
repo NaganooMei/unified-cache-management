@@ -16,8 +16,9 @@ SONAME_PATTERN = r"lib[a-zA-Z0-9_.+-]+\.so(?:\.[0-9]+)*"
 
 
 def deferred_policy_for_distribution(distribution: str) -> set[str]:
-    """Return runtime libraries intentionally supplied by CANN 9.0 hosts."""
-    if "cann900-" in distribution.lower():
+    """Return driver libraries supplied by the host rather than CI images."""
+    name = distribution.lower()
+    if "cann900-" in name or re.search(r"(?:^|-)cann[0-9]+-a5$", name):
         return {"libascend_hal.so"}
     return set()
 
@@ -167,23 +168,18 @@ def validate_external_library_closure(
             "auditwheel found external libraries outside the provider closure: "
             f"{unrooted}"
         )
-    unresolved_non_roots = sorted(
+    deferred_libraries = {
         soname
         for soname, path in external.items()
         if path is None and soname not in roots
-    )
-    for soname in sorted(deferred_sonames or set()):
-        if (
-            soname in external
-            and soname not in roots
-            and soname not in unresolved_non_roots
-        ):
-            unresolved_non_roots.append(soname)
-    unresolved_non_roots.sort()
-    for soname in unresolved_non_roots:
+    }
+    # Explicit host-driver policy also applies to direct roots: A5 Cache2
+    # links HAL itself, but hardware-free Runtime validation has no host driver.
+    deferred_libraries.update(set(deferred_sonames or set()) & set(external))
+    for soname in sorted(deferred_libraries):
         validate_external_soname(soname)
     return {
         "external_library_roots": roots,
         "external_libraries": sorted(external),
-        "deferred_external_libraries": unresolved_non_roots,
+        "deferred_external_libraries": sorted(deferred_libraries),
     }

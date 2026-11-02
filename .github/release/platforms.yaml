@@ -53,4 +53,5 @@ backends:
     status: supported
     platform: ascend-a5
     distribution_template: uc-manager-{runtime_variant}
-    external_runtime_exclude_patterns: ["/usr/local/Ascend/*"]
+    # HAL is linked directly by Cache2 and supplied by the host NPU driver.
+    external_runtime_exclude_patterns: ["/usr/local/Ascend/*", "libascend_hal.so"]
