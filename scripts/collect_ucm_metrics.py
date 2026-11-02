@@ -88,6 +88,11 @@ CONNECTOR_HISTOGRAMS = (
 # Keep the unit alongside each Histogram because bandwidth is a Histogram too,
 # not a Gauge. Every result is calculated independently for each worker rank.
 CACHESTORE_HISTOGRAMS = (
+    ("cache_load_get_target_duration_ms", "ms"),
+    ("cache_load_get_peer_duration_ms", "ms"),
+    ("cache_load_backend_call_duration_ms", "ms"),
+    ("cache_load_running_push_duration_ms", "ms"),
+    ("cache_load_slot_ready_wait_ms", "ms"),
     ("cache_lookup_duration_ms", "ms"),
     ("cache_lookup_backend_duration_ms", "ms"),
     ("cache_load_duration_ms", "ms"),
@@ -120,6 +125,23 @@ REPORT_PAGES = (
     ("connector", "Connector", CONNECTOR_HISTOGRAMS),
     ("cachestore", "CacheStore", CACHESTORE_HISTOGRAMS),
     ("posix", "Posix", POSIX_HISTOGRAMS),
+)
+
+CACHESTORE_DIAGNOSTIC_COUNTERS = (
+    "cache_load_get_retries_total",
+    "cache_load_get_peer_key_miss_total",
+    "cache_load_get_peer_unclaimed_total",
+    "cache_load_get_pin_retries_total",
+    "cache_load_get_claimed_retries_total",
+    "cache_load_get_lock_retries_total",
+    "cache_load_get_alloc_scans_total",
+    "cache_load_get_alloc_failures_total",
+    "cache_load_get_loading_claims_total",
+    "cache_load_prealloc_created_total",
+    "cache_load_prealloc_existing_total",
+    "cache_load_prealloc_lock_failures_total",
+    "cache_load_prealloc_alloc_failures_total",
+    "cache_load_diagnostics_tasks_total",
 )
 
 HISTOGRAM_QUANTILES = (0.9, 0.99)
@@ -531,6 +553,15 @@ def build_page_rows(
                     unit=unit,
                 )
             )
+    if page_key == "cachestore":
+        for counter in CACHESTORE_DIAGNOSTIC_COUNTERS:
+            for group, delta in sorted(
+                counter_delta_by_rank(counter, before, after, aggregate_ranks).items(),
+                key=lambda item: rank_sort_key(item[0]),
+            ):
+                rows.append(
+                    ReportRow(group, counter, delta, None, None, None, "events")
+                )
     if window_seconds > 0:
         for counter, output_name in PAGE_THROUGHPUTS[page_key]:
             for group, byte_delta in sorted(

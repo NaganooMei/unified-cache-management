@@ -14,6 +14,21 @@ from typing import Any
 
 # fmt: off
 _COUNTER_METRICS = [
+    ("cache_load_get_retries_total", "Opt-in Cache2: Failed outer Get acquisition attempts; excludes successful attempts"),
+    ("cache_load_get_peer_key_miss_total", "Opt-in Cache2: Non-target rank lookup misses before a key is published"),
+    ("cache_load_get_peer_unclaimed_total", "Opt-in Cache2: Non-target rank observations of Loading with reference zero"),
+    ("cache_load_get_pin_retries_total", "Opt-in Cache2: Pin CAS failures or invalidated key/reference observations"),
+    ("cache_load_get_claimed_retries_total", "Opt-in Cache2: Pin spins observing a slot claimed for reuse"),
+    ("cache_load_get_lock_retries_total", "Opt-in Cache2: Target Get bucket TryLock failures"),
+    ("cache_load_get_alloc_scans_total", "Opt-in Cache2: CLOCK candidates examined by Get, excluding Prealloc"),
+    ("cache_load_get_alloc_failures_total", "Opt-in Cache2: Get allocation attempts that exhausted their scan budget"),
+    ("cache_load_get_loading_claims_total", "Opt-in Cache2: Get claims of idle Loading slots, normally created by Prealloc"),
+    ("cache_load_prealloc_created_total", "Opt-in Cache2: Next-shard slots newly created by Prealloc"),
+    ("cache_load_prealloc_existing_total", "Opt-in Cache2: Prealloc calls finding an existing next-shard key"),
+    ("cache_load_prealloc_lock_failures_total", "Opt-in Cache2: Prealloc calls skipped due to bucket TryLock failure"),
+    ("cache_load_prealloc_alloc_failures_total", "Opt-in Cache2: Prealloc calls exhausting the allocation scan budget"),
+    ("cache_load_diagnostics_tasks_total", "Opt-in Cache2: Load dispatcher tasks whose diagnostic metrics have been published"),
+
     ("asu_lookup_requests_total", "AsuStore Lookup, prefix lookup and reverse lookup calls"),
     ("asu_lookup_errors_total", "Failed AsuStore lookup calls; excludes timeout fallback to misses"),
     ("asu_lookup_query_blocks_total", "Blocks queried by normally returned Lookup calls, including timeout fallback"),
@@ -815,6 +830,12 @@ _CONNECTOR_INTERFACE_DURATION_BUCKETS = [
     2000, 5000, 10000,
 ]
 _HISTOGRAM_METRICS = [
+    ("cache_load_get_target_duration_ms", "Opt-in Cache2: Per-Get wall time on the selected rank (or private buffer); includes retries, excludes backend IO completion (ms)", [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]),
+    ("cache_load_get_peer_duration_ms", "Opt-in Cache2: Per-Get wall time on a non-target rank; includes waiting for key publication or ownership claim (ms)", [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]),
+    ("cache_load_backend_call_duration_ms", "Opt-in Cache2: Per cold owned shard synchronous backend Load submission, excluding Get and running queue push (ms)", [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]),
+    ("cache_load_running_push_duration_ms", "Opt-in Cache2: Per-shard running queue Push wall time including queue-full waiting (ms)", [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]),
+    ("cache_load_slot_ready_wait_ms", "Opt-in Cache2: Per-shard transfer state-poll wait when no backend task handle exists, including already-Ready cache hits; excludes Get (ms)", [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 500, 5000]),
+
     ("asu_lookup_duration_ms", "AsuStore lookup call duration including key conversion, query wait and result processing (ms)", [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 30000, 60000]),
     ("asu_load_submit_duration_ms", "AsuStore Load submission duration including buffer conversion and failed submissions (ms)", [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 30000, 60000]),
     ("asu_dump_submit_duration_ms", "AsuStore Dump submission duration including buffer conversion and failed submissions (ms)", [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 30000, 60000]),

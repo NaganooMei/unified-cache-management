@@ -140,7 +140,7 @@ public:
         }
     }
     Handle Get(const UC::Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
-               size_t preferredRank = UC::Cache2::kInvalid)
+               size_t preferredRank = UC::Cache2::kInvalid, UC::Cache2::BufferGetStats* = nullptr)
     {
         getCalls_.push_back(GetCall{blockId, offset, allowReserved, preferredRank});
         const auto key = std::make_pair(blockId, offset);
@@ -151,7 +151,8 @@ public:
         return Handle{this, slotIdx, true, HostAccessibleOf(key)};
     }
     void Prealloc(const UC::Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
-                  size_t preferredRank = UC::Cache2::kInvalid)
+                  size_t preferredRank = UC::Cache2::kInvalid,
+                  UC::Cache2::BufferGetStats* = nullptr)
     {
         preallocCalls_.push_back(PreallocCall{blockId, offset, allowReserved, preferredRank});
     }
@@ -328,6 +329,13 @@ protected:
     static void SetUpTestSuite()
     {
         UC::Metrics::SetUp();
+        for (const auto* name :
+             {"cache_load_get_target_duration_ms", "cache_load_get_peer_duration_ms",
+              "cache_load_backend_call_duration_ms", "cache_load_running_push_duration_ms",
+              "cache_load_slot_ready_wait_ms"}) {
+            UC::Metrics::CreateStats(name, "histogram", {0.001, 0.01, 0.1, 1, 10, 5000});
+        }
+        UC::Metrics::CreateStats("cache_load_diagnostics_tasks_total", "counter");
         UC::Metrics::CreateStats("cache_load_queue_wait_duration_ms", "histogram",
                                  {0.1, 1, 10, 100, 5000});
         UC::Metrics::CreateStats("cache_load_backend_submit_duration_ms", "histogram",
@@ -385,6 +393,40 @@ protected:
     std::atomic<size_t> backendWaits_{0};
     TestedQueue loadQ_;
 };
+
+TEST_F(UCCache2LoadQueueTest, DiagnosticRolesFollowPreferredRankEvenForReadyHits)
+{
+    TestedQueue queue;
+    auto config = config_;
+    config.localRankSize = 2;
+    config.shareBufferEnable = true;
+    config.loadDiagnostics = true;
+    ASSERT_TRUE(queue.Setup(config, &failureSet_, &buffer_).Success());
+    UC::Detail::TaskDesc desc;
+    for (size_t i = 0; i < 4; ++i) {
+        auto block = TypesHelper::MakeBlockIdRandomly();
+        buffer_.SetExisting(block, SlotState::Ready);
+        desc.push_back({block, 0, {reinterpret_cast<void*>(0x1000 * (i + 1))}});
+    }
+    EXPECT_CALL(backend_, Load).Times(0);
+    auto task = std::make_shared<Task>(Task::Type::LOAD, std::move(desc));
+    auto waiter = std::make_shared<UC::Latch>();
+    queue.Submit(task, waiter);
+    ASSERT_TRUE(waiter->WaitFor(kWaitMs));
+    queue.Close();  // Waiter completion alone does not imply dispatcher metrics are flushed.
+    auto [counters, gauges, histograms] = UC::Metrics::GetAllStatsAndClear();
+    auto count = [&](const char* name) {
+        uint64_t result = 0;
+        for (auto value : histograms.at(name).bucketCounts) { result += value; }
+        return result;
+    };
+    EXPECT_EQ(counters.at("cache_load_diagnostics_tasks_total"), 1);
+    EXPECT_EQ(count("cache_load_get_target_duration_ms"), 2);
+    EXPECT_EQ(count("cache_load_get_peer_duration_ms"), 2);
+    EXPECT_EQ(count("cache_load_running_push_duration_ms"), 4);
+    EXPECT_EQ(count("cache_load_slot_ready_wait_ms"), 4);
+    EXPECT_EQ(histograms.count("cache_load_backend_call_duration_ms"), 0);
+}
 
 TEST_F(UCCache2LoadQueueTest, SetupPassesStreamParams)
 {

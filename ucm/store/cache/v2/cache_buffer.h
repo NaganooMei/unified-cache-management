@@ -35,6 +35,7 @@
 #include "ctrl_strategy.h"
 #include "data_strategy.h"
 #include "global_config.h"
+#include "load_diagnostics.h"
 #include "status/status.h"
 #include "type/types.h"
 
@@ -188,7 +189,7 @@ public:
     // Requires successful worker-side Setup; observers must not call Get.
     // Waits for a slot reference and always returns a valid handle, not necessarily Ready.
     Handle Get(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
-               size_t preferredRank = kInvalid)
+               size_t preferredRank = kInvalid, BufferGetStats* stats = nullptr)
     {
         assert(myRank_ < rankCount_);
         assert(preferredRank == kInvalid || preferredRank < rankCount_);
@@ -199,15 +200,16 @@ public:
                             : 2 * usable;
         for (;;) {
             bool owner = false;
-            auto slot =
-                TryAcquireSlot(blockId, offset, allowReserved, attempts, owner, preferredRank);
+            auto slot = TryAcquireSlot(blockId, offset, allowReserved, attempts, owner,
+                                       preferredRank, stats);
             if (slot != kInvalid) { return Handle{this, slot, owner}; }
+            if (stats != nullptr) { ++stats->retries; }
             std::this_thread::yield();
         }
     }
 
     void Prealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved = false,
-                  size_t preferredRank = kInvalid)
+                  size_t preferredRank = kInvalid, BufferGetStats* stats = nullptr)
     {
         if (myRank_ == kInvalid) { return; }
         assert(preferredRank == kInvalid || preferredRank < rankCount_);
@@ -217,7 +219,7 @@ public:
         auto attempts = usable > std::numeric_limits<size_t>::max() / 2
                             ? std::numeric_limits<size_t>::max()
                             : 2 * usable;
-        TryPrealloc(blockId, offset, allowReserved, attempts);
+        TryPrealloc(blockId, offset, allowReserved, attempts, stats);
     }
 
     bool Exist(const Detail::BlockId& blockId, size_t offset)
@@ -309,83 +311,121 @@ private:
     // On success, the caller owns one reference and must transfer it into a Handle.
     // kInvalid means retry; owner is only meaningful on success.
     size_t TryAcquireSlot(const Detail::BlockId& blockId, size_t offset, bool allowReserved,
-                          size_t attempts, bool& owner, size_t preferredRank = kInvalid)
+                          size_t attempts, bool& owner, size_t preferredRank = kInvalid,
+                          BufferGetStats* stats = nullptr)
     {
         auto iBucket = HashKey(blockId, offset);
         auto& layout = ctrl_.Layout();
         const bool mayOwn = preferredRank == kInvalid || myRank_ == preferredRank;
         auto iNode = LookupOptimistic(layout, iBucket, blockId, offset);
         if (iNode != kInvalid) {
-            if (PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner, mayOwn)) {
+            if (PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner, mayOwn,
+                       stats)) {
                 return iNode;
             }
         }
         /* All ranks may pin a ready or already-owned shared key. Only the
          * selected rank may create or take ownership of a key that needs a
          * host-backend fill, because HAL exposes only its local segment to host. */
-        if (!mayOwn) { return kInvalid; }
+        if (!mayOwn) {
+            if (stats != nullptr && iNode == kInvalid) { ++stats->peerKeyMiss; }
+            return kInvalid;
+        }
 
         auto* targetLock = layout.LockOf(iBucket);
-        if (!targetLock->TryLock()) { return kInvalid; }
+        if (!targetLock->TryLock()) {
+            if (stats != nullptr) { ++stats->lockRetries; }
+            return kInvalid;
+        }
         iNode = Lookup(layout, iBucket, blockId, offset);
         if (iNode != kInvalid) {
-            auto pinned = PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner);
+            auto pinned =
+                PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner, true, stats);
             targetLock->Unlock();
             return pinned ? iNode : kInvalid;
         }
-        iNode = Alloc(layout, blockId, offset, iBucket, allowReserved, attempts, 1);
+        iNode = Alloc(layout, blockId, offset, iBucket, allowReserved, attempts, 1, stats);
         targetLock->Unlock();
-        if (iNode != kInvalid) { owner = true; }
+        if (iNode != kInvalid) {
+            owner = true;
+        } else if (stats != nullptr) {
+            ++stats->allocFailures;
+        }
         return iNode;
     }
 
     bool TryPrealloc(const Detail::BlockId& blockId, size_t offset, bool allowReserved,
-                     size_t attempts)
+                     size_t attempts, BufferGetStats* stats = nullptr)
     {
         auto iBucket = HashKey(blockId, offset);
         auto& layout = ctrl_.Layout();
         auto* targetLock = layout.LockOf(iBucket);
-        if (!targetLock->TryLock()) { return false; }
+        if (!targetLock->TryLock()) {
+            if (stats != nullptr) { ++stats->preallocLockFailures; }
+            return false;
+        }
         auto iNode = Lookup(layout, iBucket, blockId, offset);
         if (iNode != kInvalid) {
             layout.SlotMetaArr()[iNode].accessed.store(1, std::memory_order_relaxed);
+            if (stats != nullptr) { ++stats->preallocExisting; }
             targetLock->Unlock();
             return true;
         }
         iNode = Alloc(layout, blockId, offset, iBucket, allowReserved, attempts, 0);
+        if (stats != nullptr) {
+            if (iNode != kInvalid) {
+                ++stats->preallocCreated;
+            } else {
+                ++stats->preallocAllocFailures;
+            }
+        }
         targetLock->Unlock();
         return iNode != kInvalid;
     }
 
     bool PinHit(CtrlLayout& layout, size_t iNode, size_t iBucket, const Detail::BlockId& blockId,
-                size_t offset, size_t spinBudget, bool& owner, bool takeOwnership = true)
+                size_t offset, size_t spinBudget, bool& owner, bool takeOwnership = true,
+                BufferGetStats* stats = nullptr)
     {
         auto* meta = &layout.SlotMetaArr()[iNode];
         for (size_t spin = 0; spin < spinBudget;) {
-            if (!MatchKey(*meta, iBucket, blockId, offset)) { return false; }
+            if (!MatchKey(*meta, iBucket, blockId, offset)) {
+                if (stats != nullptr) { ++stats->pinRetries; }
+                return false;
+            }
             auto reference = meta->reference.load(std::memory_order_acquire);
             if (reference == kSlotClaimed) {
+                if (stats != nullptr) { ++stats->claimedRetries; }
                 ++spin;
                 std::this_thread::yield();
                 continue;
             }
-            if (reference == kSlotClaimed - 1) { return false; }
+            if (reference == kSlotClaimed - 1) {
+                if (stats != nullptr) { ++stats->pinRetries; }
+                return false;
+            }
             auto state = meta->state.load(std::memory_order_acquire);
             /* A non-owner may observe Ready or Failed. Loading with no
              * reference is a preallocated slot that still needs its selected
              * rank to claim and fill it. */
-            if (!takeOwnership && reference == 0 && state == State::Loading) { return false; }
+            if (!takeOwnership && reference == 0 && state == State::Loading) {
+                if (stats != nullptr) { ++stats->peerUnclaimed; }
+                return false;
+            }
             if (!meta->reference.compare_exchange_weak(reference, reference + 1,
                                                        std::memory_order_acq_rel)) {
+                if (stats != nullptr) { ++stats->pinRetries; }
                 ++spin;
                 continue;
             }
             if (!MatchKey(*meta, iBucket, blockId, offset)) {
                 meta->reference.fetch_sub(1, std::memory_order_release);
+                if (stats != nullptr) { ++stats->pinRetries; }
                 return false;
             }
             state = meta->state.load(std::memory_order_acquire);
             owner = takeOwnership && reference == 0 && state != State::Ready;
+            if (stats != nullptr && owner && state == State::Loading) { ++stats->loadingClaims; }
             if (owner && state == State::Failed) {
                 meta->state.store(State::Loading, std::memory_order_release);
             }
@@ -421,9 +461,11 @@ private:
     }
 
     size_t Alloc(CtrlLayout& layout, const Detail::BlockId& blockId, size_t offset, size_t iBucket,
-                 bool allowReserved, size_t attempts, size_t initialReference)
+                 bool allowReserved, size_t attempts, size_t initialReference,
+                 BufferGetStats* stats = nullptr)
     {
         for (size_t scan = 0; scan < attempts; ++scan) {
+            if (stats != nullptr) { ++stats->allocScans; }
             auto iNode = FetchNode(layout, allowReserved);
             if (iNode == kInvalid) { continue; }
             auto* meta = &layout.SlotMetaArr()[iNode];
