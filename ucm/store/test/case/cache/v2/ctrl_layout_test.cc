@@ -37,6 +37,10 @@ struct CtrlLayoutTestAccess {
     {
         return layout.NextClockSlot(rank, usableSlots);
     }
+    static void SetMagic(CtrlLayout& layout, uint32_t magic)
+    {
+        layout.Hdr()->magic.store(magic, std::memory_order_release);
+    }
 };
 
 namespace {
@@ -78,7 +82,7 @@ TEST_F(CtrlLayoutTest, BindsSharedArraysAtAlignedOffsets)
 
 TEST_F(CtrlLayoutTest, RejectsPreviousOwnershipProtocol)
 {
-    layout_.Hdr()->magic.store(0x55433201U, std::memory_order_release);
+    CtrlLayoutTestAccess::SetMagic(layout_, 0x55433201U);
     EXPECT_FALSE(layout_.WaitReady(1));
     layout_.MarkReady();
     EXPECT_TRUE(layout_.WaitReady(1));

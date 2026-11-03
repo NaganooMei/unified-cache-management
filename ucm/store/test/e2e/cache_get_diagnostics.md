@@ -80,7 +80,7 @@ existing, lock failure, and allocation failure outcomes; non-target ranks that
 skip Prealloc do not count as failures. CLOCK scan counters exclude Prealloc.
 
 Retry counters describe observations, not durations; nested pin spins and outer
-retries are not mutually exclusive categories. Idle Loading claims normally
+retries are not mutually exclusive categories. Allocated claims normally
 indicate preallocation reuse, but these aggregate counters cannot prove the
 history of a particular evicted key. Metrics alone also cannot reconstruct a
 cross-rank per-key timeline or distinguish CPU descheduling from active work.
