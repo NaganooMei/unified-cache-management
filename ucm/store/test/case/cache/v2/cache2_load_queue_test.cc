@@ -575,6 +575,62 @@ TEST_F(UCCache2LoadQueueTest, LoadMissSubmitsBackendAndH2d)
     EXPECT_EQ(counters.at("cache_load_success_shards_total"), 0);
 }
 
+TEST_F(UCCache2LoadQueueTest, AllocatedPeerWaitsForReadyBeforeAnyH2d)
+{
+    const auto block = TypesHelper::MakeBlockIdRandomly();
+    const auto slot = buffer_.SetExisting(block, SlotState::Allocated);
+    std::atomic<size_t> polls{0};
+    buffer_.onGetState = [&](size_t) { polls.fetch_add(1, std::memory_order_relaxed); };
+    EXPECT_CALL(backend_, Load).Times(0);
+    EXPECT_CALL(backend_, Wait).Times(0);
+    auto [task, waiter] = SubmitOne(MakeDesc(block));
+    ASSERT_TRUE(AwaitTrue([&] { return polls.load() >= 2; }));
+    EXPECT_FALSE(waiter->Check());
+    EXPECT_EQ(FakeStream::syncs.load(), 0);
+    buffer_.SetSlotStateByIdx(slot, SlotState::Loading);
+    EXPECT_FALSE(waiter->Check());
+    buffer_.SetSlotStateByIdx(slot, SlotState::Ready);
+    ASSERT_TRUE(waiter->WaitFor(kWaitMs));
+    loadQ_.Close();
+    EXPECT_EQ(FakeStream::scatters.size(), 1);
+    EXPECT_FALSE(failureSet_.Contains(task->id));
+    EXPECT_EQ(buffer_.LiveHandles(), 0);
+}
+
+TEST_F(UCCache2LoadQueueTest, CloseInterruptsUnclaimedAllocatedPeerAndReleasesPin)
+{
+    const auto block = TypesHelper::MakeBlockIdRandomly();
+    buffer_.SetExisting(block, SlotState::Allocated);
+    std::atomic<size_t> polls{0};
+    buffer_.onGetState = [&](size_t) { polls.fetch_add(1, std::memory_order_relaxed); };
+    EXPECT_CALL(backend_, Load).Times(0);
+    auto [task, waiter] = SubmitOne(MakeDesc(block));
+    ASSERT_TRUE(AwaitTrue([&] { return polls.load() >= 2; }));
+    loadQ_.Close();
+    EXPECT_TRUE(waiter->Check());
+    EXPECT_TRUE(failureSet_.Contains(task->id));
+    EXPECT_EQ(buffer_.LiveHandles(), 0);
+    EXPECT_TRUE(FakeStream::scatters.empty());
+}
+
+TEST_F(UCCache2LoadQueueTest, CancellationInterruptsAllocatedWaitWithoutPublishingFailure)
+{
+    const auto block = TypesHelper::MakeBlockIdRandomly();
+    buffer_.SetExisting(block, SlotState::Allocated);
+    std::atomic<size_t> polls{0};
+    buffer_.onGetState = [&](size_t) { polls.fetch_add(1, std::memory_order_relaxed); };
+    EXPECT_CALL(backend_, Load).Times(0);
+    auto [task, waiter] = SubmitOne(MakeDesc(block));
+    ASSERT_TRUE(AwaitTrue([&] { return polls.load() >= 2; }));
+    failureSet_.Insert(task->id);
+    ASSERT_TRUE(waiter->WaitFor(kWaitMs));
+    loadQ_.Close();
+    EXPECT_EQ(buffer_.LiveHandles(), 0);
+    EXPECT_TRUE(FakeStream::scatters.empty());
+    EXPECT_EQ(buffer_.MarkedFailed(), 0);
+    EXPECT_EQ(buffer_.Get(block, 0).GetState(), SlotState::Allocated);
+}
+
 TEST_F(UCCache2LoadQueueTest, LoadNonOwnerWaitsForSlotReady)
 {
     const auto block = TypesHelper::MakeBlockIdRandomly();

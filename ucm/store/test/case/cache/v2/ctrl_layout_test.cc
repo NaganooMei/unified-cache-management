@@ -76,6 +76,14 @@ TEST_F(CtrlLayoutTest, BindsSharedArraysAtAlignedOffsets)
     }
 }
 
+TEST_F(CtrlLayoutTest, RejectsPreviousOwnershipProtocol)
+{
+    layout_.Hdr()->magic.store(0x55433201U, std::memory_order_release);
+    EXPECT_FALSE(layout_.WaitReady(1));
+    layout_.MarkReady();
+    EXPECT_TRUE(layout_.WaitReady(1));
+}
+
 TEST_F(CtrlLayoutTest, MapsBucketsOntoLockStripes)
 {
     EXPECT_EQ(layout_.LockOf(0), layout_.LockOf(4));

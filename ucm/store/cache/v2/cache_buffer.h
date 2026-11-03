@@ -324,7 +324,7 @@ private:
                 return iNode;
             }
         }
-        /* All ranks may pin a ready or already-owned shared key. Only the
+        /* All ranks may pin an allocated shared key, even before its IO owner arrives. Only the
          * selected rank may create or take ownership of a key that needs a
          * host-backend fill, because HAL exposes only its local segment to host. */
         if (!mayOwn) {
@@ -404,14 +404,6 @@ private:
                 if (stats != nullptr) { ++stats->pinRetries; }
                 return false;
             }
-            auto state = meta->state.load(std::memory_order_acquire);
-            /* A non-owner may observe Ready or Failed. Loading with no
-             * reference is a preallocated slot that still needs its selected
-             * rank to claim and fill it. */
-            if (!takeOwnership && reference == 0 && state == State::Loading) {
-                if (stats != nullptr) { ++stats->peerUnclaimed; }
-                return false;
-            }
             if (!meta->reference.compare_exchange_weak(reference, reference + 1,
                                                        std::memory_order_acq_rel)) {
                 if (stats != nullptr) { ++stats->pinRetries; }
@@ -423,11 +415,22 @@ private:
                 if (stats != nullptr) { ++stats->pinRetries; }
                 return false;
             }
-            state = meta->state.load(std::memory_order_acquire);
-            owner = takeOwnership && reference == 0 && state != State::Ready;
-            if (stats != nullptr && owner && state == State::Loading) { ++stats->loadingClaims; }
-            if (owner && state == State::Failed) {
-                meta->state.store(State::Loading, std::memory_order_release);
+            auto state = meta->state.load(std::memory_order_acquire);
+            owner = false;
+            // Readers may already hold references to an Allocated slot. The state CAS,
+            // not the first reference, elects its single writer. Failed retries still
+            // require zero pre-existing references, so the old writer/readers are gone.
+            if (takeOwnership &&
+                (state == State::Allocated || (state == State::Failed && reference == 0))) {
+                auto expectedState = state;
+                owner = meta->state.compare_exchange_strong(expectedState, State::Loading,
+                                                            std::memory_order_acq_rel,
+                                                            std::memory_order_acquire);
+                if (stats != nullptr && owner && state == State::Allocated) {
+                    ++stats->loadingClaims;
+                }
+            } else if (stats != nullptr && !takeOwnership && state == State::Allocated) {
+                ++stats->peerAllocatedPins;
             }
             meta->accessed.store(1, std::memory_order_relaxed);
             return true;
@@ -490,11 +493,13 @@ private:
                     if (!sameStripe) { oldLock->Unlock(); }
                 }
                 StoreKey(*meta, blockId, offset);
-                meta->state.store(State::Loading, std::memory_order_relaxed);
+                meta->state.store(initialReference == 0 ? State::Allocated : State::Loading,
+                                  std::memory_order_relaxed);
                 MoveTo(layout, iBucket, iNode);
             } else {
                 StoreKey(*meta, blockId, offset);
-                meta->state.store(State::Loading, std::memory_order_relaxed);
+                meta->state.store(initialReference == 0 ? State::Allocated : State::Loading,
+                                  std::memory_order_relaxed);
             }
             meta->accessed.store(1, std::memory_order_relaxed);
             meta->reference.store(initialReference, std::memory_order_release);

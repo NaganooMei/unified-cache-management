@@ -50,6 +50,7 @@ DIAGNOSTIC_COUNTERS = tuple(
         "get_retries",
         "get_peer_key_miss",
         "get_peer_unclaimed",
+        "get_peer_allocated_pins",
         "get_pin_retries",
         "get_claimed_retries",
         "get_lock_retries",

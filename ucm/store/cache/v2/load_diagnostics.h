@@ -18,6 +18,7 @@ struct BufferGetStats {
     uint64_t retries{0};
     uint64_t peerKeyMiss{0};
     uint64_t peerUnclaimed{0};
+    uint64_t peerAllocatedPins{0};
     uint64_t pinRetries{0};
     uint64_t claimedRetries{0};
     uint64_t lockRetries{0};
@@ -67,6 +68,7 @@ public:
         Publish("cache_load_get_retries_total", stats_.retries);
         Publish("cache_load_get_peer_key_miss_total", stats_.peerKeyMiss);
         Publish("cache_load_get_peer_unclaimed_total", stats_.peerUnclaimed);
+        Publish("cache_load_get_peer_allocated_pins_total", stats_.peerAllocatedPins);
         Publish("cache_load_get_pin_retries_total", stats_.pinRetries);
         Publish("cache_load_get_claimed_retries_total", stats_.claimedRetries);
         Publish("cache_load_get_lock_retries_total", stats_.lockRetries);

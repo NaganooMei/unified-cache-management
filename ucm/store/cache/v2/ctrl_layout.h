@@ -43,13 +43,14 @@ inline constexpr size_t kMaxRanks{128};
 inline constexpr size_t kMaxLockStripes{1ULL << 16};
 inline constexpr size_t kMinBuckets{1ULL << 10};
 inline constexpr size_t kMaxBuckets{1ULL << 24};
-inline constexpr uint32_t kCtrlMagic{0x55433201U};  // "UC2" + layout version 1.
+// Protocol 2 separates reference pinning from Allocated -> Loading ownership.
+inline constexpr uint32_t kCtrlMagic{0x55433202U};
 
 class CtrlLayout {
 public:
     using BucketLock = SharedMutex;
     struct SlotMeta {
-        enum class State : uint8_t { Loading, Ready, Failed };
+        enum class State : uint8_t { Loading, Ready, Failed, Allocated };
         /* Hot line: CAS contention point of the pin protocol. */
         alignas(64) std::atomic<size_t> reference{0};
         /* Cache key snapshot: key[0]/key[1] = BlockId (16B), key[2] = offset. */
@@ -58,7 +59,7 @@ public:
         std::atomic<size_t> hash{kInvalid};
         std::atomic<size_t> prev{kInvalid};
         std::atomic<size_t> next{kInvalid};
-        alignas(64) std::atomic<State> state{State::Loading};
+        alignas(64) std::atomic<State> state{State::Allocated};
         /* Hot line: CLOCK second-chance bit. */
         alignas(64) std::atomic<uint8_t> accessed{0};
 
@@ -71,7 +72,7 @@ public:
             hash.store(kInvalid, std::memory_order_relaxed);
             prev.store(kInvalid, std::memory_order_relaxed);
             next.store(kInvalid, std::memory_order_relaxed);
-            state.store(State::Loading, std::memory_order_relaxed);
+            state.store(State::Allocated, std::memory_order_relaxed);
             accessed.store(0, std::memory_order_relaxed);
         }
     };
@@ -216,11 +217,13 @@ public:
         if (base_ == nullptr) { return false; }
         constexpr auto interval = std::chrono::milliseconds(10);
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-        while (Hdr()->magic.load(std::memory_order_acquire) != kCtrlMagic) {
+        for (;;) {
+            const auto magic = Hdr()->magic.load(std::memory_order_acquire);
+            if (magic == kCtrlMagic) { return true; }
+            if (magic != 0) { return false; }
             if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) { return false; }
             std::this_thread::sleep_for(interval);
         }
-        return true;
     }
 
     Status SetRankDesc(size_t rank, const RankDataDesc& desc)

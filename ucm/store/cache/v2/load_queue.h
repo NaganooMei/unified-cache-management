@@ -350,11 +350,15 @@ private:
             task.bufferHandle->MarkReady();
             return Status::OK();
         }
+        // A peer can arrive while the slot is still Allocated. Both Allocated
+        // and Loading wait here; a valid handle alone never authorizes H2D.
         for (;;) {
             auto state = task.bufferHandle->GetState();
             if (state == SlotState::Ready) { return Status::OK(); }
             if (state == SlotState::Failed) { return Status::Error(); }
-            if (failureSet_->Contains(task.task->id)) { return Status::Error(); }
+            if (stop_.load(std::memory_order_relaxed) || failureSet_->Contains(task.task->id)) {
+                return Status::Error();
+            }
             std::this_thread::yield();
         }
     }

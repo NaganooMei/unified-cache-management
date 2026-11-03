@@ -1,10 +1,16 @@
 # Cache2 Get diagnostics
 
-This opt-in probe profiles load dispatch without changing owner selection,
-preallocation, shard order, barriers, backend IO, or transfer streams.
+This opt-in probe profiles load dispatch. In the bufferget optimization,
+preallocated slots are Allocated and peers may pin them immediately. Only the
+selected rank claims Allocated -> Loading with a state CAS, independently of
+the reference count. Transfer still waits for Ready before copying.
+Shard order, barriers, backend IO, and transfer streams retain their behavior.
 It applies to Cache2 (`--cache-core v2`), including A2. Rebuild/reinstall the
 native library as well as updating the Python scripts. A Python-only update
 cannot produce these metrics.
+
+The shared control protocol is version 2. Restart every worker with the same
+native build and a fresh Cache domain; version 1 participants are rejected.
 
 ## Run on A2
 
@@ -66,9 +72,10 @@ Roles use `myRank == preferredRank`, not the returned handle's `Owner()`.
 Ready hits normally return non-owner handles on the preferred rank too.
 
 The `cache_load_get_*_total` counters distinguish outer acquisition retries,
-peer lookup misses, peer observations of `Loading/reference=0`, pin failures,
+peer lookup misses, successful peer Allocated pins, pin failures,
 claimed-slot spins, bucket TryLock failures, CLOCK scans, allocation failures,
-and claims of idle Loading slots. Preallocation counters distinguish created,
+and claims of Allocated slots. The legacy peer_unclaimed retry counter remains
+for comparisons and is zero with early Allocated pinning. Preallocation counters distinguish created,
 existing, lock failure, and allocation failure outcomes; non-target ranks that
 skip Prealloc do not count as failures. CLOCK scan counters exclude Prealloc.
 

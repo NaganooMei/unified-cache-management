@@ -131,6 +131,7 @@ CACHESTORE_DIAGNOSTIC_COUNTERS = (
     "cache_load_get_retries_total",
     "cache_load_get_peer_key_miss_total",
     "cache_load_get_peer_unclaimed_total",
+    "cache_load_get_peer_allocated_pins_total",
     "cache_load_get_pin_retries_total",
     "cache_load_get_claimed_retries_total",
     "cache_load_get_lock_retries_total",
