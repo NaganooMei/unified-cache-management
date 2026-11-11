@@ -59,6 +59,8 @@ public:
         std::atomic<size_t> prev{kInvalid};
         std::atomic<size_t> next{kInvalid};
         alignas(64) std::atomic<State> state{State::Loading};
+        /* Published before Failed; reset when the slot is claimed for another fill. */
+        std::atomic<int32_t> errorCode{0};
         /* Hot line: CLOCK second-chance bit. */
         alignas(64) std::atomic<uint8_t> accessed{0};
 
@@ -72,6 +74,7 @@ public:
             prev.store(kInvalid, std::memory_order_relaxed);
             next.store(kInvalid, std::memory_order_relaxed);
             state.store(State::Loading, std::memory_order_relaxed);
+            errorCode.store(0, std::memory_order_relaxed);
             accessed.store(0, std::memory_order_relaxed);
         }
     };

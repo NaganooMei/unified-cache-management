@@ -111,6 +111,7 @@ TEST_F(CtrlLayoutTest, InitializesOnlyRequestedRankRange)
         EXPECT_EQ(slots[i].hash.load(std::memory_order_relaxed), kInvalid);
         EXPECT_EQ(slots[i].next.load(std::memory_order_relaxed), kInvalid);
         EXPECT_EQ(slots[i].accessed.load(std::memory_order_relaxed), 0);
+        EXPECT_EQ(slots[i].errorCode.load(std::memory_order_relaxed), Status::OK().Underlying());
     }
     EXPECT_EQ(CtrlLayoutTestAccess::ClockHand(layout_, 1)->load(std::memory_order_relaxed), 0);
 }

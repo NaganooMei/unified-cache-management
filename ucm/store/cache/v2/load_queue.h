@@ -185,7 +185,7 @@ private:
             if (handle.Owner() && !shardTask.fromCache) {
                 auto res = SubmitBackendLoad(task, shard, handle);
                 if (!res) [[unlikely]] {
-                    handle.MarkFailed();
+                    handle.MarkFailed(res.Error());
                     RecordLoadSourceShards(i + 1, waitShardCount);
                     RecordFailedShards(nShard - i);
                     task->Fail(res.Error());
@@ -281,7 +281,8 @@ private:
     {
         if (failureSet_->Contains(task.task->id)) {
             DiscardFailedShard(task);
-            FinishShard(stream, std::move(task), Status::Error());
+            const auto status = task.task->FailureStatus();
+            FinishShard(stream, std::move(task), status);
             return;
         }
         auto s = WaitShardReady(task);
@@ -310,7 +311,9 @@ private:
     }
     void DiscardFailedShard(ShardTask& task)
     {
-        if (task.bufferHandle->GetState() != SlotState::Ready) { task.bufferHandle->MarkFailed(); }
+        if (task.bufferHandle->GetState() != SlotState::Ready) {
+            task.bufferHandle->MarkFailed(task.task->FailureStatus());
+        }
         RecordFailedShards(1);
     }
     Status WaitShardReady(ShardTask& task)
@@ -325,7 +328,7 @@ private:
                          task.backendTaskHandle, task.task->id);
                 Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_backend_load_wait_errors_total"),
                                      1.0);
-                task.bufferHandle->MarkFailed();
+                task.bufferHandle->MarkFailed(s);
                 return s;
             }
             task.bufferHandle->MarkReady();
@@ -334,8 +337,8 @@ private:
         for (;;) {
             auto state = task.bufferHandle->GetState();
             if (state == SlotState::Ready) { return Status::OK(); }
-            if (state == SlotState::Failed) { return Status::Error(); }
-            if (failureSet_->Contains(task.task->id)) { return Status::Error(); }
+            if (state == SlotState::Failed) { return task.bufferHandle->FailureStatus(); }
+            if (failureSet_->Contains(task.task->id)) { return task.task->FailureStatus(); }
             std::this_thread::yield();
         }
     }

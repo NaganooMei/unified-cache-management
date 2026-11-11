@@ -307,6 +307,7 @@ TEST_F(Cache2BufferTest, AbandonedOwnerPublishesFailureAndCanRetry)
             EXPECT_FALSE(reader->Owner());
         }
         EXPECT_EQ(reader->GetState(), CtrlLayout::SlotMeta::State::Failed);
+        EXPECT_EQ(reader->FailureStatus(), Status::Error());
     }
 
     auto retry = buffer_.Get(block, 0);
@@ -314,6 +315,85 @@ TEST_F(Cache2BufferTest, AbandonedOwnerPublishesFailureAndCanRetry)
     EXPECT_EQ(retry.GetState(), CtrlLayout::SlotMeta::State::Loading);
     retry.MarkReady();
     EXPECT_EQ(retry.GetState(), CtrlLayout::SlotMeta::State::Ready);
+}
+
+TEST_F(Cache2BufferTest, FailedSlotIsNotAnExistHit)
+{
+    const auto block = MakeBlockId(90);
+    {
+        auto owner = buffer_.Get(block, 0);
+        EXPECT_TRUE(buffer_.Exist(block, 0));
+        owner.MarkFailed(Status::NotFound());
+        EXPECT_FALSE(buffer_.Exist(block, 0));
+    }
+    EXPECT_FALSE(buffer_.Exist(block, 0));
+    EXPECT_EQ(BufferTestAccess::ReferenceCount(buffer_, block, 0), 0);
+    auto retry = buffer_.Get(block, 0);
+    EXPECT_TRUE(retry.Owner());
+    retry.MarkReady();
+    EXPECT_TRUE(buffer_.Exist(block, 0));
+}
+
+TEST_F(Cache2BufferTest, LockedExistLookupAlsoRejectsFailedSlot)
+{
+    const auto block = MakeBlockId(91);
+    size_t slot;
+    {
+        auto owner = buffer_.Get(block, 0);
+        slot = owner.SlotIndex();
+        owner.MarkFailed(Status::OsApiError());
+    }
+    auto& meta = BufferTestAccess::Layout(buffer_).SlotMetaArr()[slot];
+    // Force the optimistic pin to exhaust its budget and use the bucket lock.
+    meta.reference.store(kSlotClaimed, std::memory_order_release);
+    EXPECT_FALSE(buffer_.Exist(block, 0));
+    meta.reference.store(0, std::memory_order_release);
+    EXPECT_EQ(meta.state.load(), CtrlLayout::SlotMeta::State::Failed);
+    EXPECT_EQ(meta.errorCode.load(), Status::OsApiError().Underlying());
+}
+
+TEST_F(Cache2BufferTest, PinnedPeerObservesOriginalFailureAndRetryClearsIt)
+{
+    const auto block = MakeBlockId(92);
+    {
+        auto owner = buffer_.Get(block, 0);
+        auto peer = buffer_.Get(block, 0);
+        EXPECT_FALSE(peer.Owner());
+        owner.MarkFailed(Status::NotFound());
+        EXPECT_EQ(peer.GetState(), CtrlLayout::SlotMeta::State::Failed);
+        EXPECT_EQ(peer.FailureStatus(), Status::NotFound());
+    }
+    auto retry = buffer_.Get(block, 0);
+    EXPECT_TRUE(retry.Owner());
+    EXPECT_EQ(retry.GetState(), CtrlLayout::SlotMeta::State::Loading);
+    EXPECT_EQ(BufferTestAccess::Layout(buffer_).SlotMetaArr()[retry.SlotIndex()].errorCode.load(),
+              Status::OK().Underlying());
+    auto peer = buffer_.Get(block, 0);
+    retry.MarkFailed(Status::OsApiError());
+    EXPECT_EQ(peer.GetState(), CtrlLayout::SlotMeta::State::Failed);
+    EXPECT_EQ(peer.FailureStatus(), Status::OsApiError());
+}
+
+TEST(Cache2BufferFailureTest, ReusingFailedSlotClearsPreviousKeyError)
+{
+    auto bytes = BufferTestAccess::TotalSize(8, 4, 1);
+    auto* memory = ::operator new(bytes, std::align_val_t{64});
+    {
+        Buffer buffer;
+        BufferTestAccess::Init(buffer, memory, 1, 1, 8, 4);
+        {
+            auto old = buffer.Get(MakeBlockId(93), 0);
+            old.MarkFailed(Status::NotFound());
+        }
+        auto replacement = buffer.Get(MakeBlockId(94), 0);
+        EXPECT_TRUE(replacement.Owner());
+        auto& meta = BufferTestAccess::Layout(buffer).SlotMetaArr()[replacement.SlotIndex()];
+        EXPECT_EQ(meta.errorCode.load(), Status::OK().Underlying());
+        replacement.MarkFailed(Status::Timeout());
+        auto peer = buffer.Get(MakeBlockId(94), 0);
+        EXPECT_EQ(peer.FailureStatus(), Status::Timeout());
+    }
+    ::operator delete(memory, std::align_val_t{64});
 }
 
 TEST_F(Cache2BufferTest, MoveTransfersReferenceWithoutAbandoningOwner)
@@ -502,7 +582,7 @@ TEST(Cache2BufferPartitionTest, NonPreferredRankCanObserveFailedSlotWithoutTakin
     {
         auto failedOwner = rank1.Get(block, 0, false, 1);
         ASSERT_TRUE(failedOwner.Owner());
-        failedOwner.MarkFailed();
+        failedOwner.MarkFailed(Status::NotFound());
     }
 
     bool owner = true;
@@ -511,6 +591,12 @@ TEST(Cache2BufferPartitionTest, NonPreferredRankCanObserveFailedSlotWithoutTakin
     EXPECT_FALSE(owner);
     EXPECT_EQ(BufferTestAccess::Layout(rank0).SlotMetaArr()[slot].state.load(),
               CtrlLayout::SlotMeta::State::Failed);
+    EXPECT_FALSE(rank0.Exist(block, 0));
+    {
+        auto peer = rank0.Get(block, 0, false, 1);
+        EXPECT_FALSE(peer.Owner());
+        EXPECT_EQ(peer.FailureStatus(), Status::NotFound());
+    }
     BufferTestAccess::Release(rank0, slot);
     ::operator delete(memory, std::align_val_t{64});
 }

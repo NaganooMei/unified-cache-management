@@ -214,7 +214,7 @@ private:
                 if (s.Failure()) [[unlikely]] {
                     UC_ERROR("Failed({}) to copy shard for dump task({}).", s, task->id);
                     Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
-                    FailOwnedHandles(ctx);
+                    FailOwnedHandles(ctx, s);
                     return s;
                 }
                 ++copiedShards;
@@ -235,7 +235,7 @@ private:
             if (s.Failure()) [[unlikely]] {
                 UC_ERROR("Failed({}) to sync stream for dump task({}).", s, task->id);
                 Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_errors_total"), 1.0);
-                FailOwnedHandles(ctx);
+                FailOwnedHandles(ctx, s);
                 return s;
             }
             Metrics::UpdateStats(NAME_TO_METRIC_ID("cache_d2h_duration_ms"),
@@ -266,9 +266,9 @@ private:
                              (NowTime::Now() - startTp) * 1e3);
         return Status::OK();
     }
-    void FailOwnedHandles(DumpCtx& ctx)
+    void FailOwnedHandles(DumpCtx& ctx, const Status& status)
     {
-        for (auto& handle : ctx.bufferHandles) { handle.MarkFailed(); }
+        for (auto& handle : ctx.bufferHandles) { handle.MarkFailed(status); }
     }
     void BackendWaitStage()
     {

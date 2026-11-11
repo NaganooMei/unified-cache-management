@@ -106,13 +106,14 @@ public:
         // CPU access.
         void* HostMappedData() { return buf_->data_.HostMappedDeviceDataAt(slotIdx_); }
         CtrlLayout::SlotMeta::State GetState() const { return buf_->GetState(slotIdx_); }
+        Status FailureStatus() const { return buf_->FailureStatus(slotIdx_); }
         void MarkReady()
         {
             if (Owner()) { buf_->MarkReady(slotIdx_); }
         }
-        void MarkFailed()
+        void MarkFailed(const Status& status = Status::Error())
         {
-            if (Owner()) { buf_->MarkFailed(slotIdx_); }
+            if (Owner()) { buf_->MarkFailed(slotIdx_, status); }
         }
 
     private:
@@ -229,14 +230,16 @@ public:
         if (iNode != kInvalid) {
             bool owner = false;
             if (PinHit(layout, iNode, iBucket, blockId, offset, kPinSpinFast, owner, false)) {
+                // Failed metadata is not a cache hit; the manager must check the backend.
+                const bool found = GetState(iNode) != State::Failed;
                 Release(iNode);
-                return true;
+                return found;
             }
         }
         auto* lock = layout.LockOf(iBucket);
         lock->Lock();
         iNode = Lookup(layout, iBucket, blockId, offset);
-        auto found = iNode != kInvalid;
+        auto found = iNode != kInvalid && GetState(iNode) != State::Failed;
         if (found) { layout.SlotMetaArr()[iNode].accessed.store(1, std::memory_order_relaxed); }
         lock->Unlock();
         return found;
@@ -388,6 +391,7 @@ private:
             state = meta->state.load(std::memory_order_acquire);
             owner = takeOwnership && reference == 0 && state != State::Ready;
             if (owner && state == State::Failed) {
+                meta->errorCode.store(Status::OK().Underlying(), std::memory_order_relaxed);
                 meta->state.store(State::Loading, std::memory_order_release);
             }
             meta->accessed.store(1, std::memory_order_relaxed);
@@ -449,10 +453,12 @@ private:
                     if (!sameStripe) { oldLock->Unlock(); }
                 }
                 StoreKey(*meta, blockId, offset);
+                meta->errorCode.store(Status::OK().Underlying(), std::memory_order_relaxed);
                 meta->state.store(State::Loading, std::memory_order_relaxed);
                 MoveTo(layout, iBucket, iNode);
             } else {
                 StoreKey(*meta, blockId, offset);
+                meta->errorCode.store(Status::OK().Underlying(), std::memory_order_relaxed);
                 meta->state.store(State::Loading, std::memory_order_relaxed);
             }
             meta->accessed.store(1, std::memory_order_relaxed);
@@ -521,9 +527,19 @@ private:
         ctrl_.Layout().SlotMetaArr()[slotIdx].state.store(State::Ready, std::memory_order_release);
     }
 
-    void MarkFailed(size_t slotIdx)
+    Status FailureStatus(size_t slotIdx) const
     {
-        ctrl_.Layout().SlotMetaArr()[slotIdx].state.store(State::Failed, std::memory_order_release);
+        const auto code =
+            ctrl_.Layout().SlotMetaArr()[slotIdx].errorCode.load(std::memory_order_acquire);
+        return code == Status::OK().Underlying() ? Status::Error() : Status{code, {}};
+    }
+
+    void MarkFailed(size_t slotIdx, const Status& status = Status::Error())
+    {
+        auto& meta = ctrl_.Layout().SlotMetaArr()[slotIdx];
+        // Publish the error before Failed so peers observe the original backend status.
+        meta.errorCode.store(status.Underlying(), std::memory_order_relaxed);
+        meta.state.store(State::Failed, std::memory_order_release);
     }
 };
 

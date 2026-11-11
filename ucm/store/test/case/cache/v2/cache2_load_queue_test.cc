@@ -106,10 +106,11 @@ public:
             buf_->SetSlotStateByIdx(slotIdx_, SlotState::Ready);
             buf_->markedReady_.fetch_add(1, std::memory_order_relaxed);
         }
-        void MarkFailed()
+        UC::Status FailureStatus() const { return buf_->FailureStatusOf(slotIdx_); }
+        void MarkFailed(const UC::Status& status = UC::Status::Error())
         {
             if (!owner_) { return; }
-            buf_->SetSlotStateByIdx(slotIdx_, SlotState::Failed);
+            buf_->SetSlotFailureByIdx(slotIdx_, status);
             buf_->markedFailed_.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -136,6 +137,7 @@ public:
     {
         for (size_t i = 0; i < slotStates_.size(); ++i) {
             slotStates_[i].store(SlotState::Loading, std::memory_order_relaxed);
+            slotErrors_[i].store(UC::Status::OK().Underlying(), std::memory_order_relaxed);
             slotSegments_[i] = 0;
         }
     }
@@ -173,6 +175,16 @@ public:
     {
         slotStates_[slotIdx].store(state, std::memory_order_release);
     }
+    void SetSlotFailureByIdx(size_t slotIdx, const UC::Status& status)
+    {
+        slotErrors_[slotIdx].store(status.Underlying(), std::memory_order_relaxed);
+        SetSlotStateByIdx(slotIdx, SlotState::Failed);
+    }
+    UC::Status FailureStatusOf(size_t slotIdx) const
+    {
+        const auto code = slotErrors_[slotIdx].load(std::memory_order_acquire);
+        return code == UC::Status::OK().Underlying() ? UC::Status::Error() : UC::Status{code, {}};
+    }
     size_t LiveHandles() const { return liveHandles_.load(std::memory_order_relaxed); }
     size_t MarkedReady() const { return markedReady_.load(std::memory_order_relaxed); }
     size_t MarkedFailed() const { return markedFailed_.load(std::memory_order_relaxed); }
@@ -196,6 +208,7 @@ private:
     std::map<std::pair<UC::Detail::BlockId, size_t>, bool> hostAccessibleOverrides_{};
     bool defaultHostAccessible_{true};
     std::array<std::atomic<SlotState>, 64> slotStates_{};
+    std::array<std::atomic<int32_t>, 64> slotErrors_{};
     std::array<size_t, 64> slotSegments_{};
     size_t nextSlotIdx_{0};
     std::atomic<size_t> liveHandles_{0};
@@ -599,12 +612,14 @@ TEST_F(UCCache2LoadQueueTest, LoadFailsWhenBackendSubmitFails)
 {
     const auto block = TypesHelper::MakeBlockIdRandomly();
     EXPECT_CALL(backend_, Load).WillOnce(testing::Invoke([] {
-        return UC::Expected<UC::Detail::TaskHandle>(UC::Status::Error("backend failure"));
+        return UC::Expected<UC::Detail::TaskHandle>(UC::Status::NotFound());
     }));
     auto [task, waiter] = SubmitOne(MakeDesc(block));
     ASSERT_TRUE(waiter->WaitFor(kWaitMs));
     EXPECT_TRUE(failureSet_.Contains(task->id));
     EXPECT_EQ(buffer_.MarkedFailed(), 1);
+    EXPECT_EQ(task->FailureStatus(), UC::Status::NotFound());
+    EXPECT_EQ(buffer_.Get(block, 0).FailureStatus(), UC::Status::NotFound());
     EXPECT_EQ(FakeStream::scatters.size(), 0);
     auto stats = UC::Metrics::GetAllStatsAndClear();
     const auto& counters = std::get<0>(stats);
@@ -620,17 +635,35 @@ TEST_F(UCCache2LoadQueueTest, LoadFailsWhenBackendWaitFails)
     }));
     EXPECT_CALL(backend_, Wait).WillOnce(testing::Invoke([this](UC::Detail::TaskHandle) {
         backendWaits_.fetch_add(1, std::memory_order_relaxed);
-        return UC::Status::Error("backend wait failure");
+        return UC::Status::OsApiError();
     }));
     auto [task, waiter] = SubmitOne(MakeDesc(block));
     ASSERT_TRUE(waiter->WaitFor(kWaitMs));
     EXPECT_TRUE(failureSet_.Contains(task->id));
     EXPECT_EQ(buffer_.MarkedFailed(), 1);
+    EXPECT_EQ(task->FailureStatus(), UC::Status::OsApiError());
+    EXPECT_EQ(buffer_.Get(block, 0).FailureStatus(), UC::Status::OsApiError());
     EXPECT_EQ(FakeStream::scatters.size(), 0);
     auto stats = UC::Metrics::GetAllStatsAndClear();
     const auto& counters = std::get<0>(stats);
     EXPECT_EQ(counters.at("cache_backend_load_wait_errors_total"), 1);
     EXPECT_EQ(counters.at("cache_load_failed_shards_total"), 1);
+}
+
+TEST_F(UCCache2LoadQueueTest, PeerLoadPreservesOriginalSlotFailure)
+{
+    EXPECT_CALL(backend_, Load).Times(0);
+    for (const auto& status : {UC::Status::NotFound(), UC::Status::OsApiError(),
+                               UC::Status::Timeout(), UC::Status::StoreUnhealthy()}) {
+        const auto block = TypesHelper::MakeBlockIdRandomly();
+        const auto slot = buffer_.SetExisting(block);
+        buffer_.SetSlotFailureByIdx(slot, status);
+        auto [task, waiter] = SubmitOne(MakeDesc(block));
+        ASSERT_TRUE(waiter->WaitFor(kWaitMs));
+        EXPECT_TRUE(failureSet_.Contains(task->id));
+        EXPECT_EQ(task->FailureStatus(), status);
+    }
+    EXPECT_TRUE(FakeStream::scatters.empty());
 }
 
 TEST_F(UCCache2LoadQueueTest, LoadFailsWhenScatterFails)

@@ -109,7 +109,7 @@ public:
             state_ = SlotState::Ready;
             buf_->markedReady_.fetch_add(1, std::memory_order_relaxed);
         }
-        void MarkFailed()
+        void MarkFailed(const UC::Status& = UC::Status::Error())
         {
             if (!owner_) { return; }
             state_ = SlotState::Failed;
